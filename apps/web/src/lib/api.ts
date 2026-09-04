@@ -1,9 +1,40 @@
-const API_BASE = "http://localhost:4000/api";
+const API_BASE = "/api";
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-function getCsrfToken(): string | null {
+function getCsrfTokenFromCookie(): string | null {
   if (typeof document === "undefined") return null;
   const match = document.cookie.match(/(?:^|;\s*)xlr_csrf=([^;]*)/);
   return match && match[1] ? decodeURIComponent(match[1]) : null;
+}
+
+let csrfRequest: Promise<string> | null = null;
+
+async function ensureCsrfToken(): Promise<string> {
+  const existing = getCsrfTokenFromCookie();
+  if (existing) return existing;
+
+  if (!csrfRequest) {
+    csrfRequest = fetch(`${API_BASE}/auth/csrf`, {
+      method: "GET",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          throw new Error(`Unable to acquire CSRF token (${res.status})`);
+        }
+        const payload = (await res.json()) as { csrfToken?: string };
+        if (!payload.csrfToken) {
+          throw new Error("CSRF endpoint returned no token");
+        }
+        return payload.csrfToken;
+      })
+      .finally(() => {
+        csrfRequest = null;
+      });
+  }
+
+  return csrfRequest;
 }
 
 interface ApiOptions {
@@ -17,6 +48,7 @@ async function request<T = unknown>(
   opts: ApiOptions = {},
 ): Promise<{ ok: boolean; status: number; data: T }> {
   const { method = "GET", body, headers: extraHeaders } = opts;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
 
   const headers: Record<string, string> = {
     ...extraHeaders,
@@ -26,9 +58,8 @@ async function request<T = unknown>(
     headers["Content-Type"] = "application/json";
   }
 
-  const csrf = getCsrfToken();
-  if (csrf) {
-    headers["X-CSRF-Token"] = csrf;
+  if (UNSAFE_METHODS.has(method.toUpperCase())) {
+    headers["X-CSRF-Token"] = await ensureCsrfToken();
   }
 
   const init: RequestInit = {
@@ -40,7 +71,7 @@ async function request<T = unknown>(
     init.body = JSON.stringify(body);
   }
 
-  const res = await fetch(`${API_BASE}${path}`, init);
+  const res = await fetch(`${API_BASE}${normalizedPath}`, init);
 
   if (res.status === 401 && typeof window !== "undefined") {
     window.location.href = "/signin";
