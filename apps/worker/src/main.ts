@@ -4,14 +4,21 @@ import { closeConnections, createWorker, QUEUE_NAMES } from "@xlrrank/queue";
 
 const logger = createChildLogger("worker");
 
+class UnimplementedJobProcessorError extends Error {
+  constructor(queue: string, jobName: string) {
+    super(`No production processor is registered for ${queue}:${jobName}`);
+    this.name = "UnimplementedJobProcessorError";
+  }
+}
+
 async function start() {
   const env = getEnv();
 
   createWorker(
     QUEUE_NAMES.jobs,
     async (job) => {
-      logger.info({ jobId: job.id, type: job.name, data: job.data }, "Processing job");
-      return { processed: true };
+      logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented job");
+      throw new UnimplementedJobProcessorError(QUEUE_NAMES.jobs, job.name);
     },
     env.WORKER_CONCURRENCY,
   );
@@ -19,8 +26,8 @@ async function start() {
   createWorker(
     QUEUE_NAMES.ingestion,
     async (job) => {
-      logger.info({ jobId: job.id, type: job.name }, "Processing ingestion job");
-      return { ingested: true };
+      logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented ingestion job");
+      throw new UnimplementedJobProcessorError(QUEUE_NAMES.ingestion, job.name);
     },
     env.WORKER_CONCURRENCY,
   );
@@ -28,13 +35,16 @@ async function start() {
   createWorker(
     QUEUE_NAMES.intelligence,
     async (job) => {
-      logger.info({ jobId: job.id, type: job.name }, "Processing intelligence job");
-      return { analyzed: true };
+      logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented intelligence job");
+      throw new UnimplementedJobProcessorError(QUEUE_NAMES.intelligence, job.name);
     },
     env.WORKER_CONCURRENCY,
   );
 
-  logger.info(`Worker started with concurrency ${env.WORKER_CONCURRENCY}`);
+  logger.warn(
+    { concurrency: env.WORKER_CONCURRENCY },
+    "Worker started in fail-closed mode: production job processors are not implemented",
+  );
 }
 
 start().catch((err) => {
