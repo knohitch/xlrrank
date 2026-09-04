@@ -1,0 +1,24 @@
+{
+  "name": "@xlrrank/shared",
+  "version": "0.0.0",
+  "private": true,
+  "description": "XLRrank shared contracts: constitution types and cross-cutting domain contracts.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

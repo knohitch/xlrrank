@@ -1,0 +1,26 @@
+{
+  "name": "@xlrrank/extension",
+  "version": "0.0.0",
+  "private": true,
+  "description": "XLRrank Manifest V3 browser extension (Chrome/Edge compatible).",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite build --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts,.tsx",
+    "test": "node --test test/",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@xlrrank/config": "workspace:*",
+    "@xlrrank/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.3",
+    "vite": "^6.0.7",
+    "vite-plugin-static-copy": "^2.2.0"
+  }
+}

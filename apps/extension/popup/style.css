@@ -1,0 +1,122 @@
+:root {
+  --bg: #11151f;
+  --bg-card: #141a26;
+  --border: #232b3b;
+  --text: #e6e9f0;
+  --muted: #8b93a7;
+  --accent: #5b8def;
+  --green: #34c98f;
+  --red: #e0526a;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 360px;
+  min-height: 300px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+}
+
+.popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.brand span {
+  color: var(--accent);
+}
+
+.badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+
+.badge-muted { background: #252d3f; color: var(--muted); }
+.badge-ok { background: rgba(52, 201, 143, 0.15); color: var(--green); }
+.badge-err { background: rgba(224, 82, 106, 0.15); color: var(--red); }
+
+.popup-body {
+  padding: 16px;
+  min-height: 200px;
+}
+
+.muted { color: var(--muted); font-size: 13px; }
+code { background: var(--bg-card); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+
+.profile-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 12px;
+}
+
+.profile-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.profile-bio {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.profile-stats {
+  margin-top: 8px;
+}
+
+.actions-grid {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.action-btn {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.action-btn:hover { border-color: var(--accent); }
+.action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.popup-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.footer-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 11px;
+}

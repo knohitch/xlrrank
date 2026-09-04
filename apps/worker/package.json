@@ -1,0 +1,25 @@
+{
+  "name": "@xlrrank/worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "XLRrank background job workers.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@xlrrank/config": "workspace:*",
+    "@xlrrank/database": "workspace:*",
+    "@xlrrank/observability": "workspace:*",
+    "@xlrrank/queue": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  }
+}

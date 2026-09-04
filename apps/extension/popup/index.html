@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>XLRrank</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="popup-header">
+        <span class="brand">XLR<span>rank</span></span>
+        <span id="status-badge" class="badge badge-muted">checking…</span>
+      </header>
+      <main class="popup-body">
+        <div id="content">
+          <p class="muted">XLRrank browser extension is loading.</p>
+        </div>
+        <div id="profile-section" style="display:none"></div>
+        <div id="actions-section" style="display:none"></div>
+      </main>
+      <footer class="popup-footer">
+        <span>v0.1.0</span>
+        <a href="http://localhost:3000" target="_blank" class="footer-link">Open XLRrank</a>
+      </footer>
+    </div>
+    <script type="module" src="./popup.ts"></script>
+  </body>
+</html>
