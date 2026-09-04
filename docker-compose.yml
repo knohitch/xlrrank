@@ -1,114 +1,99 @@
-name: xlrrank
-
 services:
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: xlrrank-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: xlrrank
-      POSTGRES_PASSWORD: xlrrank
-      POSTGRES_DB: xlrrank
-      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-xlrrank}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xlrrank}
+      POSTGRES_DB: ${POSTGRES_DB:-xlrrank}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U xlrrank"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-xlrrank} -d ${POSTGRES_DB:-xlrrank}"]
       interval: 5s
       timeout: 5s
       retries: 10
-    networks:
-      - xlrrank-net
 
   redis:
     image: redis:7-alpine
-    container_name: xlrrank-redis
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
-    volumes:
-      - redis_data:/data
-    networks:
-      - xlrrank-net
 
   api:
     build:
       context: .
       dockerfile: infra/Dockerfile
       target: api
-    container_name: xlrrank-api
+    restart: unless-stopped
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgres://xlrrank:xlrrank@postgres:5432/xlrrank
+      DATABASE_URL: postgres://${POSTGRES_USER:-xlrrank}:${POSTGRES_PASSWORD:-xlrrank}@postgres:5432/${POSTGRES_DB:-xlrrank}
       REDIS_URL: redis://redis:6379
       QUEUE_URL: redis://redis:6379
-      API_PUBLIC_URL: http://localhost:4000
-      NEXT_PUBLIC_APP_URL: http://localhost:3000
-      STORAGE_DRIVER: filesystem
-      STORAGE_LOCAL_PATH: /data/storage
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:4000}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      STORAGE_DRIVER: ${STORAGE_DRIVER:-filesystem}
+      STORAGE_LOCAL_PATH: /app/storage
+      SESSION_SIGNING_SECRET: ${SESSION_SIGNING_SECRET:?SESSION_SIGNING_SECRET must be set to at least 32 characters}
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:?ENCRYPTION_MASTER_KEY must be set to at least 32 characters}
+      EMAIL_TRANSPORT: ${EMAIL_TRANSPORT:-console}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
     ports:
-      - "4000:4000"
+      - "${API_PORT:-4000}:4000"
+    volumes:
+      - storage_data:/app/storage
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - app_data:/data
-    networks:
-      - xlrrank-net
 
   worker:
     build:
       context: .
       dockerfile: infra/Dockerfile
       target: worker
-    container_name: xlrrank-worker
+    restart: unless-stopped
     environment:
       NODE_ENV: production
-      DATABASE_URL: postgres://xlrrank:xlrrank@postgres:5432/xlrrank
+      DATABASE_URL: postgres://${POSTGRES_USER:-xlrrank}:${POSTGRES_PASSWORD:-xlrrank}@postgres:5432/${POSTGRES_DB:-xlrrank}
       REDIS_URL: redis://redis:6379
       QUEUE_URL: redis://redis:6379
-      STORAGE_DRIVER: filesystem
-      STORAGE_LOCAL_PATH: /data/storage
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      SESSION_SIGNING_SECRET: ${SESSION_SIGNING_SECRET:?SESSION_SIGNING_SECRET must be set to at least 32 characters}
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:?ENCRYPTION_MASTER_KEY must be set to at least 32 characters}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - app_data:/data
-    networks:
-      - xlrrank-net
 
   web:
     build:
       context: .
       dockerfile: infra/Dockerfile
       target: web
-    container_name: xlrrank-web
+    restart: unless-stopped
     environment:
       NODE_ENV: production
-      NEXT_PUBLIC_APP_URL: http://localhost:3000
-      API_PUBLIC_URL: http://localhost:4000
-      DATABASE_URL: postgres://xlrrank:xlrrank@postgres:5432/xlrrank
+      API_PUBLIC_URL: ${API_INTERNAL_URL:-http://api:4000}
     ports:
-      - "3000:3000"
+      - "${WEB_PORT:-3000}:3000"
     depends_on:
       - api
-    networks:
-      - xlrrank-net
 
 volumes:
   postgres_data:
   redis_data:
-  app_data:
-
-networks:
-  xlrrank-net:
-    driver: bridge
+  storage_data:
