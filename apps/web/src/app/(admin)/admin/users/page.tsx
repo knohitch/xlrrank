@@ -7,24 +7,39 @@ interface User {
   id: string;
   email: string;
   displayName: string;
-  role: string;
+  status: string;
+  roles: string[];
   emailVerified: boolean;
   createdAt: string;
+  lastLoginAt: string | null;
+}
+
+interface UsersResponse {
+  items: User[];
+  total: number;
+  page: number;
+  pageSize: number;
 }
 
 export default function AdminUsersPage() {
   const [users, setUsers] = useState<User[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   const loadUsers = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
-      const res = await api.get<User[]>('/admin/users');
-      if (res.ok && Array.isArray(res.data)) {
-        setUsers(res.data);
+      const res = await api.get<UsersResponse>('/admin/users?page=1&pageSize=100');
+      if (res.ok && Array.isArray(res.data?.items)) {
+        setUsers(res.data.items);
+        setTotal(res.data.total ?? res.data.items.length);
+      } else {
+        setError('Unable to load users.');
       }
     } catch {
-      // Failed to load
+      setError('Unable to load users.');
     } finally {
       setLoading(false);
     }
@@ -38,8 +53,10 @@ export default function AdminUsersPage() {
     <div className="shell-page">
       <div className="page-heading">
         <h1>User Management</h1>
-        <p className="muted">View and manage registered users.</p>
+        <p className="muted">{total} registered user{total === 1 ? '' : 's'}.</p>
       </div>
+
+      {error && <div className="alert alert-error">{error}</div>}
 
       {loading ? (
         <div className="empty-state"><p>Loading users…</p></div>
@@ -55,7 +72,8 @@ export default function AdminUsersPage() {
               <tr>
                 <th>Email</th>
                 <th>Display Name</th>
-                <th>Role</th>
+                <th>Roles</th>
+                <th>Status</th>
                 <th>Verified</th>
                 <th>Joined</th>
               </tr>
@@ -65,11 +83,8 @@ export default function AdminUsersPage() {
                 <tr key={u.id}>
                   <td>{u.email}</td>
                   <td>{u.displayName || '—'}</td>
-                  <td>
-                    <span className={`badge ${u.role === 'admin' ? 'badge-accent' : 'badge-muted'}`}>
-                      {u.role}
-                    </span>
-                  </td>
+                  <td>{u.roles.join(', ') || '—'}</td>
+                  <td><span className="badge badge-muted">{u.status}</span></td>
                   <td>
                     <span className={`badge ${u.emailVerified ? 'badge-green' : 'badge-red'}`}>
                       {u.emailVerified ? 'Yes' : 'No'}
