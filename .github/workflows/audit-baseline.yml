@@ -189,11 +189,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build API image
-        run: docker build --target api -t xlrrank-api:test .
+        run: docker build -f infra/Dockerfile --target api -t xlrrank-api:test .
       - name: Build web image
-        run: docker build --target web -t xlrrank-web:test .
+        run: docker build -f infra/Dockerfile --target web -t xlrrank-web:test .
       - name: Build worker image
-        run: docker build --target worker -t xlrrank-worker:test .
+        run: docker build -f infra/Dockerfile --target worker -t xlrrank-worker:test .
 
   security-audit-blocking:
     name: Security Gate (High/Critical)
