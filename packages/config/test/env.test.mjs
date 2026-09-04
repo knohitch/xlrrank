@@ -23,3 +23,30 @@ test("env schema coerces numeric strings", async () => {
   assert.equal(parsed.API_PORT, 5000);
   assert.equal(parsed.WORKER_CONCURRENCY, 3);
 });
+
+test("production requires signing and encryption secrets", async () => {
+  const { envSchema } = await import("../dist/env.js");
+  const missing = envSchema.safeParse({ NODE_ENV: "production" });
+  assert.equal(missing.success, false);
+
+  const valid = envSchema.safeParse({
+    NODE_ENV: "production",
+    SESSION_SIGNING_SECRET: "s".repeat(32),
+    ENCRYPTION_MASTER_KEY: "e".repeat(32),
+  });
+  assert.equal(valid.success, true);
+});
+
+test("smtp transport requires delivery configuration", async () => {
+  const { envSchema } = await import("../dist/env.js");
+  const missing = envSchema.safeParse({ EMAIL_TRANSPORT: "smtp" });
+  assert.equal(missing.success, false);
+
+  const valid = envSchema.safeParse({
+    EMAIL_TRANSPORT: "smtp",
+    SMTP_HOST: "smtp.example.test",
+    SMTP_PORT: "587",
+    SMTP_FROM: "no-reply@example.test",
+  });
+  assert.equal(valid.success, true);
+});
