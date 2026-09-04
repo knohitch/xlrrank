@@ -1,18 +1,126 @@
-name: XLRrank Independent Audit Baseline
+name: Audit Baseline
 
 on:
   push:
-    branches:
-      - audit/production-verification-2026-09-04
+    branches: [master, audit/**]
   pull_request:
-    branches:
-      - master
+    branches: [master]
   workflow_dispatch:
 
+env:
+  NODE_ENV: test
+  DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_audit
+  REDIS_URL: redis://localhost:6379
+  QUEUE_URL: redis://localhost:6379
+  NEXT_PUBLIC_APP_URL: http://localhost:3000
+  API_PUBLIC_URL: http://localhost:4000
+  CORS_ORIGIN: http://localhost:3000
+  STORAGE_DRIVER: filesystem
+  STORAGE_LOCAL_PATH: ./storage-audit
+  ENCRYPTION_MASTER_KEY: audit-only-master-key-32-bytes-minimum-value-for-ci
+  SESSION_SIGNING_SECRET: audit-only-session-signing-secret-value-for-ci
+  SESSION_ENCRYPTION_SECRET: audit-only-session-encryption-secret-value-for-ci
+  PASSWORD_RESET_SECRET: audit-only-password-reset-secret-value-for-ci
+  EMAIL_TRANSPORT: console
+  MIGRATION_INTEGRATION_TEST: "1"
+
 jobs:
-  baseline:
+  install:
+    name: Install
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --offline
+
+  constitution:
+    name: Constitution Guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint:constitution
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint --concurrency=2
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck --concurrency=2
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @xlrrank/config test
+      - run: pnpm --filter @xlrrank/shared test
+      - run: pnpm --filter @xlrrank/observability test
+      - run: pnpm --filter @xlrrank/storage test
+      - run: pnpm --filter @xlrrank/queue test
+      - run: pnpm --filter @xlrrank/database test
+      - run: pnpm --filter @xlrrank/extension test
+      - run: node --test scripts/security.test.mjs
+
+  migration-integration:
+    name: PostgreSQL Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: install
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -27,95 +135,68 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
-
-    env:
-      NODE_ENV: test
-      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_audit
-      REDIS_URL: redis://localhost:6379
-      QUEUE_URL: redis://localhost:6379
-      NEXT_PUBLIC_APP_URL: http://localhost:3000
-      API_PUBLIC_URL: http://localhost:4000
-      CORS_ORIGIN: http://localhost:3000
-      STORAGE_DRIVER: filesystem
-      STORAGE_LOCAL_PATH: ./storage-audit
-      ENCRYPTION_MASTER_KEY: audit-only-master-key-32-bytes-minimum-value
-      SESSION_SIGNING_SECRET: audit-only-session-signing-secret-value
-      SESSION_ENCRYPTION_SECRET: audit-only-session-encryption-secret-value
-      PASSWORD_RESET_SECRET: audit-only-password-reset-secret-value
-      EMAIL_TRANSPORT: console
-      MIGRATION_INTEGRATION_TEST: "1"
-
     steps:
-      - name: Checkout audited branch
-        uses: actions/checkout@v4
-
-      - name: Upload source snapshot for independent inspection
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: xlrrank-audit-source
-          include-hidden-files: true
-          retention-days: 1
-          path: |
-            .
-            !.git/**
-            !node_modules/**
-            !**/node_modules/**
-            !**/.next/**
-            !**/dist/**
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
         with:
           version: 11.23.0
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: 22
           cache: pnpm
-
-      - name: Clean install from lockfile
-        run: pnpm install --frozen-lockfile
-
-      - name: Lockfile/package integrity
-        run: pnpm install --frozen-lockfile --offline
-
-      - name: Constitution guard
-        run: pnpm lint:constitution
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Existing and audit tests
-        run: pnpm test
-
-      - name: Re-apply migrations to verify idempotence
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run migrations
         run: pnpm db:migrate
+      - name: Re-apply migrations (idempotence)
+        run: pnpm db:migrate
+      - name: Verify pgvector
+        run: PGPASSWORD=xlrrank psql -h localhost -U xlrrank -d xlrrank_audit -v ON_ERROR_STOP=1 -c "SELECT extname FROM pg_extension WHERE extname='vector';"
+      - name: Verify key tables
+        run: PGPASSWORD=xlrrank psql -h localhost -U xlrrank -d xlrrank_audit -v ON_ERROR_STOP=1 -c "SELECT count(*) AS table_count FROM information_schema.tables WHERE table_schema='public';"
+      - name: Run migration integration test
+        run: node --test packages/database/test/migration-integration.test.mjs
 
-      - name: Verify migrated schema exists
-        run: |
-          PGPASSWORD=xlrrank psql -h localhost -U xlrrank -d xlrrank_audit -v ON_ERROR_STOP=1 -c "SELECT count(*) AS table_count FROM information_schema.tables WHERE table_schema='public';"
-          PGPASSWORD=xlrrank psql -h localhost -U xlrrank -d xlrrank_audit -v ON_ERROR_STOP=1 -c "SELECT extname FROM pg_extension WHERE extname='vector';"
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [lint, typecheck, tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
 
-      - name: Production build
-        run: pnpm build
+  docker:
+    name: Docker Compose Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
 
-      - name: Docker Compose configuration validation
-        run: docker compose config --quiet
-
-      - name: Production dependency audit
+  security-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --prod
         continue-on-error: true
-        run: pnpm audit --prod

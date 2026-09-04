@@ -7,6 +7,10 @@ interface UserProfile {
   id: string;
   email: string;
   displayName: string;
+  avatarUrl: string | null;
+  status: string;
+  emailVerified: boolean;
+  roles: string[];
 }
 
 export default function SettingsPage() {
@@ -17,10 +21,10 @@ export default function SettingsPage() {
 
   useEffect(() => {
     async function load() {
-      const res = await api.get<UserProfile>('/auth/me');
-      if (res.ok && res.data) {
-        setUser(res.data);
-        setDisplayName(res.data.displayName || '');
+      const res = await api.get<{ user: UserProfile }>('/users/me');
+      if (res.ok && res.data?.user) {
+        setUser(res.data.user);
+        setDisplayName(res.data.user.displayName || '');
       }
     }
     load();
@@ -30,8 +34,9 @@ export default function SettingsPage() {
     setSaving(true);
     setMessage('');
     try {
-      const res = await api.patch('/auth/me', { displayName });
-      if (res.ok) {
+      const res = await api.patch<{ user: UserProfile }>('/users/me', { displayName });
+      if (res.ok && res.data?.user) {
+        setUser(res.data.user);
         setMessage('Settings saved.');
       } else {
         setMessage('Failed to save settings.');
