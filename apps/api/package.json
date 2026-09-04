@@ -14,9 +14,9 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@nestjs/common": "^10.4.15",
-    "@nestjs/core": "^10.4.15",
-    "@nestjs/platform-express": "^10.4.15",
+    "@nestjs/common": "^11.2.3",
+    "@nestjs/core": "^11.2.3",
+    "@nestjs/platform-express": "^11.2.3",
     "@xlrrank/auth": "workspace:*",
     "@xlrrank/config": "workspace:*",
     "@xlrrank/database": "workspace:*",
@@ -26,7 +26,7 @@
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "dotenv": "^16.6.1",
-    "drizzle-orm": "^0.38.3",
+    "drizzle-orm": "^0.45.2",
     "helmet": "^8.3.0",
     "nodemailer": "^9.1.1",
     "reflect-metadata": "^0.2.2",
