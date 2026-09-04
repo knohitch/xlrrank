@@ -92,8 +92,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck --concurrency=2
 
-  tests:
-    name: Tests
+  build:
+    name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: install
@@ -107,14 +107,29 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @xlrrank/config test
-      - run: pnpm --filter @xlrrank/shared test
-      - run: pnpm --filter @xlrrank/observability test
-      - run: pnpm --filter @xlrrank/storage test
-      - run: pnpm --filter @xlrrank/queue test
-      - run: pnpm --filter @xlrrank/database test
-      - run: pnpm --filter @xlrrank/extension test
-      - run: node --test scripts/security.test.mjs
+      - run: pnpm build
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run workspace tests
+        run: pnpm test --concurrency=2
+      - name: Run security tests
+        if: always()
+        run: node --test scripts/security.test.mjs
 
   migration-integration:
     name: PostgreSQL Migrations
@@ -157,28 +172,11 @@ jobs:
       - name: Run migration integration test
         run: node --test packages/database/test/migration-integration.test.mjs
 
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    needs: [lint, typecheck, tests]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.23.0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-
   docker:
     name: Docker Compose Validation
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: build
+    needs: install
     steps:
       - uses: actions/checkout@v4
       - run: docker compose config --quiet
@@ -198,5 +196,6 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --prod
+      - name: Run dependency audit
+        run: pnpm audit --prod
         continue-on-error: true
