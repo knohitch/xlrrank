@@ -119,6 +119,22 @@ export class SessionService {
       .where(and(eq(sessions.id, sessionId), isNull(sessions.revokedAt)));
   }
 
+  async revokeForUser(sessionId: string, userId: string): Promise<boolean> {
+    const db = getDb();
+    const updated = await db
+      .update(sessions)
+      .set({ revokedAt: new Date() })
+      .where(
+        and(
+          eq(sessions.id, sessionId),
+          eq(sessions.userId, userId),
+          isNull(sessions.revokedAt),
+        ),
+      )
+      .returning({ id: sessions.id });
+    return updated.length > 0;
+  }
+
   async revokeAllForUser(userId: string): Promise<void> {
     const db = getDb();
     await db
