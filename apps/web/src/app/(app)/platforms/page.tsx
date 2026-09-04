@@ -9,6 +9,7 @@ interface PlatformInfo {
   displayName: string;
   enabled: boolean;
   connected: boolean;
+  demo?: boolean;
   status: string;
   lastSyncAt: string | null;
   capabilities: Record<string, string>;
@@ -17,12 +18,19 @@ interface PlatformInfo {
 export default function PlatformsPage() {
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     api
-      .get<{ platforms: PlatformInfo[] }>("/api/platforms")
-      .then((res) => setPlatforms(res.data.platforms))
-      .catch(() => {})
+      .get<{ platforms: PlatformInfo[] }>("/platforms")
+      .then((res) => {
+        if (!res.ok) {
+          setError("Unable to load platform configuration.");
+          return;
+        }
+        setPlatforms(res.data.platforms ?? []);
+      })
+      .catch(() => setError("Unable to reach the API."))
       .finally(() => setLoading(false));
   }, []);
 
@@ -30,8 +38,10 @@ export default function PlatformsPage() {
     <div className="shell-page">
       <div className="page-heading">
         <h1>Social Platforms</h1>
-        <p className="muted">Connect supported platforms to begin synchronization.</p>
+        <p className="muted">A platform is marked connected only after its adapter verifies live authentication.</p>
       </div>
+
+      {error && <div className="alert alert-error">{error}</div>}
 
       {loading ? (
         <div className="empty-state">
@@ -51,11 +61,11 @@ export default function PlatformsPage() {
                 <span
                   className={`badge ${p.connected ? "badge-success" : "badge-warning"}`}
                 >
-                  {p.connected ? p.status : "Disconnected"}
+                  {p.demo ? "DEMO" : p.connected ? p.status : p.status}
                 </span>
               </div>
               <p className="muted">
-                {Object.keys(p.capabilities).length} capabilities available
+                {Object.entries(p.capabilities).map(([name, state]) => `${name}: ${state}`).join(" · ") || "No connector capabilities declared"}
               </p>
               {p.lastSyncAt && (
                 <p className="muted">
@@ -63,15 +73,9 @@ export default function PlatformsPage() {
                 </p>
               )}
               <div className="card-actions">
-                {p.connected ? (
-                  <button className="btn btn-secondary btn-sm" disabled>
-                    Disconnect
-                  </button>
-                ) : (
-                  <button className="btn btn-primary btn-sm" disabled>
-                    Connect
-                  </button>
-                )}
+                <button className="btn btn-secondary btn-sm" disabled>
+                  {p.connected ? "Disconnect unavailable in current UI" : "Live connection unavailable in current UI"}
+                </button>
               </div>
             </div>
           ))}
