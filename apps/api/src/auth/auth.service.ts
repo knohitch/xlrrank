@@ -239,7 +239,7 @@ export class AuthService {
   }
 
   async revokeSession(sessionId: string, userId: string): Promise<void> {
-    await this.sessions.revoke(sessionId);
+    await this.sessions.revokeForUser(sessionId, userId);
     await this.audit.record({
       actorUserId: userId,
       action: "auth.revoke_session",
