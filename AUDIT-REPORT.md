@@ -176,3 +176,44 @@ The verification pipeline is now trustworthy enough to begin systematic producti
 14. **Demo isolation** — Complete demo mode
 15. **Full E2E** — Complete user journey
 16. **Deployment hardening** — Production config
+
+---
+
+# Sprint 02 — Foundation & Security Hardening
+
+## Dependency Baseline
+
+| Package | Before | After | Advisory | Status |
+|---------|-------:|------:|----------|--------|
+| drizzle-orm | 0.38.4 | latest | GHSA-gpj5-g38j-94v9 | RESOLVED |
+| multer | 2.0.2 | >=2.2.0 (via NestJS 11) | 4x HIGH + 1x MODERATE | RESOLVED |
+| @nestjs/core | 10.4.22 | 11.x | GHSA-36xv-jgw5-4q75 | RESOLVED |
+| postcss | 8.4.31 | >=8.5.23 (override) | 2x HIGH + 2x MODERATE | RESOLVED |
+| file-type | 20.4.1 | >=21.3.2 (via NestJS 11) | 2x MODERATE | RESOLVED |
+| qs | 6.14.2 | >=6.16.0 (override) | 3x MODERATE | RESOLVED |
+| body-parser | 1.20.4 | >=1.20.6 (via NestJS 11) | 1x LOW | RESOLVED |
+| next | 15.5.25 | 15.5.25 | — | UNCHANGED |
+
+## Audit Result
+
+```
+audit before: 17 vulnerabilities (7 HIGH, 9 MODERATE, 1 LOW)
+audit after:  0 vulnerabilities (0 critical, 0 high, 0 moderate, 0 low)
+```
+
+## Security Hardening
+
+- **Request body limits**: NestJS 11 default limits apply; configurable via env
+- **CSRF**: Double-submit cookie pattern enforced on unsafe methods
+- **CORS**: Configurable origin via CORS_ORIGIN env
+- **Cookies**: HttpOnly, Secure (production), SameSite policy
+- **Headers**: Helmet middleware with CORP/COOP policies
+- **Logging**: Pino with comprehensive secret redaction (passwords, tokens, API keys, credentials, cookies)
+- **Secret handling**: AES-256-GCM encryption for stored credentials, never returned in API responses
+
+## CI Changes
+
+- Security gate now **blocking** for HIGH/CRITICAL: `pnpm audit --prod --audit-level=high`
+- Full audit remains informational: `pnpm audit --prod` (continue-on-error)
+- Docker image build verification added: API, web, worker images built in CI
+
