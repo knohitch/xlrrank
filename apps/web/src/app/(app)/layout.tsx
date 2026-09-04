@@ -5,11 +5,16 @@ import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 
-interface MeResponse {
+interface PublicUser {
   id: string;
   email: string;
   displayName: string;
-  role: string;
+  roles: string[];
+  status: string;
+}
+
+interface MeResponse {
+  user: PublicUser;
 }
 
 const NAV_ITEMS = [
@@ -33,7 +38,7 @@ const NAV_ITEMS = [
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const [user, setUser] = useState<MeResponse | null>(null);
+  const [user, setUser] = useState<PublicUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
@@ -41,10 +46,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     let cancelled = false;
     async function checkAuth() {
       try {
-        const res = await api.get<MeResponse>('/auth/me');
+        const res = await api.get<MeResponse>('/users/me');
         if (cancelled) return;
-        if (res.ok && res.data) {
-          setUser(res.data);
+        if (res.ok && res.data?.user) {
+          setUser(res.data.user);
         } else {
           router.replace('/signin');
         }
