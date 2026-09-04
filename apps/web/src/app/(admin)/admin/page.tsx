@@ -6,20 +6,21 @@ import { api } from '@/lib/api';
 interface AdminStats {
   totalUsers: number;
   activeUsers: number;
-  totalPlatforms: number;
-  systemHealth: string;
+  generatedAt: string;
 }
 
 export default function AdminDashboardPage() {
   const [stats, setStats] = useState<AdminStats | null>(null);
+  const [error, setError] = useState('');
 
   useEffect(() => {
     async function load() {
       try {
-        const res = await api.get<AdminStats>('/admin/stats');
+        const res = await api.get<AdminStats>('/admin/dashboard');
         if (res.ok) setStats(res.data);
+        else setError('Admin dashboard data is unavailable.');
       } catch {
-        // Stats unavailable
+        setError('Admin dashboard data is unavailable.');
       }
     }
     load();
@@ -29,8 +30,10 @@ export default function AdminDashboardPage() {
     <div className="shell-page">
       <div className="page-heading">
         <h1>Admin Dashboard</h1>
-        <p className="muted">System overview and management.</p>
+        <p className="muted">System overview backed by the admin API.</p>
       </div>
+
+      {error && <div className="alert alert-error">{error}</div>}
 
       <div className="summary-grid">
         <div className="summary-card">
@@ -41,16 +44,13 @@ export default function AdminDashboardPage() {
           <div className="summary-card-value">{stats?.activeUsers ?? '—'}</div>
           <div className="summary-card-label">Active Users</div>
         </div>
-        <div className="summary-card">
-          <div className="summary-card-value">{stats?.totalPlatforms ?? '—'}</div>
-          <div className="summary-card-label">Connected Platforms</div>
-        </div>
-        <div className="summary-card">
-          <div className="summary-card-value">
-            <span className="badge badge-green">{stats?.systemHealth ?? 'Unknown'}</span>
-          </div>
-          <div className="summary-card-label">System Health</div>
-        </div>
+      </div>
+
+      <div className="section-heading">
+        <h2>Operational coverage</h2>
+        <p className="muted">
+          Provider health, model registry, jobs, feature flags, billing and system-health management are not exposed by the current admin API and are not represented as live status here.
+        </p>
       </div>
     </div>
   );
