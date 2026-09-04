@@ -23,7 +23,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/",
+    "test": "node --test test/*.test.mjs",
     "clean": "rm -rf dist",
     "db:migrate": "tsx src/run-migrate.ts",
     "db:generate": "tsx --tsconfig tsconfig.drizzle.json node_modules/drizzle-kit/bin.cjs generate",
