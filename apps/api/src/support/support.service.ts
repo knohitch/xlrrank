@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@xlrrank/database";
 import {
   supportMessages,
@@ -106,10 +106,17 @@ export class SupportService {
     if (!viewer.isSupport && ticket.userId !== viewer.id) {
       throw new ForbiddenException("You do not have access to this ticket.");
     }
+
+    const messageFilter = viewer.isSupport
+      ? eq(supportMessages.ticketId, ticketId)
+      : and(
+          eq(supportMessages.ticketId, ticketId),
+          eq(supportMessages.isInternal, false),
+        );
     const messages = await db
       .select()
       .from(supportMessages)
-      .where(eq(supportMessages.ticketId, ticketId))
+      .where(messageFilter)
       .orderBy(supportMessages.createdAt);
     return { ticket, messages };
   }
