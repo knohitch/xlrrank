@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const envSchema = z.object({
+const baseEnvSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace"])
@@ -48,6 +48,41 @@ const envSchema = z.object({
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
 });
 
+export const envSchema = baseEnvSchema.superRefine((env, ctx) => {
+  if (env.NODE_ENV === "production") {
+    if (!env.SESSION_SIGNING_SECRET || env.SESSION_SIGNING_SECRET.length < 32) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["SESSION_SIGNING_SECRET"],
+        message: "SESSION_SIGNING_SECRET is required in production and must be at least 32 characters",
+      });
+    }
+    if (!env.ENCRYPTION_MASTER_KEY || env.ENCRYPTION_MASTER_KEY.length < 32) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["ENCRYPTION_MASTER_KEY"],
+        message: "ENCRYPTION_MASTER_KEY is required in production and must be at least 32 characters",
+      });
+    }
+  }
+
+  if (env.EMAIL_TRANSPORT === "smtp") {
+    for (const [key, value] of [
+      ["SMTP_HOST", env.SMTP_HOST],
+      ["SMTP_PORT", env.SMTP_PORT],
+      ["SMTP_FROM", env.SMTP_FROM],
+    ] as const) {
+      if (value === undefined || value === "") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is required when EMAIL_TRANSPORT=smtp`,
+        });
+      }
+    }
+  }
+});
+
 export type Env = z.infer<typeof envSchema>;
 
 let _cachedEnv: Env | null = null;
@@ -68,4 +103,4 @@ export function getEnv(): Env {
   return _cachedEnv;
 }
 
-export { envSchema };
+export { baseEnvSchema };
