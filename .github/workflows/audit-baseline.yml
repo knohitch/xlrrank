@@ -52,6 +52,7 @@ jobs:
       SESSION_ENCRYPTION_SECRET: audit-only-session-encryption-secret-value
       PASSWORD_RESET_SECRET: audit-only-password-reset-secret-value
       EMAIL_TRANSPORT: console
+      MIGRATION_INTEGRATION_TEST: "1"
 
     steps:
       - name: Checkout audited branch
@@ -98,10 +99,10 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Existing test suite
+      - name: Existing and audit tests
         run: pnpm test
 
-      - name: Apply migrations to empty PostgreSQL database
+      - name: Re-apply migrations to verify idempotence
         run: pnpm db:migrate
 
       - name: Verify migrated schema exists
