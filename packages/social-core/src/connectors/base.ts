@@ -34,13 +34,16 @@ export abstract class BaseSocialConnector implements SocialConnector {
   }
 
   async checkHealth(): Promise<boolean> {
-    return this.status === "CONNECTED" || this.status === "HEALTHY";
+    return false;
   }
 
-  async authenticate(credentials: ConnectorCredentials): Promise<AuthResult> {
-    this.credentials = credentials;
-    this.status = "CONNECTED";
-    return { success: true, status: this.status };
+  async authenticate(_credentials: ConnectorCredentials): Promise<AuthResult> {
+    this.credentials = null;
+    this.status = "DISCONNECTED";
+    throw new AuthenticationError(
+      this.manifest.id,
+      "Authentication is not implemented for this connector",
+    );
   }
 
   async disconnect(): Promise<void> {
@@ -64,57 +67,65 @@ export abstract class BaseSocialConnector implements SocialConnector {
     }
   }
 
+  protected notImplemented(cap: ConnectorCapability): never {
+    throw new CapabilityUnavailableError(
+      this.manifest.id,
+      cap,
+      "implementation not provided",
+    );
+  }
+
   async getAuthenticatedProfile(): Promise<NormalizedProfile | null> {
     this.checkCapability("profiles");
     this.requireAuth();
-    return null;
+    return this.notImplemented("profiles");
   }
 
   async getProfile(_identifier: string): Promise<NormalizedProfile | null> {
     this.checkCapability("profiles");
     this.requireAuth();
-    return null;
+    return this.notImplemented("profiles");
   }
 
   async getContent(_options: ContentQuery): Promise<NormalizedContent[]> {
     this.checkCapability("content");
     this.requireAuth();
-    return [];
+    return this.notImplemented("content");
   }
 
   async getComments(_contentId: string, _options?: ContentQuery): Promise<NormalizedInteraction[]> {
     this.checkCapability("comments");
     this.requireAuth();
-    return [];
+    return this.notImplemented("comments");
   }
 
   async searchProfiles(_query: string, _limit?: number): Promise<NormalizedProfile[]> {
     this.checkCapability("search");
     this.requireAuth();
-    return [];
+    return this.notImplemented("search");
   }
 
   async searchContent(_query: string, _limit?: number): Promise<NormalizedContent[]> {
     this.checkCapability("search");
     this.requireAuth();
-    return [];
+    return this.notImplemented("search");
   }
 
   async getMetrics(_accountId: string): Promise<AccountMetrics> {
     this.checkCapability("metrics");
     this.requireAuth();
-    return { followerCount: 0, followingCount: 0, contentCount: 0, collectedAt: new Date().toISOString() };
+    return this.notImplemented("metrics");
   }
 
   async getFollowers(_accountId: string, _limit?: number): Promise<NormalizedProfile[]> {
     this.checkCapability("followers");
     this.requireAuth();
-    return [];
+    return this.notImplemented("followers");
   }
 
   async getFollowing(_accountId: string, _limit?: number): Promise<NormalizedProfile[]> {
     this.checkCapability("following");
     this.requireAuth();
-    return [];
+    return this.notImplemented("following");
   }
 }
