@@ -4,7 +4,7 @@
 
 **NOT PRODUCTION READY**
 
-The verification pipeline is now trustworthy enough to begin systematic production repair. Infrastructure and auth are substantially verified. Intelligence engines, social connectors, and AI providers are structurally implemented but not end-to-end verified.
+Foundation security has been hardened. All known dependency vulnerabilities are resolved. Docker images build successfully. The verification pipeline is trustworthy. Product features (social connectors, AI providers, intelligence engines, workers) remain unverified.
 
 ---
 
@@ -19,7 +19,7 @@ The verification pipeline is now trustworthy enough to begin systematic producti
 | Redis | CI: redis:7-alpine |
 | OS | CI: ubuntu-latest; Local: Windows |
 | Branch | audit/production-verification-2026-09-04 |
-| Commit | (see git log for latest) |
+| Latest commit | 6e5fa880acb6d6502bb058255b8e063247aa0b74 |
 
 ---
 
@@ -32,12 +32,14 @@ The verification pipeline is now trustworthy enough to begin systematic producti
 | Lint | CI PASS | pnpm lint --concurrency=2 |
 | Typecheck | CI PASS | pnpm typecheck --concurrency=2 |
 | Tests | CI PASS | Per-package test execution + security tests |
-| Security tests | CI PASS | scripts/security.test.mjs (10 tests) |
+| Security tests | CI PASS | scripts/security.test.mjs (11 tests, 11 passed) |
 | DB migrations | CI PASS | PostgreSQL 16 + pgvector, dedicated xlrrank_audit DB |
 | Migration repeat deploy | CI PASS | pnpm db:migrate runs twice |
 | Production build | CI PASS | pnpm build (17/17 packages) |
-| Docker build | CI PASS | docker compose config --quiet |
-| Dependency audit | PARTIAL | pnpm audit --prod (continue-on-error) |
+| Docker Compose validation | CI PASS | docker compose config --quiet |
+| Docker image build | CI PASS | API, web, worker images built successfully |
+| Security Gate (High/Critical) | CI PASS | pnpm audit --prod --audit-level=high (blocking) |
+| Full Dependency Audit | CI PASS | pnpm audit — 0 vulnerabilities |
 
 ---
 
@@ -71,13 +73,12 @@ The verification pipeline is now trustworthy enough to begin systematic producti
 | Content intelligence | SCAFFOLD ONLY | Analysis algorithm exists |
 | Network intelligence | SCAFFOLD ONLY | Cross-platform merge exists |
 | Search | SCAFFOLD ONLY | Inverted index + search exists |
-| AI provider framework | PARTIAL | Real HTTP implementations for OpenAI-compatible, Anthropic; 8 provider adapters with fetch calls to /chat/completions, /embeddings, /models, /v1/messages |
+| AI provider framework | PARTIAL | Real HTTP implementations for OpenAI-compatible, Anthropic; 8 provider adapters |
 | Provider credential storage | PARTIAL | DB table exists, encryption implemented |
-| Model discovery | PARTIAL | Registry + prober with real HTTP calls to /models endpoints |
-| Capability validation | PARTIAL | Prober tests text gen, structured output, streaming via real HTTP |
+| Model discovery | PARTIAL | Registry + prober with real HTTP calls |
+| Capability validation | PARTIAL | Prober tests text gen, structured output, streaming |
 | Model registry persistence | SCAFFOLD ONLY | In-memory only |
-| AI routing | PARTIAL | Router with 4 modes, candidate ranking, fallback logic |
-| Fallback | PARTIAL | Fallback logic exists |
+| AI routing | PARTIAL | Router with 4 modes, candidate ranking, fallback |
 | Language guard | SCAFFOLD ONLY | Detection + repair exist, not tested with real LLM output |
 | AI cost controls | SCAFFOLD ONLY | Tracking service exists |
 | Feature flags | SCAFFOLD ONLY | Service exists with scope-aware flags |
@@ -86,46 +87,59 @@ The verification pipeline is now trustworthy enough to begin systematic producti
 | Reports | SCAFFOLD ONLY | Service exists with basic reports |
 | Browser extension | PARTIAL | Manifest V3, content scripts for 5 platforms, popup |
 | Demo isolation | SCAFFOLD ONLY | Demo seed exists, demo provider exists |
-| Docker/deployment | CI VERIFIED | Dockerfile and Compose pass validation |
+| Docker/deployment | VERIFIED | Docker Compose valid, API/web/worker images build in CI |
+| Dependency security | VERIFIED | 0 known production vulnerabilities |
+| Encryption | VERIFIED | AES-256-GCM, roundtrip tested, legacy rejection tested |
+| RBAC security | VERIFIED | Permission hierarchy tested, role enforcement tested |
+| CSRF | VERIFIED | Double-submit cookie pattern enforced |
 | Observability | PARTIAL | Pino logging with redaction, basic metrics |
 
 ---
 
-## 5. Confirmed Defects
+## 5. Confirmed Defects (Active)
 
 ### HIGH
 
-1. **drizzle-orm SQL injection vulnerability**
-   - Affected: database
-   - Behavior: Versions <0.45.2 have SQL injection via improperly escaped identifiers
-   - Remediation: Upgrade drizzle-orm to >=0.45.2
-   - State: BLOCKER for Sprint 02
-
-2. **multer DoS vulnerabilities (4 CVEs)**
-   - Affected: API (transitive via @nestjs/platform-express)
-   - Remediation: Upgrade @nestjs packages or override multer to >=2.2.0
-   - State: Recorded
-
-### MEDIUM
-
-3. **postcss vulnerabilities (4 CVEs)**
-   - Affected: web (transitive via next)
-   - Remediation: Upgrade next when safe version available
-   - State: Recorded
-
-4. **Worker processors are stubs**
+1. **Worker processors are stubs**
    - Affected: worker
    - Impact: No real background processing
    - State: BLOCKER for production
 
-5. **Model registry not persisted**
+### MEDIUM
+
+2. **Model registry not persisted**
    - Affected: AI routing
    - Impact: Model discovery results lost on restart
-   - State: Recorded
+   - State: Requires database persistence layer
+
+### LOW
+
+3. **Lint warnings in reports/billing services**
+   - Affected: apps/api/src/reports/reports.service.ts, apps/api/src/billing/ai-cost.service.ts
+   - Behavior: Unused variables (db, userId, aiProviders)
+   - State: Non-blocking cleanup
 
 ---
 
-## 6. Missing Verification
+## 6. Sprint 02 Remediation (All RESOLVED)
+
+| Package | Before | Resolved | Advisory | Status |
+|---------|-------:|---------:|----------|--------|
+| drizzle-orm | 0.38.4 | 0.45.2 | GHSA-gpj5-g38j-94v9 (SQL injection) | RESOLVED |
+| @nestjs/common | 10.4.15 | 11.2.3 | — | RESOLVED |
+| @nestjs/core | 10.4.22 | 11.2.3 | GHSA-36xv-jgw5-4q75 (injection) | RESOLVED |
+| @nestjs/platform-express | 10.4.15 | 11.2.3 | — | RESOLVED |
+| multer | 2.0.2 | 2.2.0 | 4x HIGH + 1x MODERATE DoS | RESOLVED |
+| postcss | 8.4.31 | 8.5.26 | 2x HIGH + 2x MODERATE (file read/XSS) | RESOLVED |
+| file-type | 20.4.1 | 21.3.4 | 2x MODERATE (DoS) | RESOLVED |
+| qs | 6.14.2 | 6.16.0 | 3x MODERATE (DoS) | RESOLVED |
+| body-parser | 1.20.4 | 2.3.0 | 1x LOW (DoS) | RESOLVED |
+| next | 15.5.25 | 15.5.25 | — | UNCHANGED |
+| drizzle-kit | 0.30.1 | 0.31.10 | — | RESOLVED |
+
+---
+
+## 7. Missing Verification
 
 - Social connector authentication flows (no test credentials)
 - AI provider actual API calls (no test API keys in CI)
@@ -139,7 +153,7 @@ The verification pipeline is now trustworthy enough to begin systematic producti
 
 ---
 
-## 7. External Integration Blockers
+## 8. External Integration Blockers
 
 | Integration | Status | Reason |
 |-------------|--------|--------|
@@ -148,8 +162,8 @@ The verification pipeline is now trustworthy enough to begin systematic producti
 | Facebook | NOT PRODUCTION VERIFIED | No test credentials, requires app review |
 | LinkedIn | NOT PRODUCTION VERIFIED | No test credentials, requires app review |
 | Reddit | NOT PRODUCTION VERIFIED | No test credentials |
-| OpenAI | IMPLEMENTED, NOT VERIFIED | Real HTTP implementation exists, no test API key |
-| Anthropic | IMPLEMENTED, NOT VERIFIED | Real HTTP implementation exists, no test API key |
+| OpenAI | IMPLEMENTED, NOT VERIFIED | Real HTTP implementation, no test API key |
+| Anthropic | IMPLEMENTED, NOT VERIFIED | Real HTTP implementation, no test API key |
 | DeepSeek | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter |
 | xAI/Grok | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter |
 | Xiaomi MiMo | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter |
@@ -158,9 +172,9 @@ The verification pipeline is now trustworthy enough to begin systematic producti
 
 ---
 
-## 8. Recommended Repair Sprint Order
+## 9. Recommended Repair Sprint Order
 
-1. **Foundation/Security** — Upgrade drizzle-orm, fix multer
+1. ~~**Foundation/Security**~~ — DONE (Sprint 02)
 2. **Auth/User/Admin/Support** — End-to-end auth flow testing
 3. **Persistence/Data ownership** — pgvector verification
 4. **Social connector framework** — First live connector
@@ -176,44 +190,3 @@ The verification pipeline is now trustworthy enough to begin systematic producti
 14. **Demo isolation** — Complete demo mode
 15. **Full E2E** — Complete user journey
 16. **Deployment hardening** — Production config
-
----
-
-# Sprint 02 — Foundation & Security Hardening
-
-## Dependency Baseline
-
-| Package | Before | After | Advisory | Status |
-|---------|-------:|------:|----------|--------|
-| drizzle-orm | 0.38.4 | latest | GHSA-gpj5-g38j-94v9 | RESOLVED |
-| multer | 2.0.2 | >=2.2.0 (via NestJS 11) | 4x HIGH + 1x MODERATE | RESOLVED |
-| @nestjs/core | 10.4.22 | 11.x | GHSA-36xv-jgw5-4q75 | RESOLVED |
-| postcss | 8.4.31 | >=8.5.23 (override) | 2x HIGH + 2x MODERATE | RESOLVED |
-| file-type | 20.4.1 | >=21.3.2 (via NestJS 11) | 2x MODERATE | RESOLVED |
-| qs | 6.14.2 | >=6.16.0 (override) | 3x MODERATE | RESOLVED |
-| body-parser | 1.20.4 | >=1.20.6 (via NestJS 11) | 1x LOW | RESOLVED |
-| next | 15.5.25 | 15.5.25 | — | UNCHANGED |
-
-## Audit Result
-
-```
-audit before: 17 vulnerabilities (7 HIGH, 9 MODERATE, 1 LOW)
-audit after:  0 vulnerabilities (0 critical, 0 high, 0 moderate, 0 low)
-```
-
-## Security Hardening
-
-- **Request body limits**: NestJS 11 default limits apply; configurable via env
-- **CSRF**: Double-submit cookie pattern enforced on unsafe methods
-- **CORS**: Configurable origin via CORS_ORIGIN env
-- **Cookies**: HttpOnly, Secure (production), SameSite policy
-- **Headers**: Helmet middleware with CORP/COOP policies
-- **Logging**: Pino with comprehensive secret redaction (passwords, tokens, API keys, credentials, cookies)
-- **Secret handling**: AES-256-GCM encryption for stored credentials, never returned in API responses
-
-## CI Changes
-
-- Security gate now **blocking** for HIGH/CRITICAL: `pnpm audit --prod --audit-level=high`
-- Full audit remains informational: `pnpm audit --prod` (continue-on-error)
-- Docker image build verification added: API, web, worker images built in CI
-
