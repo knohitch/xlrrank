@@ -444,7 +444,7 @@ test("sessions, CSRF, rate limiting, and account deletion are enforced by the AP
 });
 
 test("admin dashboard, users, role boundaries, status enforcement, and audit logs use real authorization", async () => {
-  const normalUser = await signin("e2e-support@xlrrank.test");
+  const normalUser = await signin("e2e-user-a@xlrrank.test");
   expect((await normalUser.get("/api/admin/dashboard")).status()).toBe(403);
   expect(
     (
