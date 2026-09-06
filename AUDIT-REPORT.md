@@ -20,59 +20,69 @@ Foundation security has been hardened. All known dependency vulnerabilities are 
 | SMTP sink     | Sprint 03 E2E job: axllent/mailpit:v1.21              |
 | OS            | CI: ubuntu-latest; Local: Windows                     |
 | Branch        | audit/production-verification-2026-09-04              |
-| Latest commit | 6e5fa880acb6d6502bb058255b8e063247aa0b74              |
+| Evidence baseline | Latest pre-closure technical CI: 648adb9f74b754f3995e09365751dc62c95f5a4b |
 
 ---
 
 ## 3. Gate Results
 
-| Gate                          | Result                     | Evidence                                                                                                |
-| ----------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------- |
-| Frozen install                | CI PASS                    | pnpm install --frozen-lockfile                                                                          |
-| Constitution guard            | CI PASS                    | pnpm lint:constitution                                                                                  |
-| Lint                          | CI PASS                    | pnpm lint --concurrency=2                                                                               |
-| Typecheck                     | CI PASS                    | pnpm typecheck --concurrency=2                                                                          |
-| Tests                         | CI PASS                    | Per-package test execution + security tests                                                             |
-| Security tests                | CI PASS                    | scripts/security.test.mjs (11 tests, 11 passed)                                                         |
-| DB migrations                 | CI PASS                    | PostgreSQL 16 + pgvector, dedicated xlrrank_audit DB                                                    |
-| Migration repeat deploy       | CI PASS                    | pnpm db:migrate runs twice                                                                              |
-| Production build              | CI PASS                    | pnpm build (17/17 packages)                                                                             |
-| Docker Compose validation     | CI PASS                    | docker compose config --quiet                                                                           |
-| Docker image build            | CI PASS                    | API, web, worker images built successfully                                                              |
-| Security Gate (High/Critical) | CI PASS                    | pnpm audit --prod --audit-level=high (blocking)                                                         |
-| Full Dependency Audit         | CI PASS                    | pnpm audit — 0 vulnerabilities                                                                          |
-| Application E2E               | ADDED, PENDING CI EVIDENCE | apps/e2e Playwright suite configured for PostgreSQL 16 + pgvector, Redis 7, Mailpit, API, web, Chromium |
+| Gate                          | Result  | Evidence                                                                                                |
+| ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------- |
+| Frozen install                | CI PASS | pnpm install --frozen-lockfile                                                                          |
+| Constitution guard            | CI PASS | pnpm lint:constitution                                                                                  |
+| Lint                          | CI PASS | pnpm lint --concurrency=2                                                                               |
+| Typecheck                     | CI PASS | pnpm typecheck --concurrency=2                                                                          |
+| Tests                         | CI PASS | Per-package test execution + security tests                                                             |
+| Security tests                | CI PASS | scripts/security.test.mjs (11 tests, 11 passed, 0 failed)                                               |
+| DB migrations                 | CI PASS | PostgreSQL 16 + pgvector, dedicated xlrrank_audit DB                                                    |
+| Migration repeat deploy       | CI PASS | pnpm db:migrate runs twice                                                                              |
+| Production build              | CI PASS | pnpm build (17/17 packages)                                                                             |
+| Docker Compose validation     | VERIFIED | docker compose config --quiet                                                                          |
+| API image build               | VERIFIED | API Docker image built successfully                                                                    |
+| web image build               | VERIFIED | web Docker image built successfully                                                                    |
+| worker image build            | VERIFIED | worker Docker image built successfully                                                                 |
+| Security Gate (High/Critical) | CI PASS | pnpm audit --prod --audit-level=high (blocking)                                                         |
+| Full Dependency Audit         | CI PASS | pnpm audit --prod: 0 critical, 0 high, 0 moderate, 0 low                                                |
+| Application E2E               | CI PASS | apps/e2e Playwright suite with PostgreSQL 16 + pgvector, Redis 7, Mailpit, API, web, Chromium           |
+
+### Dependency Audit Status
+
+| Gate                                     | Result | Evidence                              |
+| ---------------------------------------- | ------ | ------------------------------------- |
+| High/Critical blocking gate              | PASS   | pnpm audit --prod --audit-level=high  |
+| Full production dependency audit         | PASS   | pnpm audit --prod                     |
+| Current known production vulnerabilities | 0      | 0 critical, 0 high, 0 moderate, 0 low |
 
 ---
 
 ## Sprint 03 — Auth/User/Admin/Support E2E
 
-Local source gates passed after the Sprint 03 repair work:
+Local source gates passed after the Sprint 03 repair work already present on this branch before this documentation closure:
 
 - `pnpm lint --concurrency=2` PASS, with pre-existing warnings in billing/reports.
 - `pnpm typecheck --concurrency=2` PASS.
 - `pnpm build` PASS.
-- `pnpm test --concurrency=2` PASS: 25 package test tasks; database migration integration tests remain skipped without their integration env.
+- `pnpm test --concurrency=2` PASS: package test tasks passed; database migration integration tests remain skipped without their integration env.
 - `node --test scripts/security.test.mjs` PASS: 11/11.
 - `pnpm audit --prod --audit-level=high` PASS.
 - `pnpm audit --prod` PASS: no known vulnerabilities.
 
-Local browser E2E execution was not completed because Docker is not installed on the local Windows host and no local Mailpit/MailHog service is available. The blocking GitHub Actions `Application E2E` job now provisions the required real services and must provide the final Sprint 03 evidence.
+Local browser E2E execution was not completed because Docker is not installed on the local Windows host and no local Mailpit/MailHog service is available. The blocking GitHub Actions `Application E2E` job now provisions the required real services and passed in run 34013204160 at commit 648adb9f74b754f3995e09365751dc62c95f5a4b.
 
 | Journey            | API            | Browser                                                     | PostgreSQL                    | Negative Paths                                                | Status     |
 | ------------------ | -------------- | ----------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------- | ---------- |
-| Signup             | E2E test added | `/signup` browser test added                                | User status asserted          | duplicate, malformed email, weak password, invalid name, CSRF | PENDING CI |
-| Verify email       | E2E test added | Mailpit URL opened in browser                               | ACTIVE transition asserted    | invalid, expired, reuse                                       | PENDING CI |
-| Signin             | E2E test added | `/signin` browser test added                                | session persisted             | unverified denied, bad password                               | PENDING CI |
-| Session management | E2E test added | refresh/signout browser assertions added                    | sessions queried/revoked      | IDOR revoke attempt, revoked session                          | PENDING CI |
-| Profile            | E2E test added | `/settings` browser save added                              | display name asserted         | CSRF mismatch                                                 | PENDING CI |
-| Change password    | E2E test added | `/settings` browser form added                              | password hash asserted        | wrong current password, old password rejected                 | PENDING CI |
-| Reset password     | E2E test added | `/forgot-password` and `/reset-password` browser flow added | hash/session effects asserted | invalid, expired, wrong purpose, reuse                        | PENDING CI |
-| Account deletion   | E2E test added | settings UI wired                                           | DELETION_PENDING asserted     | signin/session denied after request                           | PENDING CI |
-| Admin RBAC         | E2E test added | admin UI wired                                              | roles/status queried          | USER/SUPPORT/ADMIN boundaries, unknown role                   | PENDING CI |
-| Admin users        | E2E test added | `/admin/users` filters/actions wired                        | user list from DB             | invalid page/status bounds                                    | PENDING CI |
-| Support tickets    | E2E test added | `/support` portal wired                                     | tickets/messages persisted    | ownership and forged UUID checks                              | PENDING CI |
-| Internal notes     | E2E test added | staff checkbox only                                         | internal flag persisted       | normal user cannot create or view                             | PENDING CI |
+| Signup             | E2E test added | `/signup` browser test added                                | User status asserted          | duplicate, malformed email, weak password, invalid name, CSRF | CI PASS |
+| Verify email       | E2E test added | Mailpit URL opened in browser                               | ACTIVE transition asserted    | invalid, expired, reuse                                       | CI PASS |
+| Signin             | E2E test added | `/signin` browser test added                                | session persisted             | unverified denied, bad password                               | CI PASS |
+| Session management | E2E test added | refresh/signout browser assertions added                    | sessions queried/revoked      | IDOR revoke attempt, revoked session                          | CI PASS |
+| Profile            | E2E test added | `/settings` browser save added                              | display name asserted         | CSRF mismatch                                                 | CI PASS |
+| Change password    | E2E test added | `/settings` browser form added                              | password hash asserted        | wrong current password, old password rejected                 | CI PASS |
+| Reset password     | E2E test added | `/forgot-password` and `/reset-password` browser flow added | hash/session effects asserted | invalid, expired, wrong purpose, reuse                        | CI PASS |
+| Account deletion   | E2E test added | settings UI wired                                           | DELETION_PENDING asserted     | signin/session denied after request                           | CI PASS |
+| Admin RBAC         | E2E test added | admin UI wired                                              | roles/status queried          | USER/SUPPORT/ADMIN boundaries, unknown role                   | CI PASS |
+| Admin users        | E2E test added | `/admin/users` filters/actions wired                        | user list from DB             | invalid page/status bounds                                    | CI PASS |
+| Support tickets    | E2E test added | `/support` portal wired                                     | tickets/messages persisted    | ownership and forged UUID checks                              | CI PASS |
+| Internal notes     | E2E test added | staff checkbox only                                         | internal flag persisted       | normal user cannot create or view                             | CI PASS |
 
 ---
 
@@ -80,14 +90,14 @@ Local browser E2E execution was not completed because Docker is not installed on
 
 | Subsystem                   | Status         | Notes                                                                                            |
 | --------------------------- | -------------- | ------------------------------------------------------------------------------------------------ |
-| Authentication              | PARTIAL        | Real browser/API E2E suite added; CI evidence pending                                            |
-| Sessions                    | PARTIAL        | HMAC-signed tokens, httpOnly cookies, revocation, expiry; E2E evidence pending                   |
-| Email verification          | PARTIAL        | SMTP sink E2E added; CI evidence pending                                                         |
-| Password reset              | PARTIAL        | SMTP sink E2E added with session revocation; CI evidence pending                                 |
+| Authentication              | VERIFIED       | Real browser/API E2E suite passed in CI                                                          |
+| Sessions                    | VERIFIED       | HMAC-signed tokens, httpOnly cookies, revocation, expiry; E2E passed in CI                       |
+| Email verification          | VERIFIED       | SMTP sink E2E passed in CI                                                                       |
+| Password reset              | VERIFIED       | SMTP sink E2E with session revocation passed in CI                                               |
 | RBAC                        | VERIFIED       | 4 roles, 9 permissions, role hierarchy tested                                                    |
-| User portal                 | PARTIAL        | Settings now wires profile, password, sessions, account deletion; E2E evidence pending           |
-| Admin portal                | PARTIAL        | User search/filter/status/roles wired; lockout protections added; E2E evidence pending           |
-| Support system              | PARTIAL        | Ticket portal replaces shell, internal note filtering/RBAC tested by Playwright suite pending CI |
+| User portal                 | VERIFIED       | Settings wires profile, password, sessions, account deletion; E2E passed in CI                   |
+| Admin portal                | VERIFIED       | User search/filter/status/roles wired; lockout protections tested in CI                          |
+| Support system              | VERIFIED       | Ticket portal, internal note filtering, and RBAC tested by Playwright suite in CI                |
 | Notifications               | SCAFFOLD ONLY  | Service + controller exist, no notification triggers                                             |
 | X connector                 | INTERFACE ONLY | BaseSocialConnector with CONFIGURATION_REQUIRED capabilities                                     |
 | Instagram connector         | INTERFACE ONLY | Same pattern                                                                                     |
@@ -156,32 +166,38 @@ Local browser E2E execution was not completed because Docker is not installed on
 
 ## 6. Sprint 02 Remediation (All RESOLVED)
 
-| Package                  |  Before | Resolved | Advisory                              | Status    |
-| ------------------------ | ------: | -------: | ------------------------------------- | --------- |
-| drizzle-orm              |  0.38.4 |   0.45.2 | GHSA-gpj5-g38j-94v9 (SQL injection)   | RESOLVED  |
-| @nestjs/common           | 10.4.15 |   11.2.3 | —                                     | RESOLVED  |
-| @nestjs/core             | 10.4.22 |   11.2.3 | GHSA-36xv-jgw5-4q75 (injection)       | RESOLVED  |
-| @nestjs/platform-express | 10.4.15 |   11.2.3 | —                                     | RESOLVED  |
-| multer                   |   2.0.2 |    2.2.0 | 4x HIGH + 1x MODERATE DoS             | RESOLVED  |
-| postcss                  |  8.4.31 |   8.5.26 | 2x HIGH + 2x MODERATE (file read/XSS) | RESOLVED  |
-| file-type                |  20.4.1 |   21.3.4 | 2x MODERATE (DoS)                     | RESOLVED  |
-| qs                       |  6.14.2 |   6.16.0 | 3x MODERATE (DoS)                     | RESOLVED  |
-| body-parser              |  1.20.4 |    2.3.0 | 1x LOW (DoS)                          | RESOLVED  |
-| next                     | 15.5.25 |  15.5.25 | —                                     | UNCHANGED |
-| drizzle-kit              |  0.30.1 |  0.31.10 | —                                     | RESOLVED  |
+| Package                  | Declared range / source                                      | Previous resolved | Current lockfile resolved | Advisory                              | Status    |
+| ------------------------ | ------------------------------------------------------------ | ----------------: | ------------------------: | ------------------------------------- | --------- |
+| drizzle-orm              | `^0.45.2` in apps/api and packages/database                  |            0.38.4 |                    0.45.2 | GHSA-gpj5-g38j-94v9 (SQL injection)   | RESOLVED  |
+| @nestjs/common           | `^11.2.3` in apps/api                                        |           10.4.15 |                    11.2.3 | NestJS dependency advisory            | RESOLVED  |
+| @nestjs/core             | `^11.2.3` in apps/api                                        |           10.4.22 |                    11.2.3 | GHSA-36xv-jgw5-4q75 (injection)       | RESOLVED  |
+| @nestjs/platform-express | `^11.2.3` in apps/api                                        |           10.4.15 |                    11.2.3 | NestJS dependency advisory            | RESOLVED  |
+| multer                   | Transitive via `@nestjs/platform-express`                    |             2.0.2 |                     2.2.0 | 4x HIGH + 1x MODERATE DoS             | RESOLVED  |
+| postcss                  | pnpm override `>=8.5.23`; transitive via Next/Vite toolchain |            8.4.31 |                    8.5.26 | 2x HIGH + 2x MODERATE (file read/XSS) | RESOLVED  |
+| file-type                | Transitive via `@nestjs/common`                              |            20.4.1 |                    21.3.4 | 2x MODERATE (DoS)                     | RESOLVED  |
+| qs                       | pnpm override `>=6.16.0`; transitive via Express/body-parser |            6.14.2 |                    6.16.0 | 3x MODERATE (DoS)                     | RESOLVED  |
+| body-parser              | Transitive via Express                                       |            1.20.4 |                     2.3.0 | 1x LOW (DoS)                          | RESOLVED  |
+| next                     | `^15.1.3` in apps/web                                        |           15.5.25 |                   15.5.25 | Not part of Sprint 02 remediation     | UNCHANGED |
+| drizzle-kit              | `^0.31.10` in packages/database                              |            0.30.1 |                   0.31.10 | Not a production dependency advisory  | RESOLVED  |
 
 ---
 
 ## 7. Missing Verification
 
 - Social connector authentication flows (no test credentials)
+- Social connector production integration
+- Ingestion and worker processors
 - AI provider actual API calls (no test API keys in CI)
-- End-to-end user journey
+- AI runtime/provider configuration
+- Persistent dynamic model registry
+- Routing and language enforcement with real LLM output
+- Intelligence engines with real data
+- Search, including vector search with pgvector
+- Full deployment journey
 - Notification delivery
+- Browser extension production integration
 - Billing/entitlement enforcement
 - Feature flag runtime behavior
-- Vector search with pgvector
-- Worker job processing
 - Cross-platform identity matching with real data
 
 ---
@@ -201,14 +217,14 @@ Local browser E2E execution was not completed because Docker is not installed on
 | xAI/Grok         | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                           |
 | Xiaomi MiMo      | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                           |
 | Stripe (billing) | NOT IMPLEMENTED           | No integration code                                 |
-| SMTP (email)     | IMPLEMENTED, E2E PENDING  | Mailpit SMTP sink configured in Application E2E job |
+| SMTP (email)     | IMPLEMENTED, CI VERIFIED  | Mailpit SMTP sink exercised in Application E2E job; production SMTP delivery not verified |
 
 ---
 
 ## 9. Recommended Repair Sprint Order
 
 1. ~~**Foundation/Security**~~ — DONE (Sprint 02)
-2. **Auth/User/Admin/Support** — End-to-end auth flow testing
+2. ~~**Auth/User/Admin/Support**~~ — CI VERIFIED on current branch
 3. **Persistence/Data ownership** — pgvector verification
 4. **Social connector framework** — First live connector
 5. **Ingestion/Workers** — Real job processing
