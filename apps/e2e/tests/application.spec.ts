@@ -254,6 +254,7 @@ test("signup, verification, session, profile, password reset, and signout work e
   await expect(page.getByRole("heading", { name: /Welcome/ })).toBeVisible();
 
   await page.goto("/settings");
+  await expect(page.getByLabel("Display Name")).toHaveValue("Sprint Three User");
   await page.getByLabel("Display Name").fill("Sprint Three Renamed");
   await page.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByText("Settings saved.")).toBeVisible();

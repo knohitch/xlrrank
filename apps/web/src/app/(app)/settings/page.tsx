@@ -40,6 +40,7 @@ export default function SettingsPage() {
   const [passwordMessage, setPasswordMessage] = useState("");
   const [deleteMessage, setDeleteMessage] = useState("");
   const [error, setError] = useState("");
+  const [accountLoading, setAccountLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [currentPassword, setCurrentPassword] = useState("");
@@ -47,17 +48,22 @@ export default function SettingsPage() {
   const [deletePassword, setDeletePassword] = useState("");
 
   const loadAccount = useCallback(async () => {
-    const [profileRes, sessionsRes] = await Promise.all([
-      api.get<{ user: UserProfile }>("/users/me"),
-      api.get<{ sessions: SessionItem[] }>("/auth/sessions"),
-    ]);
-    if (profileRes.ok && profileRes.data?.user) {
-      setUser(profileRes.data.user);
-      setDisplayName(profileRes.data.user.displayName || "");
-      setAvatarUrl(profileRes.data.user.avatarUrl || "");
-    }
-    if (sessionsRes.ok && Array.isArray(sessionsRes.data?.sessions)) {
-      setSessions(sessionsRes.data.sessions);
+    setAccountLoading(true);
+    try {
+      const [profileRes, sessionsRes] = await Promise.all([
+        api.get<{ user: UserProfile }>("/users/me"),
+        api.get<{ sessions: SessionItem[] }>("/auth/sessions"),
+      ]);
+      if (profileRes.ok && profileRes.data?.user) {
+        setUser(profileRes.data.user);
+        setDisplayName(profileRes.data.user.displayName || "");
+        setAvatarUrl(profileRes.data.user.avatarUrl || "");
+      }
+      if (sessionsRes.ok && Array.isArray(sessionsRes.data?.sessions)) {
+        setSessions(sessionsRes.data.sessions);
+      }
+    } finally {
+      setAccountLoading(false);
     }
   }, []);
 
@@ -78,6 +84,8 @@ export default function SettingsPage() {
       const res = await api.patch<{ user: UserProfile }>("/users/me", body);
       if (res.ok && res.data?.user) {
         setUser(res.data.user);
+        setDisplayName(res.data.user.displayName || "");
+        setAvatarUrl(res.data.user.avatarUrl || "");
         setProfileMessage("Settings saved.");
       } else {
         setError(getMessage(res.data, "Failed to save settings."));
@@ -161,6 +169,7 @@ export default function SettingsPage() {
               className="form-input"
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
+              disabled={accountLoading}
               minLength={2}
               maxLength={100}
               required
@@ -173,10 +182,11 @@ export default function SettingsPage() {
               className="form-input"
               value={avatarUrl}
               onChange={(e) => setAvatarUrl(e.target.value)}
+              disabled={accountLoading}
               maxLength={500}
             />
           </label>
-          <button className="btn btn-primary" type="submit" disabled={saving}>
+          <button className="btn btn-primary" type="submit" disabled={saving || accountLoading}>
             {saving ? "Saving..." : "Save changes"}
           </button>
         </form>
