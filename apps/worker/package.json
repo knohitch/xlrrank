@@ -8,6 +8,7 @@
     "dev": "tsx watch src/main.ts",
     "build": "tsc",
     "start": "node dist/main.js",
+    "test": "node --test test/*.e2e.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist"
@@ -16,7 +17,11 @@
     "@xlrrank/config": "workspace:*",
     "@xlrrank/database": "workspace:*",
     "@xlrrank/observability": "workspace:*",
-    "@xlrrank/queue": "workspace:*"
+    "@xlrrank/queue": "workspace:*",
+    "@xlrrank/shared": "workspace:*",
+    "@xlrrank/social-core": "workspace:*",
+    "bullmq": "^5.34.0",
+    "pg": "^8.13.1"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

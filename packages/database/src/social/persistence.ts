@@ -25,6 +25,7 @@ export interface SocialSyncPage {
   interactions: NormalizedInteraction[];
   normalizationVersion: string;
   adapterVersion: string;
+  completeRun?: boolean;
 }
 
 export interface PersistedSocialPage {
@@ -77,6 +78,22 @@ export async function markSocialIngestionFailed(input: {
       WHERE id = $1
     `,
     [input.runId, JSON.stringify([input.error]), input.retryClassification],
+  );
+}
+
+export async function completeSocialIngestionRun(input: {
+  runId: string;
+  cursorAfter: string | null;
+}): Promise<void> {
+  await getPool().query(
+    `
+      UPDATE social_ingestion_runs
+      SET status = 'COMPLETED',
+          cursor_after = $2,
+          completed_at = now()
+      WHERE id = $1
+    `,
+    [input.runId, input.cursorAfter],
   );
 }
 
@@ -158,12 +175,12 @@ export async function persistSocialSyncPage(input: SocialSyncPage): Promise<Pers
     await client.query(
       `
         UPDATE social_ingestion_runs
-        SET status = 'COMPLETED',
+        SET status = CASE WHEN $6 THEN 'COMPLETED' ELSE status END,
             cursor_after = $2,
-            profiles_processed = $3,
-            content_processed = $4,
-            interactions_processed = $5,
-            completed_at = now()
+            profiles_processed = profiles_processed + $3,
+            content_processed = content_processed + $4,
+            interactions_processed = interactions_processed + $5,
+            completed_at = CASE WHEN $6 THEN now() ELSE completed_at END
         WHERE id = $1
       `,
       [
@@ -172,6 +189,7 @@ export async function persistSocialSyncPage(input: SocialSyncPage): Promise<Pers
         input.profiles.length,
         input.content.length,
         input.interactions.length,
+        input.completeRun ?? true,
       ],
     );
     await client.query(

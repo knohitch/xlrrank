@@ -108,6 +108,10 @@ export const socialConnections = pgTable(
     rateLimitResetAt: timestamp("rate_limit_reset_at", { withTimezone: true }),
     retryAfterSeconds: integer("retry_after_seconds"),
     providerMetadata: jsonb("provider_metadata"),
+    syncEnabled: boolean("sync_enabled").notNull().default(false),
+    scheduleCadenceSeconds: integer("schedule_cadence_seconds"),
+    nextSyncAt: timestamp("next_sync_at", { withTimezone: true }),
+    lastScheduledAt: timestamp("last_scheduled_at", { withTimezone: true }),
     disabledAt: timestamp("disabled_at", { withTimezone: true }),
     disconnectedAt: timestamp("disconnected_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -119,6 +123,7 @@ export const socialConnections = pgTable(
     index("social_connections_platform_idx").on(t.platformId),
     index("social_connections_external_account_idx").on(t.externalAccountId),
     index("social_connections_status_idx").on(t.status),
+    index("social_connections_due_sync_idx").on(t.nextSyncAt),
   ],
 );
 
@@ -936,4 +941,119 @@ export const jobRuns = pgTable(
     result: jsonb("result"),
   },
   (t) => [index("job_runs_job_idx").on(t.jobId), index("job_runs_status_idx").on(t.status)],
+);
+
+export const jobOutbox = pgTable(
+  "job_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    queueName: text("queue_name").notNull(),
+    jobType: text("job_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    status: text("status").notNull().default("PENDING"),
+    bullmqJobId: text("bullmq_job_id"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lockedBy: text("locked_by"),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    dispatchedAt: timestamp("dispatched_at", { withTimezone: true }),
+    lastError: jsonb("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("job_outbox_job_unique").on(t.jobId),
+    index("job_outbox_pending_idx").on(t.status, t.createdAt),
+    index("job_outbox_lock_idx").on(t.lockedUntil),
+  ],
+);
+
+export const socialSyncLeases = pgTable(
+  "social_sync_leases",
+  {
+    connectionId: uuid("connection_id")
+      .primaryKey()
+      .references(() => socialConnections.id, { onDelete: "cascade" }),
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    ownerToken: text("owner_token").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }).notNull().defaultNow(),
+    acquiredAt: timestamp("acquired_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("social_sync_leases_expires_idx").on(t.expiresAt),
+    index("social_sync_leases_job_idx").on(t.jobId),
+  ],
+);
+
+export const socialSyncSchedules = pgTable(
+  "social_sync_schedules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => socialConnections.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(true),
+    cadenceSeconds: integer("cadence_seconds").notNull(),
+    nextSyncAt: timestamp("next_sync_at", { withTimezone: true }).notNull(),
+    lastScheduledAt: timestamp("last_scheduled_at", { withTimezone: true }),
+    lockedBy: text("locked_by"),
+    lockedUntil: timestamp("locked_until", { withTimezone: true }),
+    policy: jsonb("policy"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("social_sync_schedules_connection_unique").on(t.connectionId),
+    index("social_sync_schedules_due_idx").on(t.nextSyncAt),
+    index("social_sync_schedules_lock_idx").on(t.lockedUntil),
+  ],
+);
+
+export const workerHeartbeats = pgTable(
+  "worker_heartbeats",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    workerId: text("worker_id").notNull(),
+    kind: text("kind").notNull(),
+    status: text("status").notNull().default("READY"),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [
+    uniqueIndex("worker_heartbeats_worker_unique").on(t.workerId),
+    index("worker_heartbeats_last_seen_idx").on(t.lastSeenAt),
+  ],
+);
+
+export const jobDeadLetters = pgTable(
+  "job_dead_letters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    queueName: text("queue_name").notNull(),
+    jobType: text("job_type").notNull(),
+    connectionId: uuid("connection_id").references(() => socialConnections.id, {
+      onDelete: "set null",
+    }),
+    ingestionRunId: uuid("ingestion_run_id").references(() => socialIngestionRuns.id, {
+      onDelete: "set null",
+    }),
+    safeError: jsonb("safe_error"),
+    attemptCount: integer("attempt_count").notNull(),
+    retryClassification: text("retry_classification"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("job_dead_letters_job_unique").on(t.jobId),
+    index("job_dead_letters_connection_idx").on(t.connectionId),
+  ],
 );

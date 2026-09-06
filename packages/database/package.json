@@ -32,6 +32,8 @@
   "dependencies": {
     "@xlrrank/auth": "workspace:*",
     "@xlrrank/config": "workspace:*",
+    "@xlrrank/queue": "workspace:*",
+    "@xlrrank/shared": "workspace:*",
     "@xlrrank/social-core": "workspace:*",
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.45.2",

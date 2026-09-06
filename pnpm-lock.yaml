@@ -60,6 +60,9 @@ importers:
       '@xlrrank/queue':
         specifier: workspace:*
         version: link:../../packages/queue
+      '@xlrrank/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       '@xlrrank/social-core':
         specifier: workspace:*
         version: link:../../packages/social-core
@@ -208,6 +211,18 @@ importers:
       '@xlrrank/queue':
         specifier: workspace:*
         version: link:../../packages/queue
+      '@xlrrank/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      '@xlrrank/social-core':
+        specifier: workspace:*
+        version: link:../../packages/social-core
+      bullmq:
+        specifier: ^5.34.0
+        version: 5.81.4(supports-color@7.2.0)
+      pg:
+        specifier: ^8.13.1
+        version: 8.23.0
     devDependencies:
       tsx:
         specifier: ^4.19.2
@@ -257,6 +272,12 @@ importers:
       '@xlrrank/config':
         specifier: workspace:*
         version: link:../config
+      '@xlrrank/queue':
+        specifier: workspace:*
+        version: link:../queue
+      '@xlrrank/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@xlrrank/social-core':
         specifier: workspace:*
         version: link:../social-core

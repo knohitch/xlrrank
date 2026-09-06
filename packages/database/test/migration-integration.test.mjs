@@ -50,6 +50,11 @@ test(
         "social_account_observations",
         "social_content_items",
         "social_ingestion_runs",
+        "job_outbox",
+        "social_sync_leases",
+        "social_sync_schedules",
+        "worker_heartbeats",
+        "job_dead_letters",
       ];
       for (const table of expectedTables) {
         const res = await pool.query(

@@ -85,6 +85,7 @@ export interface ConnectorOperationContext {
   scopeId: string;
   connectionId: string;
   credentials: ConnectorCredentials;
+  signal?: AbortSignal;
 }
 
 export interface SocialConnector {

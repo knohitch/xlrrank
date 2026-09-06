@@ -149,7 +149,7 @@ export class ReferenceHttpConnector extends BaseSocialConnector {
     credentials: ConnectorCredentials,
     context?: ConnectorOperationContext,
   ): Promise<AuthResult> {
-    const profile = await this.fetchJson<ProviderProfile>("/auth/me", credentials);
+    const profile = await this.fetchJson<ProviderProfile>("/auth/me", credentials, false, context);
     const normalized = this.normalizeProfile(profile, context);
     validateNormalizedProfile(normalized);
     return { success: true, status: "CONNECTED", profile: normalized };
@@ -159,7 +159,7 @@ export class ReferenceHttpConnector extends BaseSocialConnector {
     context?: ConnectorOperationContext,
   ): Promise<NormalizedProfile | null> {
     const credentials = this.requireAuth(context);
-    const profile = await this.fetchJson<ProviderProfile>("/auth/me", credentials);
+    const profile = await this.fetchJson<ProviderProfile>("/auth/me", credentials, false, context);
     return this.normalizeProfile(profile, context);
   }
 
@@ -176,7 +176,7 @@ export class ReferenceHttpConnector extends BaseSocialConnector {
       items: ProviderContent[];
       nextCursor: string | null;
       hasMore: boolean;
-    }>(`/content?${query.toString()}`, credentials, true);
+    }>(`/content?${query.toString()}`, credentials, true, context);
     const items = response.body.items.map((item) => this.normalizeContent(item, context));
     for (const item of items) validateNormalizedContent(item);
     return {
@@ -206,7 +206,7 @@ export class ReferenceHttpConnector extends BaseSocialConnector {
       items: ProviderInteraction[];
       nextCursor: string | null;
       hasMore: boolean;
-    }>(`/interactions?${query.toString()}`, credentials, true);
+    }>(`/interactions?${query.toString()}`, credentials, true, context);
     const items = response.body.items.map((item) => this.normalizeInteraction(item, context));
     for (const item of items) validateNormalizedInteraction(item);
     return {
@@ -236,20 +236,25 @@ export class ReferenceHttpConnector extends BaseSocialConnector {
     path: string,
     credentials: ConnectorCredentials,
     includeRateLimit: true,
+    context?: ConnectorOperationContext,
   ): Promise<{ body: T; rateLimit?: RateLimitInfo }>;
   private async fetchJson<T>(
     path: string,
     credentials: ConnectorCredentials,
     includeRateLimit?: false,
+    context?: ConnectorOperationContext,
   ): Promise<T>;
   private async fetchJson<T>(
     path: string,
     credentials: ConnectorCredentials,
     includeRateLimit = false,
+    context?: ConnectorOperationContext,
   ): Promise<T | { body: T; rateLimit?: RateLimitInfo }> {
-    const response = await fetch(`${baseUrl(credentials)}${path}`, {
+    const init: RequestInit = {
       headers: { authorization: `Bearer ${token(credentials)}` },
-    });
+    };
+    if (context?.signal) init.signal = context.signal;
+    const response = await fetch(`${baseUrl(credentials)}${path}`, init);
     if (response.status === 401) throw new AuthenticationError(this.manifest.id);
     if (response.status === 403) throw new AuthenticationError(this.manifest.id, "Forbidden");
     if (response.status === 429) {

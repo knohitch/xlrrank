@@ -22,7 +22,36 @@ export {
 export type { SocialConnectionState } from "./social/connection-state.js";
 export {
   beginSocialIngestionRun,
+  completeSocialIngestionRun,
   markSocialIngestionFailed,
   persistSocialSyncPage,
 } from "./social/persistence.js";
 export type { PersistedSocialPage, SocialSyncPage } from "./social/persistence.js";
+export {
+  acquireSocialSyncLease,
+  claimDueSocialSyncSchedules,
+  claimPendingOutboxEntries,
+  createDeadLetter,
+  createSocialConnectionSyncRequest,
+  enableSocialSyncSchedule,
+  EXECUTABLE_SOCIAL_CONNECTION_STATES,
+  getAuthorizedSocialSyncJobStatus,
+  loadConnectionForSync,
+  loadSocialSyncJob,
+  markOutboxDispatched,
+  markOutboxFailed,
+  markScheduleDispatched,
+  reconcileWorkerState,
+  releaseSocialSyncLease,
+  renewSocialSyncLease,
+  safeJobError,
+  touchWorkerHeartbeat,
+  transitionSocialSyncJob,
+} from "./social/jobs.js";
+export type {
+  ClaimedOutboxEntry,
+  DurableSocialSyncRequest,
+  SocialConnectionForSync,
+  SocialSyncJobRecord,
+  SocialSyncJobStatusView,
+} from "./social/jobs.js";
