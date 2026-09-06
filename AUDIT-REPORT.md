@@ -4,7 +4,7 @@
 
 **NOT PRODUCTION READY**
 
-Foundation security has been hardened. All known dependency vulnerabilities are resolved. Docker images build successfully. The verification pipeline is trustworthy. Product features (social connectors, AI providers, intelligence engines, workers) remain unverified.
+Foundation security has been hardened. All known dependency vulnerabilities are resolved. Docker images build successfully. The verification pipeline is trustworthy. Worker/reference-provider social ingestion is implemented for Sprint 05 evidence. Live third-party social connectors, AI providers, intelligence engines, billing, extension production integration, and full deployment remain unverified.
 
 ---
 
@@ -16,7 +16,7 @@ Foundation security has been hardened. All known dependency vulnerabilities are 
 | pnpm version      | 11.23.0                                                                   |
 | PostgreSQL        | CI: pgvector/pgvector:pg16 with xlrrank_audit DB                          |
 | pgvector          | CI: verified via migration integration test                               |
-| Redis             | CI: redis:7-alpine; Sprint 03 E2E job: redis:7-alpine                     |
+| Redis             | CI: redis:7-alpine; Sprint 03 E2E and Sprint 05 Worker Ingestion E2E      |
 | SMTP sink         | Sprint 03 E2E job: axllent/mailpit:v1.21                                  |
 | OS                | CI: ubuntu-latest; Local: Windows                                         |
 | Branch            | audit/production-verification-2026-09-04                                  |
@@ -46,6 +46,8 @@ Foundation security has been hardened. All known dependency vulnerabilities are 
 | Application E2E               | CI PASS  | apps/e2e Playwright suite with PostgreSQL 16 + pgvector, Redis 7, Mailpit, API, web, Chromium        |
 | Social Data Isolation         | ADDED    | Real PostgreSQL gate for scope isolation, connection ownership, idempotency, cursor, legacy backfill |
 | Connector Contract            | ADDED    | Local HTTP fixture connector gate for factory isolation, auth, pagination, error taxonomy            |
+| Worker Ingestion E2E          | ADDED    | Real worker process with PostgreSQL, Redis, BullMQ, local HTTP reference provider, crash/retry tests |
+| Worker Docker Runtime         | ADDED    | Built worker image readiness check against PostgreSQL and Redis                                      |
 
 ### Dependency Audit Status
 
@@ -54,6 +56,51 @@ Foundation security has been hardened. All known dependency vulnerabilities are 
 | High/Critical blocking gate              | PASS   | pnpm audit --prod --audit-level=high  |
 | Full production dependency audit         | PASS   | pnpm audit --prod                     |
 | Current known production vulnerabilities | 0      | 0 critical, 0 high, 0 moderate, 0 low |
+
+---
+
+## Sprint 05 — Worker Ingestion & Queue Reliability
+
+Sprint 05 replaces the fail-closed social-ingestion worker stub with a durable worker pipeline for the Sprint 04 reference HTTP connector. It does not add live third-party social providers or intelligence processors.
+
+### Worker Reliability Architecture
+
+| Area                      | Implementation                                                                                                                                                |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Queue namespace           | BullMQ `prefix` is driven by `QUEUE_PREFIX`, with CI-specific prefixes and no hardcoded production namespace                                                  |
+| Job registry              | `@xlrrank/queue` defines `social.connection.sync`, payload version `1`, known reasons, statuses, and valid transitions                                        |
+| Payload safety            | Queue payloads carry identifiers only and reject credential/token/cookie/authorization-shaped keys                                                            |
+| Durable job ledger        | Existing `jobs` table records scope, connection, payload version, attempts, retry classification, BullMQ job ID, run ID, safe errors, terminal times          |
+| Outbox                    | `job_outbox` is inserted in the same PostgreSQL transaction as the job request                                                                                |
+| Dispatcher                | Claims outbox rows with PostgreSQL row locks and publishes deterministic BullMQ job IDs                                                                       |
+| BullMQ responsibility     | Execution transport, delayed retries, stalled-job redelivery, bounded Redis retention                                                                         |
+| PostgreSQL responsibility | Durable job history, outbox, schedules, leases, ingestion runs, cursors, dead letters, and worker heartbeat state                                             |
+| Worker processor          | Real `social.connection.sync` processor loads DB state, validates connection/scope, obtains connector factory, fetches pages, persists via Sprint 04 boundary |
+| Run-level lease           | `social_sync_leases` uses owner token, expiry, heartbeat, stale recovery, and release ownership                                                               |
+| Retry behavior            | Connector retry classification maps to bounded backoff, rate-limit delay, reauth stop, or terminal dead letter                                                |
+| Scheduling                | `social_sync_schedules` uses UTC `next_sync_at`, cadence, `SKIP LOCKED` claiming, and durable outbox dispatch                                                 |
+| API/UI                    | Manual sync returns HTTP 202 and safe job status; UI shows truthful queued/running/retrying/completed/failed states without fake percentages                  |
+| Worker runtime            | Startup reconciliation, readiness, heartbeat, graceful shutdown, safe structured logs, metrics, and retention controls                                        |
+
+### Evidence Matrix
+
+| Requirement           | Implementation                                                 | Redis                                | PostgreSQL                                          | Real Worker                                                | Status        |
+| --------------------- | -------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------- | ---------------------------------------------------------- | ------------- |
+| Durable sync request  | API/service creates durable job + outbox                       | Not required for request             | `jobs`, `job_outbox` transaction                    | Worker consumes after dispatch                             | CI GATE ADDED |
+| Outbox                | Dispatcher publishes pending rows                              | BullMQ receives deterministic job ID | `job_outbox` status/locks                           | Runtime dispatcher loop                                    | CI GATE ADDED |
+| Dispatch idempotency  | Deterministic BullMQ job IDs and unique active job constraints | Duplicate add is harmless            | Unique job/outbox constraints                       | Duplicate request E2E                                      | CI GATE ADDED |
+| Worker processor      | Real social sync processor                                     | BullMQ delivery                      | Loads authoritative job/connection state            | Built worker process                                       | CI GATE ADDED |
+| Run-level lease       | Owner-token connection lease                                   | N/A                                  | `social_sync_leases`                                | Prevents same-connection concurrent sync                   | CI GATE ADDED |
+| Cursor resume         | Cursor read from `social_connections`                          | Redelivery tolerated                 | Cursor advances only after page persistence         | Crash/restart E2E                                          | CI GATE ADDED |
+| Temporary retry       | RETRYABLE maps to delayed retry                                | BullMQ delayed job                   | attempt/retry state persisted                       | Reference provider 500 then success                        | CI GATE ADDED |
+| Rate-limit retry      | Normalized retryAfter/resetAt with safe bounds                 | Delayed retry                        | rate-limit state and next retry persisted           | Reference provider 429 then success                        | CI GATE ADDED |
+| Reauth handling       | AUTHENTICATION marks connection `REAUTH_REQUIRED`              | No hot loop                          | Job/run safe failure state                          | Reference provider 401                                     | CI GATE ADDED |
+| DLQ                   | Terminal dead-letter records                                   | Failed transport state bounded       | `job_dead_letters` and job terminal state           | Permanent/malformed failures                               | CI GATE ADDED |
+| Crash recovery        | Durable cursor + stale lease + BullMQ stalled recovery         | Job redelivery                       | Lease expiry and idempotent persistence             | Killed worker process                                      | CI GATE ADDED |
+| Redis outage recovery | Request path persists without Redis transport                  | Dispatch after recovery              | Pending outbox survives                             | Worker completes after start                               | CI GATE ADDED |
+| Scheduled sync        | Due schedules claimed with `SKIP LOCKED`                       | Same outbox transport                | `social_sync_schedules`, connection schedule mirror | Two scheduler instances in worker E2E                      | CI GATE ADDED |
+| Graceful shutdown     | Runtime drains intervals/workers and closes resources          | Queues/workers closed                | Heartbeat marked draining/stopped                   | Worker process stop exercised                              | CI GATE ADDED |
+| Worker Docker runtime | Worker image readiness check                                   | Redis service                        | PostgreSQL service                                  | `node apps/worker/dist/main.js --readiness-check` in image | CI GATE ADDED |
 
 ---
 
@@ -179,56 +226,57 @@ Local browser E2E execution was not completed because Docker is not installed on
 
 ## 4. Product Subsystem Matrix
 
-| Subsystem                   | Status                           | Notes                                                                                        |
-| --------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------- |
-| Authentication              | VERIFIED                         | Real browser/API E2E suite passed in CI                                                      |
-| Sessions                    | VERIFIED                         | HMAC-signed tokens, httpOnly cookies, revocation, expiry; E2E passed in CI                   |
-| Email verification          | VERIFIED                         | SMTP sink E2E passed in CI                                                                   |
-| Password reset              | VERIFIED                         | SMTP sink E2E with session revocation passed in CI                                           |
-| RBAC                        | VERIFIED                         | 4 roles, 9 permissions, role hierarchy tested                                                |
-| User portal                 | VERIFIED                         | Settings wires profile, password, sessions, account deletion; E2E passed in CI               |
-| Admin portal                | VERIFIED                         | User search/filter/status/roles wired; lockout protections tested in CI                      |
-| Support system              | VERIFIED                         | Ticket portal, internal note filtering, and RBAC tested by Playwright suite in CI            |
-| Notifications               | SCAFFOLD ONLY                    | Service + controller exist, no notification triggers                                         |
-| X connector                 | INTERFACE ONLY                   | Factory-registered adapter with CONFIGURATION_REQUIRED capabilities                          |
-| Instagram connector         | INTERFACE ONLY                   | Same pattern                                                                                 |
-| Facebook connector          | INTERFACE ONLY                   | Same pattern                                                                                 |
-| LinkedIn connector          | INTERFACE ONLY                   | Same pattern                                                                                 |
-| Reddit connector            | INTERFACE ONLY                   | Same pattern                                                                                 |
-| Ingestion                   | SCAFFOLD ONLY                    | Queue infrastructure exists, no real ingestion logic                                         |
-| Workers                     | SCAFFOLD ONLY                    | BullMQ workers created but processors are stubs                                              |
-| Normalized social model     | VERIFIED                         | Types defined, DB schema complete                                                            |
-| Identity resolution         | SCAFFOLD ONLY                    | Algorithm exists, not tested with real data                                                  |
-| Social DNA                  | SCAFFOLD ONLY                    | Generator exists, not tested end-to-end                                                      |
-| Discovery                   | SCAFFOLD ONLY                    | Scoring algorithm exists, not tested with real data                                          |
-| Relationships               | SCAFFOLD ONLY                    | Strength/momentum calculation exists                                                         |
-| Radar/opportunities         | SCAFFOLD ONLY                    | Detection algorithm exists                                                                   |
-| Trends                      | SCAFFOLD ONLY                    | Detection algorithm exists                                                                   |
-| Content intelligence        | SCAFFOLD ONLY                    | Analysis algorithm exists                                                                    |
-| Network intelligence        | SCAFFOLD ONLY                    | Cross-platform merge exists                                                                  |
-| Search                      | SCAFFOLD ONLY                    | Inverted index + search exists                                                               |
-| AI provider framework       | PARTIAL                          | Real HTTP implementations for OpenAI-compatible, Anthropic; 8 provider adapters              |
-| Provider credential storage | PARTIAL                          | DB table exists, encryption implemented                                                      |
-| Model discovery             | PARTIAL                          | Registry + prober with real HTTP calls                                                       |
-| Capability validation       | PARTIAL                          | Prober tests text gen, structured output, streaming                                          |
-| Model registry persistence  | SCAFFOLD ONLY                    | In-memory only                                                                               |
-| AI routing                  | PARTIAL                          | Router with 4 modes, candidate ranking, fallback                                             |
-| Language guard              | SCAFFOLD ONLY                    | Detection + repair exist, not tested with real LLM output                                    |
-| AI cost controls            | SCAFFOLD ONLY                    | Tracking service exists                                                                      |
-| Feature flags               | SCAFFOLD ONLY                    | Service exists with scope-aware flags                                                        |
-| Plans/entitlements          | SCAFFOLD ONLY                    | 4 plans defined in code                                                                      |
-| Billing                     | SCAFFOLD ONLY                    | Service exists, no real billing integration                                                  |
-| Reports                     | SCAFFOLD ONLY                    | Service exists with basic reports                                                            |
-| Browser extension           | PARTIAL                          | Manifest V3, content scripts for 5 platforms, popup                                          |
-| Demo isolation              | SCAFFOLD ONLY                    | Demo seed exists, demo provider exists                                                       |
-| Social persistence          | VERIFIED LOCALLY / CI GATE ADDED | Scope-owned connections, canonical accounts, observations, content, interactions, provenance |
-| Connector runtime isolation | VERIFIED LOCALLY / CI GATE ADDED | Registry stores connector factories, not authenticated singleton instances                   |
-| Docker/deployment           | VERIFIED                         | Docker Compose valid, API/web/worker images build in CI                                      |
-| Dependency security         | VERIFIED                         | 0 known production vulnerabilities                                                           |
-| Encryption                  | VERIFIED                         | AES-256-GCM, roundtrip tested, legacy rejection tested                                       |
-| RBAC security               | VERIFIED                         | Permission hierarchy tested, role enforcement tested                                         |
-| CSRF                        | VERIFIED                         | Double-submit cookie pattern enforced                                                        |
-| Observability               | PARTIAL                          | Pino logging with redaction, basic metrics                                                   |
+| Subsystem                    | Status                           | Notes                                                                                          |
+| ---------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Authentication               | VERIFIED                         | Real browser/API E2E suite passed in CI                                                        |
+| Sessions                     | VERIFIED                         | HMAC-signed tokens, httpOnly cookies, revocation, expiry; E2E passed in CI                     |
+| Email verification           | VERIFIED                         | SMTP sink E2E passed in CI                                                                     |
+| Password reset               | VERIFIED                         | SMTP sink E2E with session revocation passed in CI                                             |
+| RBAC                         | VERIFIED                         | 4 roles, 9 permissions, role hierarchy tested                                                  |
+| User portal                  | VERIFIED                         | Settings wires profile, password, sessions, account deletion; E2E passed in CI                 |
+| Admin portal                 | VERIFIED                         | User search/filter/status/roles wired; lockout protections tested in CI                        |
+| Support system               | VERIFIED                         | Ticket portal, internal note filtering, and RBAC tested by Playwright suite in CI              |
+| Notifications                | SCAFFOLD ONLY                    | Service + controller exist, no notification triggers                                           |
+| X connector                  | INTERFACE ONLY                   | Factory-registered adapter with CONFIGURATION_REQUIRED capabilities                            |
+| Instagram connector          | INTERFACE ONLY                   | Same pattern                                                                                   |
+| Facebook connector           | INTERFACE ONLY                   | Same pattern                                                                                   |
+| LinkedIn connector           | INTERFACE ONLY                   | Same pattern                                                                                   |
+| Reddit connector             | INTERFACE ONLY                   | Same pattern                                                                                   |
+| Ingestion                    | VERIFIED PARTIAL                 | Reference-provider social sync executes through PostgreSQL, Redis, BullMQ, real worker         |
+| Workers                      | VERIFIED PARTIAL                 | Social ingestion processor implemented; intelligence/future queues remain fail-closed          |
+| Normalized social model      | VERIFIED                         | Types defined, DB schema complete                                                              |
+| Identity resolution          | SCAFFOLD ONLY                    | Algorithm exists, not tested with real data                                                    |
+| Social DNA                   | SCAFFOLD ONLY                    | Generator exists, not tested end-to-end                                                        |
+| Discovery                    | SCAFFOLD ONLY                    | Scoring algorithm exists, not tested with real data                                            |
+| Relationships                | SCAFFOLD ONLY                    | Strength/momentum calculation exists                                                           |
+| Radar/opportunities          | SCAFFOLD ONLY                    | Detection algorithm exists                                                                     |
+| Trends                       | SCAFFOLD ONLY                    | Detection algorithm exists                                                                     |
+| Content intelligence         | SCAFFOLD ONLY                    | Analysis algorithm exists                                                                      |
+| Network intelligence         | SCAFFOLD ONLY                    | Cross-platform merge exists                                                                    |
+| Search                       | SCAFFOLD ONLY                    | Inverted index + search exists                                                                 |
+| AI provider framework        | PARTIAL                          | Real HTTP implementations for OpenAI-compatible, Anthropic; 8 provider adapters                |
+| Provider credential storage  | PARTIAL                          | DB table exists, encryption implemented                                                        |
+| Model discovery              | PARTIAL                          | Registry + prober with real HTTP calls                                                         |
+| Capability validation        | PARTIAL                          | Prober tests text gen, structured output, streaming                                            |
+| Model registry persistence   | SCAFFOLD ONLY                    | In-memory only                                                                                 |
+| AI routing                   | PARTIAL                          | Router with 4 modes, candidate ranking, fallback                                               |
+| Language guard               | SCAFFOLD ONLY                    | Detection + repair exist, not tested with real LLM output                                      |
+| AI cost controls             | SCAFFOLD ONLY                    | Tracking service exists                                                                        |
+| Feature flags                | SCAFFOLD ONLY                    | Service exists with scope-aware flags                                                          |
+| Plans/entitlements           | SCAFFOLD ONLY                    | 4 plans defined in code                                                                        |
+| Billing                      | SCAFFOLD ONLY                    | Service exists, no real billing integration                                                    |
+| Reports                      | SCAFFOLD ONLY                    | Service exists with basic reports                                                              |
+| Browser extension            | PARTIAL                          | Manifest V3, content scripts for 5 platforms, popup                                            |
+| Demo isolation               | SCAFFOLD ONLY                    | Demo seed exists, demo provider exists                                                         |
+| Social persistence           | VERIFIED LOCALLY / CI GATE ADDED | Scope-owned connections, canonical accounts, observations, content, interactions, provenance   |
+| Connector runtime isolation  | VERIFIED LOCALLY / CI GATE ADDED | Registry stores connector factories, not authenticated singleton instances                     |
+| Worker ingestion reliability | CI GATE ADDED                    | Durable job outbox, run lease, retries, DLQ, scheduling, crash recovery via reference provider |
+| Docker/deployment            | VERIFIED                         | Docker Compose valid, API/web/worker images build in CI                                        |
+| Dependency security          | VERIFIED                         | 0 known production vulnerabilities                                                             |
+| Encryption                   | VERIFIED                         | AES-256-GCM, roundtrip tested, legacy rejection tested                                         |
+| RBAC security                | VERIFIED                         | Permission hierarchy tested, role enforcement tested                                           |
+| CSRF                         | VERIFIED                         | Double-submit cookie pattern enforced                                                          |
+| Observability                | PARTIAL                          | Pino logging with redaction, basic metrics                                                     |
 
 ---
 
@@ -236,21 +284,18 @@ Local browser E2E execution was not completed because Docker is not installed on
 
 ### HIGH
 
-1. **Worker processors are stubs**
-   - Affected: worker
-   - Impact: No real background processing
-   - State: BLOCKER for production
+No active HIGH defects are confirmed in the Sprint 01-05 foundation gates. Production remains blocked by unverified product capabilities listed in Missing Verification.
 
 ### MEDIUM
 
-2. **Model registry not persisted**
+1. **Model registry not persisted**
    - Affected: AI routing
    - Impact: Model discovery results lost on restart
    - State: Requires database persistence layer
 
 ### LOW
 
-3. **Lint warnings in reports/billing services**
+2. **Lint warnings in reports/billing services**
    - Affected: apps/api/src/reports/reports.service.ts, apps/api/src/billing/ai-cost.service.ts
    - Behavior: Unused variables (db, userId, aiProviders)
    - State: Non-blocking cleanup
@@ -279,7 +324,7 @@ Local browser E2E execution was not completed because Docker is not installed on
 
 - Social connector authentication flows (no test credentials)
 - Social connector production integration
-- Ingestion and worker processors
+- Live third-party social ingestion through production provider APIs
 - AI provider actual API calls (no test API keys in CI)
 - AI runtime/provider configuration
 - Persistent dynamic model registry
@@ -318,9 +363,9 @@ Local browser E2E execution was not completed because Docker is not installed on
 
 1. ~~**Foundation/Security**~~ — DONE (Sprint 02)
 2. ~~**Auth/User/Admin/Support**~~ — CI VERIFIED on current branch
-3. **Persistence/Data ownership** — pgvector verification
-4. **Social connector framework** — First live connector
-5. **Ingestion/Workers** — Real job processing
+3. ~~**Persistence/Data ownership**~~ — DONE (Sprint 04)
+4. ~~**Worker ingestion reliability**~~ — DONE for reference-provider path (Sprint 05)
+5. **Social connector framework** — First live connector
 6. **AI provider runtime** — At least one real provider verified
 7. **Dynamic model discovery** — Real model enumeration
 8. **Routing/Fallback/Language** — End-to-end AI routing

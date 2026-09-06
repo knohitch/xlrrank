@@ -12,7 +12,7 @@ Tracking completion of each prompt from the Build Prompt Pack.
 | 3      | User, Admin and Support Portals           | DONE           | VERIFIED (Application E2E CI)                                      | NO               |
 | 4      | Core Domain Database                      | HARDENED       | VERIFIED (ownership/isolation PostgreSQL integration)              | PARTIAL          |
 | 5      | Social Platform Connector Framework       | HARDENED       | VERIFIED CONTRACT (local HTTP reference provider)                  | PARTIAL          |
-| 6      | Platform Connection UI and Data Ingestion | DONE           | NOT VERIFIED                                                       | NO               |
+| 6      | Platform Connection UI and Data Ingestion | HARDENED       | VERIFIED (worker/reference-provider ingestion only)                | PARTIAL          |
 | 7      | AI Provider Framework                     | DONE           | PARTIAL (real HTTP implementations)                                | NO               |
 | 8      | Dynamic Model Registry                    | DONE           | PARTIAL                                                            | NO               |
 | 9      | Reasoning Tier Engine and AI Router       | DONE           | SCAFFOLD ONLY                                                      | NO               |
@@ -122,10 +122,27 @@ Tracking completion of each prompt from the Build Prompt Pack.
 - **CI gates**: Social Data Isolation and Connector Contract gates added as blocking GitHub Actions jobs.
 - **Production deployment**: NOT VERIFIED.
 
+## Audit Sprint 05 Results
+
+- **Worker ingestion**: Replaced the social-ingestion worker stub with a real `social.connection.sync` processor using BullMQ, PostgreSQL, the Sprint 04 connector factory, and the reference HTTP provider.
+- **Unimplemented queues**: Intelligence and generic future job types remain explicit fail-closed paths.
+- **Job contracts**: Centralized job type registry, payload versioning, UUID validation, and credential-free queue payload enforcement in `@xlrrank/queue`.
+- **Queue namespace**: BullMQ key prefix is configuration-driven with CI-specific prefixes.
+- **Durable job ledger**: Existing `jobs` table now tracks social sync status, payload version, scope, connection, attempts, retry classification, BullMQ job ID, ingestion run, safe errors, and terminal times.
+- **Transactional outbox**: Sync requests create durable job and `job_outbox` records in PostgreSQL before Redis dispatch. Dispatcher uses deterministic BullMQ job IDs and PostgreSQL row locking.
+- **Redis outage behavior**: Manual sync requests remain pending in PostgreSQL outbox when transport is unavailable and dispatch after recovery.
+- **Run-level lease**: `social_sync_leases` provides owner-token, heartbeat, stale lease recovery, and same-connection concurrency protection without holding DB transactions across provider HTTP calls.
+- **Retry/DLQ**: Retry classification drives bounded exponential backoff, rate-limit delay handling, reauthentication stops, malformed/permanent terminal failures, and durable dead-letter records.
+- **Scheduling**: `social_sync_schedules` adds UTC due scheduling, cadence, multi-scheduler locking, and durable outbox dispatch.
+- **API/UI**: Manual sync endpoint returns HTTP 202 with truthful job status; status endpoint is scope-authorized; platform UI shows queued/running/retrying/completed/failed states without fake progress.
+- **Worker runtime**: Startup reconciliation, readiness checks, worker heartbeat, graceful shutdown, bounded BullMQ retention, and safe structured logs/metrics added.
+- **CI gates**: Worker Ingestion E2E and Worker Docker Runtime gates added as blocking GitHub Actions jobs.
+- **Production deployment**: NOT VERIFIED.
+
 ## Remaining Product Blockers
 
-- Social connector live integration
-- Ingestion/worker processing
+- Live social connector integration for X/Meta/LinkedIn/Reddit
+- Live third-party social ingestion through production provider APIs
 - AI runtime/provider configuration
 - Persistent dynamic model registry
 - Routing/language enforcement
