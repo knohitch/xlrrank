@@ -7,7 +7,16 @@ import { AuthRateLimitService } from "./rate-limiter.js";
 
 @Global()
 @Module({
-  providers: [SessionService, SessionAuthGuard, PermissionsGuard, RolesGuard, AuthRateLimitService],
+  providers: [
+    SessionService,
+    SessionAuthGuard,
+    PermissionsGuard,
+    RolesGuard,
+    {
+      provide: AuthRateLimitService,
+      useFactory: () => new AuthRateLimitService(),
+    },
+  ],
   exports: [SessionService, SessionAuthGuard, PermissionsGuard, RolesGuard, AuthRateLimitService],
 })
 export class SecurityModule {}
