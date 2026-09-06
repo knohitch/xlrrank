@@ -290,7 +290,6 @@ test("signup, verification, session, profile, password reset, and signout work e
     password,
   });
   expect(oldSignin.status()).toBe(401);
-  await (await signin(email, changedPassword)).dispose();
 
   await page.goto("/forgot-password");
   await page.getByLabel("Email").fill(email);
