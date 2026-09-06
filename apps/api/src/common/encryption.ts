@@ -1,11 +1,7 @@
-import {
-  createCipheriv,
-  createDecipheriv,
-  createHash,
-  randomBytes,
-} from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 const ENCRYPTION_PREFIX = "enc:v1";
+const ENCRYPTION_CONTEXT_PREFIX = "enc:v2";
 const IV_BYTES = 12;
 const MIN_MASTER_KEY_LENGTH = 32;
 
@@ -22,32 +18,51 @@ function resolveMasterKey(masterKey?: string): Buffer {
   return createHash("sha256").update(secret, "utf8").digest();
 }
 
-export function encryptSecret(plaintext: string, masterKey?: string): string {
+function normalizeAssociatedData(associatedData?: string): Buffer | null {
+  if (!associatedData) return null;
+  return Buffer.from(associatedData, "utf8");
+}
+
+export function encryptSecret(
+  plaintext: string,
+  masterKey?: string,
+  associatedData?: string,
+): string {
   if (!plaintext) return "";
 
   const key = resolveMasterKey(masterKey);
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const ciphertext = Buffer.concat([
-    cipher.update(plaintext, "utf8"),
-    cipher.final(),
-  ]);
+  const aad = normalizeAssociatedData(associatedData);
+  if (aad) cipher.setAAD(aad);
+  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
 
   return [
-    ENCRYPTION_PREFIX,
+    aad ? ENCRYPTION_CONTEXT_PREFIX : ENCRYPTION_PREFIX,
     iv.toString("base64url"),
     tag.toString("base64url"),
     ciphertext.toString("base64url"),
   ].join(":");
 }
 
-export function decryptSecret(ciphertext: string, masterKey?: string): string {
+export function decryptSecret(
+  ciphertext: string,
+  masterKey?: string,
+  associatedData?: string,
+): string {
   if (!ciphertext) return "";
 
   const parts = ciphertext.split(":");
-  if (parts.length !== 5 || `${parts[0]}:${parts[1]}` !== ENCRYPTION_PREFIX) {
+  const prefix = `${parts[0]}:${parts[1]}`;
+  if (
+    parts.length !== 5 ||
+    (prefix !== ENCRYPTION_PREFIX && prefix !== ENCRYPTION_CONTEXT_PREFIX)
+  ) {
     throw new Error("Secret is not stored in the supported encrypted format");
+  }
+  if (prefix === ENCRYPTION_CONTEXT_PREFIX && !associatedData) {
+    throw new Error("Encrypted secret requires associated data context");
   }
 
   const [, , ivEncoded, tagEncoded, payloadEncoded] = parts;
@@ -56,12 +71,10 @@ export function decryptSecret(ciphertext: string, masterKey?: string): string {
   }
 
   const key = resolveMasterKey(masterKey);
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    key,
-    Buffer.from(ivEncoded, "base64url"),
-  );
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivEncoded, "base64url"));
   decipher.setAuthTag(Buffer.from(tagEncoded, "base64url"));
+  const aad = normalizeAssociatedData(associatedData);
+  if (aad) decipher.setAAD(aad);
 
   const plaintext = Buffer.concat([
     decipher.update(Buffer.from(payloadEncoded, "base64url")),

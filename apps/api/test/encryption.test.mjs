@@ -29,6 +29,32 @@ test("tampered ciphertext fails authentication", async () => {
   assert.throws(() => decryptSecret(tampered, MASTER_KEY));
 });
 
+test("associated data binds ciphertext to one social connection context", async () => {
+  const { encryptSecret, decryptSecret } = await import("../dist/common/encryption.js");
+  const encrypted = encryptSecret(
+    "connection-secret",
+    MASTER_KEY,
+    "social-connection:connection-a:scope-a:reference:credentials:v2",
+  );
+
+  assert.match(encrypted, /^enc:v2:/);
+  assert.equal(
+    decryptSecret(
+      encrypted,
+      MASTER_KEY,
+      "social-connection:connection-a:scope-a:reference:credentials:v2",
+    ),
+    "connection-secret",
+  );
+  assert.throws(() =>
+    decryptSecret(
+      encrypted,
+      MASTER_KEY,
+      "social-connection:connection-b:scope-b:reference:credentials:v2",
+    ),
+  );
+});
+
 test("legacy reversible enc payloads are rejected", async () => {
   const { decryptSecret } = await import("../dist/common/encryption.js");
   assert.throws(() => decryptSecret("enc:cGxhaW50ZXh0", MASTER_KEY));
