@@ -15,6 +15,13 @@
       "when": 1788375765265,
       "tag": "0001_superb_jazinda",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788648120000,
+      "tag": "0002_social_ownership_isolation",
+      "breakpoints": true
     }
   ]
 }

@@ -1,10 +1,26 @@
 import { getDb } from "./client.js";
 import { eq } from "drizzle-orm";
 import {
-  users, platforms, socialAccounts, people, personIdentifiers,
-  content, contentMetrics, interactions, relationships, relationshipEvents,
-  relationshipPipelines, relationshipStages, topics, contentTopics,
-  opportunities, trends, recommendations, notifications, supportTickets, supportMessages,
+  users,
+  platforms,
+  socialAccounts,
+  people,
+  personIdentifiers,
+  content,
+  contentMetrics,
+  interactions,
+  relationships,
+  relationshipEvents,
+  relationshipPipelines,
+  relationshipStages,
+  topics,
+  contentTopics,
+  opportunities,
+  trends,
+  recommendations,
+  notifications,
+  supportTickets,
+  supportMessages,
 } from "./schema/index.js";
 import { hashPassword } from "@xlrrank/auth";
 import { assignRole, seedRbac } from "./seed-rbac.js";
@@ -15,7 +31,27 @@ function isDemoRecord(id: string): boolean {
   return id.startsWith(DEMO_PREFIX);
 }
 
+export function assertDemoSeedAllowed(): void {
+  const env = process.env.NODE_ENV ?? "development";
+  const databaseUrl = process.env.DATABASE_URL ?? "";
+  const explicitlyAllowed = process.env.ALLOW_DEMO_SEED === "true";
+  const safeEnvironment = env === "development" || env === "test";
+  const safeDatabase =
+    databaseUrl.includes("localhost") ||
+    databaseUrl.includes("127.0.0.1") ||
+    databaseUrl.includes("xlrrank_demo") ||
+    databaseUrl.includes("xlrrank_test") ||
+    databaseUrl.includes("xlrrank_audit");
+
+  if (!explicitlyAllowed || !safeEnvironment || !safeDatabase) {
+    throw new Error(
+      "Demo seed is disabled unless ALLOW_DEMO_SEED=true, NODE_ENV is development/test, and DATABASE_URL points to a demo/test/audit database.",
+    );
+  }
+}
+
 export async function seedDemoData(): Promise<void> {
+  assertDemoSeedAllowed();
   const db = getDb();
 
   await seedRbac();
@@ -60,15 +96,18 @@ export async function seedDemoData(): Promise<void> {
   const liPlatform = platformRecords.find((p) => p.slug === "linkedin");
 
   if (xPlatform) {
-    await db.insert(socialAccounts).values({
-      platformId: xPlatform.id,
-      userId: demoUser.id,
-      externalId: "demo_x_user",
-      handle: "demo_user",
-      displayName: "Demo User",
-      status: "DEMO",
-      bio: "Founder interested in African fintech, SaaS, and AI",
-    }).onConflictDoNothing();
+    await db
+      .insert(socialAccounts)
+      .values({
+        platformId: xPlatform.id,
+        userId: demoUser.id,
+        externalId: "demo_x_user",
+        handle: "demo_user",
+        displayName: "Demo User",
+        status: "DEMO",
+        bio: "Founder interested in African fintech, SaaS, and AI",
+      })
+      .onConflictDoNothing();
   }
 
   const demoPeople = [
@@ -90,8 +129,16 @@ export async function seedDemoData(): Promise<void> {
   }
 
   const demoTopics = [
-    "fintech", "cross-border payments", "compliance", "SaaS", "CRM",
-    "AI", "social graphs", "venture capital", "African markets", "B2B",
+    "fintech",
+    "cross-border payments",
+    "compliance",
+    "SaaS",
+    "CRM",
+    "AI",
+    "social graphs",
+    "venture capital",
+    "African markets",
+    "B2B",
   ];
   const topicRecords: Array<{ id: string; label: string }> = [];
   for (const t of demoTopics) {
@@ -104,21 +151,38 @@ export async function seedDemoData(): Promise<void> {
   }
 
   if (xPlatform) {
-    const account = await db.select().from(socialAccounts).where(eq(socialAccounts.userId, demoUser.id)).limit(1);
+    const account = await db
+      .select()
+      .from(socialAccounts)
+      .where(eq(socialAccounts.userId, demoUser.id))
+      .limit(1);
     if (account[0]) {
       const demoContents = [
-        { body: "Just launched our cross-border payments API. Compliance was the hardest part.", contentType: "short_post" },
-        { body: "The future of African fintech is in stablecoin settlement. Thread:", contentType: "thread" },
-        { body: "CRM pricing is broken. Enterprise shouldn't mean expensive.", contentType: "short_post" },
+        {
+          body: "Just launched our cross-border payments API. Compliance was the hardest part.",
+          contentType: "short_post",
+        },
+        {
+          body: "The future of African fintech is in stablecoin settlement. Thread:",
+          contentType: "thread",
+        },
+        {
+          body: "CRM pricing is broken. Enterprise shouldn't mean expensive.",
+          contentType: "short_post",
+        },
       ];
       for (const c of demoContents) {
-        const [contentRecord] = await db.insert(content).values({
-          platformId: xPlatform.id,
-          authorAccountId: account[0].id,
-          externalId: `demo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-          body: c.body,
-          contentType: c.contentType,
-        }).onConflictDoNothing().returning();
+        const [contentRecord] = await db
+          .insert(content)
+          .values({
+            platformId: xPlatform.id,
+            authorAccountId: account[0].id,
+            externalId: `demo_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            body: c.body,
+            contentType: c.contentType,
+          })
+          .onConflictDoNothing()
+          .returning();
 
         if (contentRecord) {
           await db.insert(contentMetrics).values({
@@ -141,32 +205,62 @@ export async function seedDemoData(): Promise<void> {
       .returning();
 
     if (pipeline) {
-      const stages = ["Discovered", "Following", "Engaged", "Mutual Engagement", "Familiar", "Conversation", "Relationship"];
+      const stages = [
+        "Discovered",
+        "Following",
+        "Engaged",
+        "Mutual Engagement",
+        "Familiar",
+        "Conversation",
+        "Relationship",
+      ];
       for (let i = 0; i < stages.length; i++) {
-        await db.insert(relationshipStages).values({
-          pipelineId: pipeline.id,
-          key: stages[i]!.toLowerCase().replace(/\s+/g, "_"),
-          label: stages[i]!,
-          orderIndex: i,
-        }).onConflictDoNothing();
+        await db
+          .insert(relationshipStages)
+          .values({
+            pipelineId: pipeline.id,
+            key: stages[i]!.toLowerCase().replace(/\s+/g, "_"),
+            label: stages[i]!,
+            orderIndex: i,
+          })
+          .onConflictDoNothing();
       }
 
-      const [rel] = await db.insert(relationships).values({
-        userId: demoUser.id,
-        fromPersonId: personRecords[0]!.id,
-        toPersonId: personRecords[1]!.id,
-        pipelineId: pipeline.id,
-        stageKey: "engaged",
-        strength: 72,
-        momentum: 15,
-        tier: "A",
-      }).onConflictDoNothing().returning();
+      const [rel] = await db
+        .insert(relationships)
+        .values({
+          userId: demoUser.id,
+          fromPersonId: personRecords[0]!.id,
+          toPersonId: personRecords[1]!.id,
+          pipelineId: pipeline.id,
+          stageKey: "engaged",
+          strength: 72,
+          momentum: 15,
+          tier: "A",
+        })
+        .onConflictDoNothing()
+        .returning();
 
       if (rel) {
         await db.insert(relationshipEvents).values([
-          { relationshipId: rel.id, eventType: "followed", sourceKind: "OBSERVED", occurredAt: new Date(Date.now() - 30 * 86400000) },
-          { relationshipId: rel.id, eventType: "commented", sourceKind: "OBSERVED", occurredAt: new Date(Date.now() - 15 * 86400000) },
-          { relationshipId: rel.id, eventType: "replied", sourceKind: "OBSERVED", occurredAt: new Date(Date.now() - 5 * 86400000) },
+          {
+            relationshipId: rel.id,
+            eventType: "followed",
+            sourceKind: "OBSERVED",
+            occurredAt: new Date(Date.now() - 30 * 86400000),
+          },
+          {
+            relationshipId: rel.id,
+            eventType: "commented",
+            sourceKind: "OBSERVED",
+            occurredAt: new Date(Date.now() - 15 * 86400000),
+          },
+          {
+            relationshipId: rel.id,
+            eventType: "replied",
+            sourceKind: "OBSERVED",
+            occurredAt: new Date(Date.now() - 5 * 86400000),
+          },
         ]);
       }
     }
@@ -174,21 +268,39 @@ export async function seedDemoData(): Promise<void> {
 
   const oppTypes = ["conversation", "commercial_intent", "content_gap"];
   for (const type of oppTypes) {
-    await db.insert(opportunities).values({
-      userId: demoUser.id,
-      typeKey: type,
-      title: `Demo ${type} opportunity`,
-      description: `This is a demo ${type} opportunity for testing.`,
-      score: Math.floor(Math.random() * 40) + 60,
-      confidence: 0.85,
-      status: "OPEN",
-    }).onConflictDoNothing();
+    await db
+      .insert(opportunities)
+      .values({
+        userId: demoUser.id,
+        typeKey: type,
+        title: `Demo ${type} opportunity`,
+        description: `This is a demo ${type} opportunity for testing.`,
+        score: Math.floor(Math.random() * 40) + 60,
+        confidence: 0.85,
+        status: "OPEN",
+      })
+      .onConflictDoNothing();
   }
 
   await db.insert(notifications).values([
-    { userId: demoUser.id, type: "HIGH_VALUE_OPPORTUNITY", title: "New conversation opportunity", body: "Sarah Adams started a thread about cross-border payments." },
-    { userId: demoUser.id, type: "RELATIONSHIP_COOLING", title: "Relationship cooling", body: "Your relationship with James Chen has momentum -15." },
-    { userId: demoUser.id, type: "TREND_ALERT", title: "Trending topic", body: "African fintech discussion is accelerating in your network." },
+    {
+      userId: demoUser.id,
+      type: "HIGH_VALUE_OPPORTUNITY",
+      title: "New conversation opportunity",
+      body: "Sarah Adams started a thread about cross-border payments.",
+    },
+    {
+      userId: demoUser.id,
+      type: "RELATIONSHIP_COOLING",
+      title: "Relationship cooling",
+      body: "Your relationship with James Chen has momentum -15.",
+    },
+    {
+      userId: demoUser.id,
+      type: "TREND_ALERT",
+      title: "Trending topic",
+      body: "African fintech discussion is accelerating in your network.",
+    },
   ]);
 
   console.log("Demo data seeded successfully.");

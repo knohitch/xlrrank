@@ -12,7 +12,334 @@ import {
   primaryKey,
   doublePrecision,
 } from "drizzle-orm/pg-core";
-import { users, platforms, aiProviders, aiModels, jobs } from "./auth.js";
+import { users, platforms, aiProviders, aiModels, jobs, organizations } from "./auth.js";
+
+export const dataScopes = pgTable(
+  "data_scopes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeType: text("scope_type").notNull(),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id").references(() => organizations.id, {
+      onDelete: "cascade",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("data_scopes_personal_user_unique").on(t.scopeType, t.userId),
+    uniqueIndex("data_scopes_org_unique").on(t.scopeType, t.organizationId),
+    index("data_scopes_type_idx").on(t.scopeType),
+  ],
+);
+
+export const socialExternalAccounts = pgTable(
+  "social_external_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    platformId: uuid("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "restrict" }),
+    externalId: text("external_id").notNull(),
+    currentHandle: text("current_handle"),
+    displayName: text("display_name"),
+    profileUrl: text("profile_url"),
+    profileImageUrl: text("profile_image_url"),
+    bio: text("bio"),
+    location: text("location"),
+    website: text("website"),
+    followerCount: integer("follower_count"),
+    followingCount: integer("following_count"),
+    visibility: text("visibility").notNull().default("UNKNOWN"),
+    metadata: jsonb("metadata"),
+    firstObservedAt: timestamp("first_observed_at", { withTimezone: true }).notNull().defaultNow(),
+    lastObservedAt: timestamp("last_observed_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("social_external_accounts_platform_external_unique").on(t.platformId, t.externalId),
+    index("social_external_accounts_platform_handle_idx").on(t.platformId, t.currentHandle),
+    index("social_external_accounts_visibility_idx").on(t.visibility),
+  ],
+);
+
+export const socialAccountHandles = pgTable(
+  "social_account_handles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    externalAccountId: uuid("external_account_id")
+      .notNull()
+      .references(() => socialExternalAccounts.id, { onDelete: "cascade" }),
+    handle: text("handle").notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("social_account_handles_account_handle_unique").on(t.externalAccountId, t.handle),
+    index("social_account_handles_handle_idx").on(t.handle),
+  ],
+);
+
+export const socialConnections = pgTable(
+  "social_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    platformId: uuid("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "restrict" }),
+    externalAccountId: uuid("external_account_id").references(() => socialExternalAccounts.id, {
+      onDelete: "restrict",
+    }),
+    status: text("status").notNull().default("DISCONNECTED"),
+    credentialsEncrypted: text("credentials_encrypted"),
+    credentialVersion: integer("credential_version").notNull().default(1),
+    verifiedExternalId: text("verified_external_id"),
+    verifiedHandle: text("verified_handle"),
+    syncCursor: text("sync_cursor"),
+    cursorUpdatedAt: timestamp("cursor_updated_at", { withTimezone: true }),
+    lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+    lastSyncAttemptAt: timestamp("last_sync_attempt_at", { withTimezone: true }),
+    syncError: jsonb("sync_error"),
+    rateLimitRemaining: integer("rate_limit_remaining"),
+    rateLimitResetAt: timestamp("rate_limit_reset_at", { withTimezone: true }),
+    retryAfterSeconds: integer("retry_after_seconds"),
+    providerMetadata: jsonb("provider_metadata"),
+    disabledAt: timestamp("disabled_at", { withTimezone: true }),
+    disconnectedAt: timestamp("disconnected_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("social_connections_scope_platform_unique").on(t.scopeId, t.platformId),
+    index("social_connections_scope_idx").on(t.scopeId),
+    index("social_connections_platform_idx").on(t.platformId),
+    index("social_connections_external_account_idx").on(t.externalAccountId),
+    index("social_connections_status_idx").on(t.status),
+  ],
+);
+
+export const socialAccountObservations = pgTable(
+  "social_account_observations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => socialConnections.id, { onDelete: "cascade" }),
+    externalAccountId: uuid("external_account_id")
+      .notNull()
+      .references(() => socialExternalAccounts.id, { onDelete: "restrict" }),
+    visibility: text("visibility").notNull().default("UNKNOWN"),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+    providerCreatedAt: timestamp("provider_created_at", { withTimezone: true }),
+    normalizationVersion: text("normalization_version").notNull(),
+    adapterVersion: text("adapter_version").notNull(),
+    ingestionRunId: uuid("ingestion_run_id"),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [
+    uniqueIndex("social_account_observations_scope_account_unique").on(
+      t.scopeId,
+      t.externalAccountId,
+    ),
+    index("social_account_observations_scope_idx").on(t.scopeId),
+    index("social_account_observations_connection_idx").on(t.connectionId),
+  ],
+);
+
+export const socialContentItems = pgTable(
+  "social_content_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id").references(() => dataScopes.id, { onDelete: "cascade" }),
+    platformId: uuid("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "restrict" }),
+    authorExternalAccountId: uuid("author_external_account_id")
+      .notNull()
+      .references(() => socialExternalAccounts.id, { onDelete: "restrict" }),
+    externalId: text("external_id").notNull(),
+    body: text("body").notNull(),
+    contentType: text("content_type"),
+    language: text("language"),
+    visibility: text("visibility").notNull().default("UNKNOWN"),
+    providerCreatedAt: timestamp("provider_created_at", { withTimezone: true }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("social_content_items_scope_idx").on(t.scopeId),
+    index("social_content_items_platform_external_idx").on(t.platformId, t.externalId),
+    index("social_content_items_author_idx").on(t.authorExternalAccountId),
+    index("social_content_items_visibility_idx").on(t.visibility),
+  ],
+);
+
+export const socialContentObservations = pgTable(
+  "social_content_observations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => socialConnections.id, { onDelete: "cascade" }),
+    contentItemId: uuid("content_item_id")
+      .notNull()
+      .references(() => socialContentItems.id, { onDelete: "cascade" }),
+    visibility: text("visibility").notNull().default("UNKNOWN"),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+    providerCreatedAt: timestamp("provider_created_at", { withTimezone: true }),
+    normalizationVersion: text("normalization_version").notNull(),
+    adapterVersion: text("adapter_version").notNull(),
+    ingestionRunId: uuid("ingestion_run_id"),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [
+    uniqueIndex("social_content_observations_scope_content_unique").on(t.scopeId, t.contentItemId),
+    index("social_content_observations_scope_idx").on(t.scopeId),
+    index("social_content_observations_connection_idx").on(t.connectionId),
+  ],
+);
+
+export const socialInteractions = pgTable(
+  "social_interactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id").references(() => dataScopes.id, { onDelete: "cascade" }),
+    platformId: uuid("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "restrict" }),
+    externalId: text("external_id").notNull(),
+    fromExternalAccountId: uuid("from_external_account_id")
+      .notNull()
+      .references(() => socialExternalAccounts.id, { onDelete: "restrict" }),
+    toContentItemId: uuid("to_content_item_id").references(() => socialContentItems.id, {
+      onDelete: "cascade",
+    }),
+    toExternalAccountId: uuid("to_external_account_id").references(
+      () => socialExternalAccounts.id,
+      { onDelete: "restrict" },
+    ),
+    type: text("type").notNull(),
+    body: text("body"),
+    visibility: text("visibility").notNull().default("UNKNOWN"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("social_interactions_scope_idx").on(t.scopeId),
+    index("social_interactions_platform_external_idx").on(t.platformId, t.externalId),
+    index("social_interactions_from_idx").on(t.fromExternalAccountId),
+    index("social_interactions_content_idx").on(t.toContentItemId),
+  ],
+);
+
+export const socialInteractionObservations = pgTable(
+  "social_interaction_observations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => socialConnections.id, { onDelete: "cascade" }),
+    interactionId: uuid("interaction_id")
+      .notNull()
+      .references(() => socialInteractions.id, { onDelete: "cascade" }),
+    visibility: text("visibility").notNull().default("UNKNOWN"),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+    normalizationVersion: text("normalization_version").notNull(),
+    adapterVersion: text("adapter_version").notNull(),
+    ingestionRunId: uuid("ingestion_run_id"),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [
+    uniqueIndex("social_interaction_observations_scope_interaction_unique").on(
+      t.scopeId,
+      t.interactionId,
+    ),
+    index("social_interaction_observations_scope_idx").on(t.scopeId),
+    index("social_interaction_observations_connection_idx").on(t.connectionId),
+  ],
+);
+
+export const socialContentMetrics = pgTable(
+  "social_content_metrics",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => socialConnections.id, { onDelete: "cascade" }),
+    contentItemId: uuid("content_item_id")
+      .notNull()
+      .references(() => socialContentItems.id, { onDelete: "cascade" }),
+    ingestionRunId: uuid("ingestion_run_id"),
+    snapshotKey: text("snapshot_key").notNull(),
+    likes: integer("likes").notNull().default(0),
+    comments: integer("comments").notNull().default(0),
+    shares: integer("shares").notNull().default(0),
+    impressions: integer("impressions").notNull().default(0),
+    engagementRate: doublePrecision("engagement_rate"),
+    collectedAt: timestamp("collected_at", { withTimezone: true }).notNull().defaultNow(),
+    providerMetadata: jsonb("provider_metadata"),
+  },
+  (t) => [
+    uniqueIndex("social_content_metrics_snapshot_unique").on(
+      t.scopeId,
+      t.contentItemId,
+      t.snapshotKey,
+    ),
+    index("social_content_metrics_content_idx").on(t.contentItemId),
+    index("social_content_metrics_connection_idx").on(t.connectionId),
+  ],
+);
+
+export const socialIngestionRuns = pgTable(
+  "social_ingestion_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => socialConnections.id, { onDelete: "cascade" }),
+    platformId: uuid("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "restrict" }),
+    status: text("status").notNull().default("RUNNING"),
+    cursorBefore: text("cursor_before"),
+    cursorAfter: text("cursor_after"),
+    profilesProcessed: integer("profiles_processed").notNull().default(0),
+    contentProcessed: integer("content_processed").notNull().default(0),
+    interactionsProcessed: integer("interactions_processed").notNull().default(0),
+    errors: jsonb("errors"),
+    retryClassification: text("retry_classification"),
+    normalizationVersion: text("normalization_version").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("social_ingestion_runs_connection_idx").on(t.connectionId),
+    index("social_ingestion_runs_scope_idx").on(t.scopeId),
+    index("social_ingestion_runs_status_idx").on(t.status),
+  ],
+);
 
 export const socialAccounts = pgTable(
   "social_accounts",
@@ -46,10 +373,7 @@ export const socialAccounts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("social_accounts_platform_external_unique").on(
-      t.platformId,
-      t.externalId,
-    ),
+    uniqueIndex("social_accounts_platform_external_unique").on(t.platformId, t.externalId),
     uniqueIndex("social_accounts_platform_handle_unique").on(t.platformId, t.handle),
     index("social_accounts_user_idx").on(t.userId),
     index("social_accounts_status_idx").on(t.status),
@@ -84,10 +408,7 @@ export const personIdentifiers = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("person_identifiers_type_value_unique").on(
-      t.identifierType,
-      t.identifierValue,
-    ),
+    uniqueIndex("person_identifiers_type_value_unique").on(t.identifierType, t.identifierValue),
     index("person_identifiers_person_idx").on(t.personId),
   ],
 );
@@ -172,8 +493,7 @@ export const interactions = pgTable(
       .notNull()
       .references(() => platforms.id, { onDelete: "cascade" }),
     fromAccountId: uuid("from_account_id").references(() => socialAccounts.id),
-    toContentId: uuid("to_content_id")
-      .references(() => content.id, { onDelete: "cascade" }),
+    toContentId: uuid("to_content_id").references(() => content.id, { onDelete: "cascade" }),
     toAccountId: uuid("to_account_id").references(() => socialAccounts.id),
     type: text("type").notNull(),
     externalId: text("external_id"),
@@ -214,10 +534,7 @@ export const conversations = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("conversations_platform_external_unique").on(
-      t.platformId,
-      t.externalId,
-    ),
+    uniqueIndex("conversations_platform_external_unique").on(t.platformId, t.externalId),
     index("conversations_created_idx").on(t.createdAt),
   ],
 );
@@ -232,10 +549,7 @@ export const topics = pgTable(
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [
-    uniqueIndex("topics_slug_unique").on(t.slug),
-    index("topics_label_idx").on(t.label),
-  ],
+  (t) => [uniqueIndex("topics_slug_unique").on(t.slug), index("topics_label_idx").on(t.label)],
 );
 
 export const topicClusters = pgTable(
@@ -304,6 +618,7 @@ export const relationships = pgTable(
   "relationships",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id").references(() => dataScopes.id, { onDelete: "cascade" }),
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
@@ -326,12 +641,9 @@ export const relationships = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("relationships_from_to_unique").on(
-      t.fromPersonId,
-      t.toPersonId,
-      t.userId,
-    ),
+    uniqueIndex("relationships_from_to_unique").on(t.fromPersonId, t.toPersonId, t.userId),
     index("relationships_user_idx").on(t.userId),
+    index("relationships_scope_idx").on(t.scopeId),
     index("relationships_pipeline_stage_idx").on(t.pipelineId, t.stageKey),
   ],
 );
@@ -360,6 +672,7 @@ export const socialDnaProfiles = pgTable(
   "social_dna_profiles",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id").references(() => dataScopes.id, { onDelete: "cascade" }),
     personId: uuid("person_id")
       .notNull()
       .references(() => people.id, { onDelete: "cascade" }),
@@ -370,6 +683,7 @@ export const socialDnaProfiles = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    index("social_dna_profiles_scope_idx").on(t.scopeId),
     index("social_dna_person_version_idx").on(t.personId, t.version),
   ],
 );
@@ -380,6 +694,7 @@ export const opportunities = pgTable(
   "opportunities",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id").references(() => dataScopes.id, { onDelete: "cascade" }),
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
@@ -397,6 +712,7 @@ export const opportunities = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    index("opportunities_scope_idx").on(t.scopeId),
     index("opportunities_user_idx").on(t.userId),
     index("opportunities_type_idx").on(t.typeKey),
     index("opportunities_status_idx").on(t.status),
@@ -424,6 +740,7 @@ export const recommendations = pgTable(
   "recommendations",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id").references(() => dataScopes.id, { onDelete: "cascade" }),
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
@@ -437,7 +754,10 @@ export const recommendations = pgTable(
     status: text("status").notNull().default("PENDING"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("recommendations_user_idx").on(t.userId)],
+  (t) => [
+    index("recommendations_scope_idx").on(t.scopeId),
+    index("recommendations_user_idx").on(t.userId),
+  ],
 );
 
 export const recommendationFeedback = pgTable(
@@ -529,10 +849,8 @@ export const aiRoutes = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     taskType: text("task_type").notNull(),
     tier: text("tier"),
-    providerId: uuid("provider_id")
-      .references(() => aiProviders.id, { onDelete: "set null" }),
-    modelId: uuid("model_id")
-      .references(() => aiModels.id, { onDelete: "set null" }),
+    providerId: uuid("provider_id").references(() => aiProviders.id, { onDelete: "set null" }),
+    modelId: uuid("model_id").references(() => aiModels.id, { onDelete: "set null" }),
     priority: integer("priority").notNull().default(0),
     enabled: boolean("enabled").notNull().default(true),
     config: jsonb("config"),
@@ -617,8 +935,5 @@ export const jobRuns = pgTable(
     error: jsonb("error"),
     result: jsonb("result"),
   },
-  (t) => [
-    index("job_runs_job_idx").on(t.jobId),
-    index("job_runs_status_idx").on(t.status),
-  ],
+  (t) => [index("job_runs_job_idx").on(t.jobId), index("job_runs_status_idx").on(t.status)],
 );

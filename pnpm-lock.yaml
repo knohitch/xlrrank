@@ -257,6 +257,9 @@ importers:
       '@xlrrank/config':
         specifier: workspace:*
         version: link:../config
+      '@xlrrank/social-core':
+        specifier: workspace:*
+        version: link:../social-core
       dotenv:
         specifier: ^16.4.5
         version: 16.6.1

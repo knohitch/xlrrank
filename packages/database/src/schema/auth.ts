@@ -28,10 +28,7 @@ export const users = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [
-    uniqueIndex("users_email_unique").on(t.email),
-    index("users_status_idx").on(t.status),
-  ],
+  (t) => [uniqueIndex("users_email_unique").on(t.email), index("users_status_idx").on(t.status)],
 );
 
 export const sessions = pgTable(
@@ -73,14 +70,11 @@ export const emailTokens = pgTable(
   ],
 );
 
-export const roles = pgTable(
-  "roles",
-  {
-    name: roleEnum("name").primaryKey(),
-    description: text("description"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-);
+export const roles = pgTable("roles", {
+  name: roleEnum("name").primaryKey(),
+  description: text("description"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const permissions = pgTable(
   "permissions",
@@ -152,6 +146,21 @@ export const organizationMembers = pgTable(
   (t) => [
     uniqueIndex("org_members_unique").on(t.organizationId, t.userId),
     index("org_members_user_idx").on(t.userId),
+  ],
+);
+
+export const organizationMemberPermissions = pgTable(
+  "organization_member_permissions",
+  {
+    memberId: uuid("member_id")
+      .notNull()
+      .references(() => organizationMembers.id, { onDelete: "cascade" }),
+    capability: text("capability").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.memberId, t.capability] }),
+    index("org_member_permissions_capability_idx").on(t.capability),
   ],
 );
 
