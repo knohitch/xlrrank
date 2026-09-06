@@ -1,50 +1,16 @@
-import { getEnv } from "@xlrrank/config";
 import { createChildLogger } from "@xlrrank/observability";
-import { closeConnections, createWorker, QUEUE_NAMES } from "@xlrrank/queue";
+import { checkWorkerReadiness, startWorkerRuntime, type WorkerRuntime } from "./runtime.js";
 
 const logger = createChildLogger("worker");
 
-class UnimplementedJobProcessorError extends Error {
-  constructor(queue: string, jobName: string) {
-    super(`No production processor is registered for ${queue}:${jobName}`);
-    this.name = "UnimplementedJobProcessorError";
-  }
-}
+let runtime: WorkerRuntime | null = null;
 
 async function start() {
-  const env = getEnv();
-
-  createWorker(
-    QUEUE_NAMES.jobs,
-    async (job) => {
-      logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented job");
-      throw new UnimplementedJobProcessorError(QUEUE_NAMES.jobs, job.name);
-    },
-    env.WORKER_CONCURRENCY,
-  );
-
-  createWorker(
-    QUEUE_NAMES.ingestion,
-    async (job) => {
-      logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented ingestion job");
-      throw new UnimplementedJobProcessorError(QUEUE_NAMES.ingestion, job.name);
-    },
-    env.WORKER_CONCURRENCY,
-  );
-
-  createWorker(
-    QUEUE_NAMES.intelligence,
-    async (job) => {
-      logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented intelligence job");
-      throw new UnimplementedJobProcessorError(QUEUE_NAMES.intelligence, job.name);
-    },
-    env.WORKER_CONCURRENCY,
-  );
-
-  logger.warn(
-    { concurrency: env.WORKER_CONCURRENCY },
-    "Worker started in fail-closed mode: production job processors are not implemented",
-  );
+  if (process.argv.includes("--readiness-check")) {
+    const ready = await checkWorkerReadiness();
+    process.exit(ready ? 0 : 1);
+  }
+  runtime = await startWorkerRuntime();
 }
 
 start().catch((err) => {
@@ -53,8 +19,8 @@ start().catch((err) => {
 });
 
 async function shutdown(signal: string) {
-  logger.info({ signal }, "Shutting down");
-  await closeConnections();
+  logger.info({ signal }, "Shutting down worker runtime");
+  if (runtime) await runtime.stop();
   process.exit(0);
 }
 

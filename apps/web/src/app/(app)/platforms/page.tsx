@@ -13,12 +13,14 @@ interface PlatformInfo {
   status: string;
   lastSyncAt: string | null;
   capabilities: Record<string, string>;
+  connection: { id: string; status: string } | null;
 }
 
 export default function PlatformsPage() {
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [syncJobs, setSyncJobs] = useState<Record<string, string>>({});
 
   useEffect(() => {
     api
@@ -34,11 +36,37 @@ export default function PlatformsPage() {
       .finally(() => setLoading(false));
   }, []);
 
+  async function requestSync(platform: PlatformInfo) {
+    if (!platform.connection) return;
+    setSyncJobs((current) => ({ ...current, [platform.id]: "Queued" }));
+    const res = await api.post<{ jobId: string; status: string; jobStatus: string }>(
+      `/platforms/connections/${platform.connection.id}/sync`,
+      {},
+    );
+    if (!res.ok) {
+      setSyncJobs((current) => ({ ...current, [platform.id]: "Failed" }));
+      return;
+    }
+    setSyncJobs((current) => ({ ...current, [platform.id]: res.data.jobStatus }));
+    const jobId = res.data.jobId;
+    for (let i = 0; i < 10; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      const status = await api.get<{ job: { status: string } }>(`/platforms/sync-jobs/${jobId}`);
+      if (!status.ok) break;
+      setSyncJobs((current) => ({ ...current, [platform.id]: status.data.job.status }));
+      if (["COMPLETED", "FAILED", "DEAD_LETTERED", "CANCELLED"].includes(status.data.job.status)) {
+        break;
+      }
+    }
+  }
+
   return (
     <div className="shell-page">
       <div className="page-heading">
         <h1>Social Platforms</h1>
-        <p className="muted">A platform is marked connected only after its adapter verifies live authentication.</p>
+        <p className="muted">
+          A platform is marked connected only after its adapter verifies live authentication.
+        </p>
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
@@ -58,23 +86,26 @@ export default function PlatformsPage() {
             <div key={p.id} className="card">
               <div className="card-header">
                 <h3>{p.displayName}</h3>
-                <span
-                  className={`badge ${p.connected ? "badge-success" : "badge-warning"}`}
-                >
+                <span className={`badge ${p.connected ? "badge-success" : "badge-warning"}`}>
                   {p.demo ? "DEMO" : p.connected ? p.status : p.status}
                 </span>
               </div>
               <p className="muted">
-                {Object.entries(p.capabilities).map(([name, state]) => `${name}: ${state}`).join(" · ") || "No connector capabilities declared"}
+                {Object.entries(p.capabilities)
+                  .map(([name, state]) => `${name}: ${state}`)
+                  .join(" · ") || "No connector capabilities declared"}
               </p>
               {p.lastSyncAt && (
-                <p className="muted">
-                  Last sync: {new Date(p.lastSyncAt).toLocaleString()}
-                </p>
+                <p className="muted">Last sync: {new Date(p.lastSyncAt).toLocaleString()}</p>
               )}
+              {syncJobs[p.id] && <p className="muted">Sync state: {syncJobs[p.id]}</p>}
               <div className="card-actions">
-                <button className="btn btn-secondary btn-sm" disabled>
-                  {p.connected ? "Disconnect unavailable in current UI" : "Live connection unavailable in current UI"}
+                <button
+                  className="btn btn-secondary btn-sm"
+                  disabled={!p.connected || !p.connection}
+                  onClick={() => requestSync(p)}
+                >
+                  {p.connected ? "Sync" : "Live connection unavailable in current UI"}
                 </button>
               </div>
             </div>

@@ -7,7 +7,14 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { eq } from "drizzle-orm";
-import { ensurePersonalScope, getDb, getPool } from "@xlrrank/database";
+import {
+  authorizeConnection,
+  createSocialConnectionSyncRequest,
+  ensurePersonalScope,
+  getAuthorizedSocialSyncJobStatus,
+  getDb,
+  getPool,
+} from "@xlrrank/database";
 import { platforms } from "@xlrrank/database/schema";
 import {
   connectorRegistry,
@@ -19,7 +26,7 @@ import {
 } from "@xlrrank/social-core";
 import type { ConnectorCredentials } from "@xlrrank/social-core";
 import { AuditService } from "../audit/audit.service.js";
-import { encryptSecret } from "../common/encryption.js";
+import { encryptSecret, socialCredentialAssociatedData } from "../common/encryption.js";
 
 interface ConnectionRow {
   id: string;
@@ -60,10 +67,6 @@ export class PlatformsService {
     return status === "CONNECTED";
   }
 
-  private credentialContext(connectionId: string, scopeId: string, platformSlug: string): string {
-    return `social-connection:${connectionId}:${scopeId}:${platformSlug}:credentials:v2`;
-  }
-
   private toConnectionDto(account: ConnectionRow | undefined) {
     if (!account) return null;
     return {
@@ -77,6 +80,9 @@ export class PlatformsService {
       verifiedHandle: account.verified_handle,
       lastSyncAt: account.last_sync_at,
       lastSyncAttemptAt: account.last_sync_attempt_at,
+      sync: {
+        status: account.status,
+      },
       diagnostics: {
         rateLimitRemaining: account.rate_limit_remaining,
         rateLimitResetAt: account.rate_limit_reset_at,
@@ -192,7 +198,11 @@ export class PlatformsService {
     const credentialsEncrypted = encryptSecret(
       JSON.stringify(credentials),
       undefined,
-      this.credentialContext(connectionId, scope.scopeId, platform.slug),
+      socialCredentialAssociatedData({
+        connectionId,
+        scopeId: scope.scopeId,
+        platformSlug: platform.slug,
+      }),
     );
 
     const client = await pool.connect();
@@ -335,5 +345,87 @@ export class PlatformsService {
       metadata: { platformId, scopeId: scope.scopeId },
     });
     return { status: "DISCONNECTED", message: "Platform disconnected." };
+  }
+
+  async requestConnectionSync(connectionId: string, userId: string, idempotencyKey?: string) {
+    const scope = await authorizeConnection(userId, connectionId, "TRIGGER_SOCIAL_SYNC");
+    if (!scope) throw new NotFoundException("Sync job target not found.");
+    const request = await createSocialConnectionSyncRequest({
+      connectionId,
+      requestedByUserId: userId,
+      reason: "MANUAL",
+      idempotencyKey: idempotencyKey ?? null,
+    });
+    await this.audit.record({
+      actorUserId: userId,
+      action: request.duplicate
+        ? "social.connection.sync_duplicate_requested"
+        : "social.connection.sync_requested",
+      entityType: "social_connection",
+      entityId: connectionId,
+      metadata: { jobId: request.jobId, scopeId: scope.scopeId, status: request.status },
+    });
+    return {
+      status: request.duplicate ? "already_queued" : "accepted",
+      jobId: request.jobId,
+      connectionId: request.connectionId,
+      jobStatus: request.status,
+    };
+  }
+
+  async getSyncJobStatus(jobId: string, userId: string) {
+    const status = await getAuthorizedSocialSyncJobStatus({ userId, jobId });
+    if (!status) throw new NotFoundException("Sync job not found.");
+    return {
+      job: {
+        id: status.id,
+        type: status.type,
+        status: status.status,
+        connectionId: status.connectionId,
+        reason: status.reason,
+        attemptCount: status.attemptCount,
+        maxAttempts: status.maxAttempts,
+        retryClassification: status.retryClassification,
+        nextRetryAt: status.nextRetryAt,
+        startedAt: status.startedAt,
+        completedAt: status.completedAt,
+        failedAt: status.failedAt,
+        deadLetteredAt: status.deadLetteredAt,
+        ingestionRunId: status.ingestionRunId,
+        runStatus: status.runStatus,
+        profilesProcessed: status.profilesProcessed,
+        contentProcessed: status.contentProcessed,
+        interactionsProcessed: status.interactionsProcessed,
+        cursorAfter: status.cursorAfter,
+        error: status.safeError,
+      },
+    };
+  }
+
+  async retrySyncJob(jobId: string, userId: string) {
+    const status = await getAuthorizedSocialSyncJobStatus({ userId, jobId });
+    if (!status?.connectionId) throw new NotFoundException("Sync job not found.");
+    if (!["FAILED", "DEAD_LETTERED", "CANCELLED"].includes(status.status)) {
+      throw new BadRequestException("Only terminal sync jobs can be retried.");
+    }
+    const request = await createSocialConnectionSyncRequest({
+      connectionId: status.connectionId,
+      requestedByUserId: userId,
+      reason: "RETRY",
+      idempotencyKey: `manual-retry:${jobId}:${Date.now()}`,
+    });
+    await this.audit.record({
+      actorUserId: userId,
+      action: "social.connection.sync_retry_requested",
+      entityType: "social_connection",
+      entityId: status.connectionId,
+      metadata: { previousJobId: jobId, jobId: request.jobId },
+    });
+    return {
+      status: "accepted",
+      jobId: request.jobId,
+      connectionId: request.connectionId,
+      jobStatus: request.status,
+    };
   }
 }
