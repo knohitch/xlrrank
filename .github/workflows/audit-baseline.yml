@@ -370,6 +370,122 @@ jobs:
       - name: Run connector contract tests
         run: pnpm --filter @xlrrank/social-core test
 
+  worker-ingestion-e2e:
+    name: Worker Ingestion E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_worker_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_worker_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_worker_e2e
+      REDIS_URL: redis://localhost:6379
+      QUEUE_URL: redis://localhost:6379
+      WORKER_INGESTION_E2E: "1"
+      ENCRYPTION_MASTER_KEY: worker-e2e-master-key-32-bytes-minimum
+      SESSION_SIGNING_SECRET: worker-e2e-session-signing-secret-value
+      RATE_LIMIT_STORE: memory
+      MIGRATION_INTEGRATION_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm db:migrate
+      - name: Run real worker ingestion E2E
+        run: node --test apps/worker/test/worker-ingestion.e2e.mjs
+
+  worker-docker-runtime:
+    name: Worker Docker Runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: docker-build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_worker_docker
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_worker_docker"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: production
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_worker_docker
+      REDIS_URL: redis://localhost:6379
+      QUEUE_URL: redis://localhost:6379
+      ENCRYPTION_MASTER_KEY: worker-docker-master-key-32-bytes-minimum
+      SESSION_SIGNING_SECRET: worker-docker-session-signing-secret-value
+      RATE_LIMIT_STORE: redis
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm db:migrate
+      - name: Build worker image for runtime check
+        run: docker build -f infra/Dockerfile --target worker -t xlrrank-worker:runtime .
+      - name: Verify worker image readiness
+        run: |
+          docker run --rm --network host \
+            -e NODE_ENV=production \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e REDIS_URL="$REDIS_URL" \
+            -e QUEUE_URL="$QUEUE_URL" \
+            -e ENCRYPTION_MASTER_KEY="$ENCRYPTION_MASTER_KEY" \
+            -e SESSION_SIGNING_SECRET="$SESSION_SIGNING_SECRET" \
+            -e RATE_LIMIT_STORE=redis \
+            xlrrank-worker:runtime \
+            node apps/worker/dist/main.js --readiness-check
+
   security-audit-blocking:
     name: Security Gate (High/Critical)
     runs-on: ubuntu-latest
