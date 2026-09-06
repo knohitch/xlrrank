@@ -153,10 +153,13 @@ test(
   { skip },
   async () => {
     await reset();
-    const [userA, userB, userMulti] = await Promise.all([
+    const [userA, userB, userMulti, supportUser, adminUser, superAdminUser] = await Promise.all([
       user("a@example.test"),
       user("b@example.test"),
       user("multi@example.test"),
+      user("support@example.test"),
+      user("admin@example.test"),
+      user("super-admin@example.test"),
     ]);
     const platformId = await platform("reference-http");
     const scopeA = await api.ensurePersonalScope(userA);
@@ -245,11 +248,17 @@ test(
     );
     assert.equal((await api.authorizeScope(userMulti, scopeOrgAId)).scopeId, scopeOrgAId);
     assert.equal(await api.authorizeScope(userMulti, scopeOrgBId), null);
-    assert.equal(
-      await api.authorizeScope(userA, scopeOrgAId),
-      null,
-      "global/support/admin role alone must not imply org scope access",
+
+    await pool.query(
+      "INSERT INTO roles (name, description) VALUES ('SUPPORT', 'Support'), ('ADMIN', 'Admin'), ('SUPER_ADMIN', 'Super admin') ON CONFLICT DO NOTHING",
     );
+    await pool.query(
+      "INSERT INTO user_roles (user_id, role_name) VALUES ($1, 'SUPPORT'), ($2, 'ADMIN'), ($3, 'SUPER_ADMIN')",
+      [supportUser, adminUser, superAdminUser],
+    );
+    assert.equal(await api.authorizeScope(supportUser, scopeOrgAId), null);
+    assert.equal(await api.authorizeScope(adminUser, scopeOrgAId), null);
+    assert.equal(await api.authorizeScope(superAdminUser, scopeOrgAId), null);
   },
 );
 
