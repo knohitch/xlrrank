@@ -16,6 +16,7 @@ async function bootstrap() {
   const logger = createChildLogger("api");
 
   const app = await NestFactory.create(AppModule, {
+    abortOnError: false,
     logger: false,
   });
 
@@ -49,5 +50,15 @@ async function bootstrap() {
 
 bootstrap().catch((err) => {
   console.error("Failed to start API:", err);
+  process.exit(1);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught API exception:", err);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled API rejection:", reason);
   process.exit(1);
 });
