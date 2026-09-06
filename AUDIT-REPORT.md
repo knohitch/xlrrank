@@ -10,40 +10,42 @@ Foundation security has been hardened. All known dependency vulnerabilities are 
 
 ## 2. Verification Environment
 
-| Item          | Value                                                 |
-| ------------- | ----------------------------------------------------- |
-| Node version  | 22 (CI), v26.2.0 (local)                              |
-| pnpm version  | 11.23.0                                               |
-| PostgreSQL    | CI: pgvector/pgvector:pg16 with xlrrank_audit DB      |
-| pgvector      | CI: verified via migration integration test           |
-| Redis         | CI: redis:7-alpine; Sprint 03 E2E job: redis:7-alpine |
-| SMTP sink     | Sprint 03 E2E job: axllent/mailpit:v1.21              |
-| OS            | CI: ubuntu-latest; Local: Windows                     |
-| Branch        | audit/production-verification-2026-09-04              |
+| Item              | Value                                                                     |
+| ----------------- | ------------------------------------------------------------------------- |
+| Node version      | 22 (CI), v26.2.0 (local)                                                  |
+| pnpm version      | 11.23.0                                                                   |
+| PostgreSQL        | CI: pgvector/pgvector:pg16 with xlrrank_audit DB                          |
+| pgvector          | CI: verified via migration integration test                               |
+| Redis             | CI: redis:7-alpine; Sprint 03 E2E job: redis:7-alpine                     |
+| SMTP sink         | Sprint 03 E2E job: axllent/mailpit:v1.21                                  |
+| OS                | CI: ubuntu-latest; Local: Windows                                         |
+| Branch            | audit/production-verification-2026-09-04                                  |
 | Evidence baseline | Latest pre-closure technical CI: 648adb9f74b754f3995e09365751dc62c95f5a4b |
 
 ---
 
 ## 3. Gate Results
 
-| Gate                          | Result  | Evidence                                                                                                |
-| ----------------------------- | ------- | ------------------------------------------------------------------------------------------------------- |
-| Frozen install                | CI PASS | pnpm install --frozen-lockfile                                                                          |
-| Constitution guard            | CI PASS | pnpm lint:constitution                                                                                  |
-| Lint                          | CI PASS | pnpm lint --concurrency=2                                                                               |
-| Typecheck                     | CI PASS | pnpm typecheck --concurrency=2                                                                          |
-| Tests                         | CI PASS | Per-package test execution + security tests                                                             |
-| Security tests                | CI PASS | scripts/security.test.mjs (11 tests, 11 passed, 0 failed)                                               |
-| DB migrations                 | CI PASS | PostgreSQL 16 + pgvector, dedicated xlrrank_audit DB                                                    |
-| Migration repeat deploy       | CI PASS | pnpm db:migrate runs twice                                                                              |
-| Production build              | CI PASS | pnpm build (17/17 packages)                                                                             |
-| Docker Compose validation     | VERIFIED | docker compose config --quiet                                                                          |
-| API image build               | VERIFIED | API Docker image built successfully                                                                    |
-| web image build               | VERIFIED | web Docker image built successfully                                                                    |
-| worker image build            | VERIFIED | worker Docker image built successfully                                                                 |
-| Security Gate (High/Critical) | CI PASS | pnpm audit --prod --audit-level=high (blocking)                                                         |
-| Full Dependency Audit         | CI PASS | pnpm audit --prod: 0 critical, 0 high, 0 moderate, 0 low                                                |
-| Application E2E               | CI PASS | apps/e2e Playwright suite with PostgreSQL 16 + pgvector, Redis 7, Mailpit, API, web, Chromium           |
+| Gate                          | Result   | Evidence                                                                                             |
+| ----------------------------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| Frozen install                | CI PASS  | pnpm install --frozen-lockfile                                                                       |
+| Constitution guard            | CI PASS  | pnpm lint:constitution                                                                               |
+| Lint                          | CI PASS  | pnpm lint --concurrency=2                                                                            |
+| Typecheck                     | CI PASS  | pnpm typecheck --concurrency=2                                                                       |
+| Tests                         | CI PASS  | Per-package test execution + security tests                                                          |
+| Security tests                | CI PASS  | scripts/security.test.mjs (11 tests, 11 passed, 0 failed)                                            |
+| DB migrations                 | CI PASS  | PostgreSQL 16 + pgvector, dedicated xlrrank_audit DB                                                 |
+| Migration repeat deploy       | CI PASS  | pnpm db:migrate runs twice                                                                           |
+| Production build              | CI PASS  | pnpm build (17/17 packages)                                                                          |
+| Docker Compose validation     | VERIFIED | docker compose config --quiet                                                                        |
+| API image build               | VERIFIED | API Docker image built successfully                                                                  |
+| web image build               | VERIFIED | web Docker image built successfully                                                                  |
+| worker image build            | VERIFIED | worker Docker image built successfully                                                               |
+| Security Gate (High/Critical) | CI PASS  | pnpm audit --prod --audit-level=high (blocking)                                                      |
+| Full Dependency Audit         | CI PASS  | pnpm audit --prod: 0 critical, 0 high, 0 moderate, 0 low                                             |
+| Application E2E               | CI PASS  | apps/e2e Playwright suite with PostgreSQL 16 + pgvector, Redis 7, Mailpit, API, web, Chromium        |
+| Social Data Isolation         | ADDED    | Real PostgreSQL gate for scope isolation, connection ownership, idempotency, cursor, legacy backfill |
+| Connector Contract            | ADDED    | Local HTTP fixture connector gate for factory isolation, auth, pagination, error taxonomy            |
 
 ### Dependency Audit Status
 
@@ -52,6 +54,95 @@ Foundation security has been hardened. All known dependency vulnerabilities are 
 | High/Critical blocking gate              | PASS   | pnpm audit --prod --audit-level=high  |
 | Full production dependency audit         | PASS   | pnpm audit --prod                     |
 | Current known production vulnerabilities | 0      | 0 critical, 0 high, 0 moderate, 0 low |
+
+---
+
+## Sprint 04 — Data Ownership & Social Persistence
+
+Sprint 04 adds a structural tenant-isolation layer for social data without adding live third-party platform connectors.
+
+### Data Ownership Inventory
+
+| Table                           | Classification                              | Ownership Notes                                                                               |
+| ------------------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| users                           | TENANT OWNED                                | Personal account owner and personal-scope anchor                                              |
+| organizations                   | TENANT OWNED                                | Organization-scope anchor                                                                     |
+| organization_members            | TENANT VISIBILITY LINK                      | User-to-organization membership                                                               |
+| organization_member_permissions | TENANT VISIBILITY LINK                      | Organization-level social capabilities                                                        |
+| data_scopes                     | TENANT OWNED                                | Formal PERSONAL/ORGANIZATION scope owner                                                      |
+| platforms                       | GLOBAL CONFIGURATION                        | Platform definitions; deletion restricted for new social data                                 |
+| platform_connectors             | GLOBAL CONFIGURATION                        | Connector metadata/configuration                                                              |
+| social_accounts                 | PRIVATE SOURCE DATA                         | Legacy mixed table retained for compatibility/backfill only                                   |
+| social_external_accounts        | CANONICAL PUBLIC DATA                       | Canonical provider identity keyed by platform + external ID                                   |
+| social_account_handles          | CANONICAL PUBLIC DATA                       | Handle history for stable external account identity                                           |
+| social_connections              | TENANT OWNED                                | Scope-owned credentials, status, cursor, rate-limit state                                     |
+| social_account_observations     | TENANT VISIBILITY LINK                      | Scope/connection access to canonical accounts                                                 |
+| people                          | CANONICAL PUBLIC DATA                       | Canonical person model; tenant-derived links must be scoped                                   |
+| person_identifiers              | CANONICAL PUBLIC DATA                       | Identifier aliases for canonical people                                                       |
+| external_organizations          | CANONICAL PUBLIC DATA                       | Canonical external organization records                                                       |
+| content                         | PRIVATE SOURCE DATA                         | Legacy content table tied to legacy social_accounts                                           |
+| content_media                   | PRIVATE SOURCE DATA                         | Legacy content media                                                                          |
+| content_metrics                 | PRIVATE SOURCE DATA                         | Legacy point-in-time metrics                                                                  |
+| social_content_items            | CANONICAL PUBLIC DATA / PRIVATE SOURCE DATA | PUBLIC rows canonical; UNKNOWN/SCOPE_PRIVATE/RESTRICTED rows scope-owned                      |
+| social_content_observations     | TENANT VISIBILITY LINK                      | Scope/connection provenance for content visibility                                            |
+| social_content_metrics          | DERIVED TENANT DATA                         | Scope-owned metrics snapshots                                                                 |
+| interactions                    | PRIVATE SOURCE DATA                         | Legacy interaction table tied to legacy social_accounts/content                               |
+| social_interactions             | CANONICAL PUBLIC DATA / PRIVATE SOURCE DATA | PUBLIC rows canonical; non-public rows scope-owned                                            |
+| social_interaction_observations | TENANT VISIBILITY LINK                      | Scope/connection provenance for interactions                                                  |
+| communities                     | CANONICAL PUBLIC DATA                       | Platform community records                                                                    |
+| community_memberships           | CANONICAL PUBLIC DATA                       | Canonical community-account links                                                             |
+| conversations                   | PRIVATE SOURCE DATA                         | Provider conversation records; future retention must be scoped                                |
+| topics                          | GLOBAL CONFIGURATION                        | Global topic taxonomy/ontology                                                                |
+| topic_clusters                  | GLOBAL CONFIGURATION                        | Global clustering/taxonomy support                                                            |
+| content_topics                  | DERIVED TENANT DATA                         | Classification depends on observed content; future scoped watchlists remain tenant-owned      |
+| relationship_pipelines          | GLOBAL CONFIGURATION                        | Current default pipeline template; customer-customized instances must use scoped config later |
+| relationship_stages             | GLOBAL CONFIGURATION                        | Inherits current pipeline template semantics                                                  |
+| relationships                   | DERIVED TENANT DATA                         | User-owned and Sprint 04 adds scope_id for future scoped CRM data                             |
+| relationship_events             | DERIVED TENANT DATA                         | Inherits relationship ownership                                                               |
+| social_dna_profiles             | DERIVED TENANT DATA                         | Sprint 04 adds scope_id for customer-derived intelligence                                     |
+| opportunities                   | DERIVED TENANT DATA                         | User-owned and Sprint 04 adds scope_id                                                        |
+| trends                          | DERIVED TENANT DATA                         | User/global field exists; customer watchlists must be tenant-owned                            |
+| trend_snapshots                 | DERIVED TENANT DATA                         | Inherits trend ownership                                                                      |
+| recommendations                 | DERIVED TENANT DATA                         | User-owned and Sprint 04 adds scope_id                                                        |
+| recommendation_feedback         | DERIVED TENANT DATA                         | Inherits recommendation ownership                                                             |
+| recommendation_evidence         | DERIVED TENANT DATA                         | Inherits recommendation ownership                                                             |
+| jobs                            | SYSTEM OPERATIONAL DATA                     | Operational queue state                                                                       |
+| job_runs                        | SYSTEM OPERATIONAL DATA                     | Operational job execution state                                                               |
+| social_ingestion_runs           | SYSTEM OPERATIONAL DATA                     | Scope/connection-bound sync run state and cursor evidence                                     |
+| notifications                   | TENANT OWNED                                | User-owned notification records                                                               |
+| audit_logs                      | SYSTEM OPERATIONAL DATA                     | Security and operational audit trail                                                          |
+| ai_providers                    | GLOBAL CONFIGURATION                        | AI provider definitions and encrypted deployment credentials                                  |
+| ai_models                       | GLOBAL CONFIGURATION                        | Provider model registry                                                                       |
+| ai_model_benchmarks             | GLOBAL CONFIGURATION                        | Model benchmark metadata                                                                      |
+| ai_routes                       | GLOBAL CONFIGURATION                        | Routing configuration                                                                         |
+| ai_usage                        | SYSTEM OPERATIONAL DATA                     | Usage/cost telemetry tied to user/provider                                                    |
+| prompt_definitions              | GLOBAL CONFIGURATION                        | Prompt registry definition                                                                    |
+| prompt_versions                 | GLOBAL CONFIGURATION                        | Prompt registry versions                                                                      |
+| feature_flags                   | GLOBAL CONFIGURATION                        | Global/user/org-targeted configuration                                                        |
+| subscriptions                   | TENANT OWNED                                | Billing entitlement record                                                                    |
+| usage_metering                  | SYSTEM OPERATIONAL DATA                     | Billing/usage telemetry                                                                       |
+| support_tickets                 | TENANT OWNED                                | User-owned support workflow                                                                   |
+| support_messages                | TENANT OWNED                                | Inherits support ticket ownership; internal notes are restricted                              |
+
+### Evidence Matrix
+
+| Requirement                 | Implementation                                                | PostgreSQL Test                                              | HTTP/E2E                                           | Status                           |
+| --------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------ | -------------------------------------------------- | -------------------------------- |
+| Personal scope isolation    | `data_scopes` PERSONAL + `authorizeScope`                     | `social-isolation.integration.test.mjs`                      | Existing authenticated APIs resolve personal scope | VERIFIED LOCALLY / CI GATE ADDED |
+| Organization isolation      | ORGANIZATION scopes + member capabilities                     | `social-isolation.integration.test.mjs`                      | Not exposed to UI yet                              | VERIFIED LOCALLY / CI GATE ADDED |
+| Connection isolation        | `social_connections.scope_id` FK and repository functions     | `authorizeConnection` IDOR checks                            | Platform DTOs use scoped connections               | VERIFIED LOCALLY / CI GATE ADDED |
+| Credential isolation        | Credentials moved to `social_connections`                     | Encrypted values preserved in legacy backfill test           | API DTO excludes credential fields                 | VERIFIED LOCALLY / CI GATE ADDED |
+| Canonical identity          | `social_external_accounts` unique platform + external ID      | Shared public canonical test                                 | Reference connector returns stable external ID     | VERIFIED LOCALLY / CI GATE ADDED |
+| Observation visibility      | Explicit observation link tables                              | Two scopes observe same public account/content independently | Reference metadata includes visibility             | VERIFIED LOCALLY / CI GATE ADDED |
+| Private data isolation      | Non-public content/interactions require scope_id              | Same external ID creates per-scope private rows              | Reference connector supports SCOPE_PRIVATE         | VERIFIED LOCALLY / CI GATE ADDED |
+| Profile persistence         | `persistSocialSyncPage` upserts accounts/handles/observations | Profile idempotency covered                                  | Reference connector normalizes profiles            | VERIFIED LOCALLY / CI GATE ADDED |
+| Content persistence         | Scope-aware public/private content upsert                     | Public dedupe + private isolation covered                    | Reference connector cursor pages content           | VERIFIED LOCALLY / CI GATE ADDED |
+| Interaction persistence     | Scope-aware interaction upsert                                | Interaction idempotency covered                              | Reference connector normalizes interactions        | VERIFIED LOCALLY / CI GATE ADDED |
+| Provenance                  | Observation rows + ingestion run IDs                          | Observation/run assertions covered                           | Normalized contract carries provenance             | VERIFIED LOCALLY / CI GATE ADDED |
+| Idempotency                 | Unique constraints and upsert paths                           | Repeated sync duplicate protection covered                   | Reference retry path covered                       | VERIFIED LOCALLY / CI GATE ADDED |
+| Cursor atomicity            | Cursor updated inside persistence transaction                 | Failure-before-commit and partial retry covered              | Reference pagination supplies durable cursor       | VERIFIED LOCALLY / CI GATE ADDED |
+| Connector factory isolation | Registry stores factories/manifests only                      | N/A                                                          | Connector Contract local HTTP test                 | VERIFIED LOCALLY / CI GATE ADDED |
+| Concurrent sync protection  | PostgreSQL advisory transaction lock by connection ID         | Same-connection lock test                                    | N/A                                                | VERIFIED LOCALLY / CI GATE ADDED |
 
 ---
 
@@ -69,8 +160,8 @@ Local source gates passed after the Sprint 03 repair work already present on thi
 
 Local browser E2E execution was not completed because Docker is not installed on the local Windows host and no local Mailpit/MailHog service is available. The blocking GitHub Actions `Application E2E` job now provisions the required real services and passed in run 34013204160 at commit 648adb9f74b754f3995e09365751dc62c95f5a4b.
 
-| Journey            | API            | Browser                                                     | PostgreSQL                    | Negative Paths                                                | Status     |
-| ------------------ | -------------- | ----------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------- | ---------- |
+| Journey            | API            | Browser                                                     | PostgreSQL                    | Negative Paths                                                | Status  |
+| ------------------ | -------------- | ----------------------------------------------------------- | ----------------------------- | ------------------------------------------------------------- | ------- |
 | Signup             | E2E test added | `/signup` browser test added                                | User status asserted          | duplicate, malformed email, weak password, invalid name, CSRF | CI PASS |
 | Verify email       | E2E test added | Mailpit URL opened in browser                               | ACTIVE transition asserted    | invalid, expired, reuse                                       | CI PASS |
 | Signin             | E2E test added | `/signin` browser test added                                | session persisted             | unverified denied, bad password                               | CI PASS |
@@ -88,54 +179,56 @@ Local browser E2E execution was not completed because Docker is not installed on
 
 ## 4. Product Subsystem Matrix
 
-| Subsystem                   | Status         | Notes                                                                                            |
-| --------------------------- | -------------- | ------------------------------------------------------------------------------------------------ |
-| Authentication              | VERIFIED       | Real browser/API E2E suite passed in CI                                                          |
-| Sessions                    | VERIFIED       | HMAC-signed tokens, httpOnly cookies, revocation, expiry; E2E passed in CI                       |
-| Email verification          | VERIFIED       | SMTP sink E2E passed in CI                                                                       |
-| Password reset              | VERIFIED       | SMTP sink E2E with session revocation passed in CI                                               |
-| RBAC                        | VERIFIED       | 4 roles, 9 permissions, role hierarchy tested                                                    |
-| User portal                 | VERIFIED       | Settings wires profile, password, sessions, account deletion; E2E passed in CI                   |
-| Admin portal                | VERIFIED       | User search/filter/status/roles wired; lockout protections tested in CI                          |
-| Support system              | VERIFIED       | Ticket portal, internal note filtering, and RBAC tested by Playwright suite in CI                |
-| Notifications               | SCAFFOLD ONLY  | Service + controller exist, no notification triggers                                             |
-| X connector                 | INTERFACE ONLY | BaseSocialConnector with CONFIGURATION_REQUIRED capabilities                                     |
-| Instagram connector         | INTERFACE ONLY | Same pattern                                                                                     |
-| Facebook connector          | INTERFACE ONLY | Same pattern                                                                                     |
-| LinkedIn connector          | INTERFACE ONLY | Same pattern                                                                                     |
-| Reddit connector            | INTERFACE ONLY | Same pattern                                                                                     |
-| Ingestion                   | SCAFFOLD ONLY  | Queue infrastructure exists, no real ingestion logic                                             |
-| Workers                     | SCAFFOLD ONLY  | BullMQ workers created but processors are stubs                                                  |
-| Normalized social model     | VERIFIED       | Types defined, DB schema complete                                                                |
-| Identity resolution         | SCAFFOLD ONLY  | Algorithm exists, not tested with real data                                                      |
-| Social DNA                  | SCAFFOLD ONLY  | Generator exists, not tested end-to-end                                                          |
-| Discovery                   | SCAFFOLD ONLY  | Scoring algorithm exists, not tested with real data                                              |
-| Relationships               | SCAFFOLD ONLY  | Strength/momentum calculation exists                                                             |
-| Radar/opportunities         | SCAFFOLD ONLY  | Detection algorithm exists                                                                       |
-| Trends                      | SCAFFOLD ONLY  | Detection algorithm exists                                                                       |
-| Content intelligence        | SCAFFOLD ONLY  | Analysis algorithm exists                                                                        |
-| Network intelligence        | SCAFFOLD ONLY  | Cross-platform merge exists                                                                      |
-| Search                      | SCAFFOLD ONLY  | Inverted index + search exists                                                                   |
-| AI provider framework       | PARTIAL        | Real HTTP implementations for OpenAI-compatible, Anthropic; 8 provider adapters                  |
-| Provider credential storage | PARTIAL        | DB table exists, encryption implemented                                                          |
-| Model discovery             | PARTIAL        | Registry + prober with real HTTP calls                                                           |
-| Capability validation       | PARTIAL        | Prober tests text gen, structured output, streaming                                              |
-| Model registry persistence  | SCAFFOLD ONLY  | In-memory only                                                                                   |
-| AI routing                  | PARTIAL        | Router with 4 modes, candidate ranking, fallback                                                 |
-| Language guard              | SCAFFOLD ONLY  | Detection + repair exist, not tested with real LLM output                                        |
-| AI cost controls            | SCAFFOLD ONLY  | Tracking service exists                                                                          |
-| Feature flags               | SCAFFOLD ONLY  | Service exists with scope-aware flags                                                            |
-| Plans/entitlements          | SCAFFOLD ONLY  | 4 plans defined in code                                                                          |
-| Billing                     | SCAFFOLD ONLY  | Service exists, no real billing integration                                                      |
-| Reports                     | SCAFFOLD ONLY  | Service exists with basic reports                                                                |
-| Browser extension           | PARTIAL        | Manifest V3, content scripts for 5 platforms, popup                                              |
-| Demo isolation              | SCAFFOLD ONLY  | Demo seed exists, demo provider exists                                                           |
-| Docker/deployment           | VERIFIED       | Docker Compose valid, API/web/worker images build in CI                                          |
-| Dependency security         | VERIFIED       | 0 known production vulnerabilities                                                               |
-| Encryption                  | VERIFIED       | AES-256-GCM, roundtrip tested, legacy rejection tested                                           |
-| RBAC security               | VERIFIED       | Permission hierarchy tested, role enforcement tested                                             |
-| CSRF                        | VERIFIED       | Double-submit cookie pattern enforced                                                            |
-| Observability               | PARTIAL        | Pino logging with redaction, basic metrics                                                       |
+| Subsystem                   | Status                           | Notes                                                                                        |
+| --------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------- |
+| Authentication              | VERIFIED                         | Real browser/API E2E suite passed in CI                                                      |
+| Sessions                    | VERIFIED                         | HMAC-signed tokens, httpOnly cookies, revocation, expiry; E2E passed in CI                   |
+| Email verification          | VERIFIED                         | SMTP sink E2E passed in CI                                                                   |
+| Password reset              | VERIFIED                         | SMTP sink E2E with session revocation passed in CI                                           |
+| RBAC                        | VERIFIED                         | 4 roles, 9 permissions, role hierarchy tested                                                |
+| User portal                 | VERIFIED                         | Settings wires profile, password, sessions, account deletion; E2E passed in CI               |
+| Admin portal                | VERIFIED                         | User search/filter/status/roles wired; lockout protections tested in CI                      |
+| Support system              | VERIFIED                         | Ticket portal, internal note filtering, and RBAC tested by Playwright suite in CI            |
+| Notifications               | SCAFFOLD ONLY                    | Service + controller exist, no notification triggers                                         |
+| X connector                 | INTERFACE ONLY                   | Factory-registered adapter with CONFIGURATION_REQUIRED capabilities                          |
+| Instagram connector         | INTERFACE ONLY                   | Same pattern                                                                                 |
+| Facebook connector          | INTERFACE ONLY                   | Same pattern                                                                                 |
+| LinkedIn connector          | INTERFACE ONLY                   | Same pattern                                                                                 |
+| Reddit connector            | INTERFACE ONLY                   | Same pattern                                                                                 |
+| Ingestion                   | SCAFFOLD ONLY                    | Queue infrastructure exists, no real ingestion logic                                         |
+| Workers                     | SCAFFOLD ONLY                    | BullMQ workers created but processors are stubs                                              |
+| Normalized social model     | VERIFIED                         | Types defined, DB schema complete                                                            |
+| Identity resolution         | SCAFFOLD ONLY                    | Algorithm exists, not tested with real data                                                  |
+| Social DNA                  | SCAFFOLD ONLY                    | Generator exists, not tested end-to-end                                                      |
+| Discovery                   | SCAFFOLD ONLY                    | Scoring algorithm exists, not tested with real data                                          |
+| Relationships               | SCAFFOLD ONLY                    | Strength/momentum calculation exists                                                         |
+| Radar/opportunities         | SCAFFOLD ONLY                    | Detection algorithm exists                                                                   |
+| Trends                      | SCAFFOLD ONLY                    | Detection algorithm exists                                                                   |
+| Content intelligence        | SCAFFOLD ONLY                    | Analysis algorithm exists                                                                    |
+| Network intelligence        | SCAFFOLD ONLY                    | Cross-platform merge exists                                                                  |
+| Search                      | SCAFFOLD ONLY                    | Inverted index + search exists                                                               |
+| AI provider framework       | PARTIAL                          | Real HTTP implementations for OpenAI-compatible, Anthropic; 8 provider adapters              |
+| Provider credential storage | PARTIAL                          | DB table exists, encryption implemented                                                      |
+| Model discovery             | PARTIAL                          | Registry + prober with real HTTP calls                                                       |
+| Capability validation       | PARTIAL                          | Prober tests text gen, structured output, streaming                                          |
+| Model registry persistence  | SCAFFOLD ONLY                    | In-memory only                                                                               |
+| AI routing                  | PARTIAL                          | Router with 4 modes, candidate ranking, fallback                                             |
+| Language guard              | SCAFFOLD ONLY                    | Detection + repair exist, not tested with real LLM output                                    |
+| AI cost controls            | SCAFFOLD ONLY                    | Tracking service exists                                                                      |
+| Feature flags               | SCAFFOLD ONLY                    | Service exists with scope-aware flags                                                        |
+| Plans/entitlements          | SCAFFOLD ONLY                    | 4 plans defined in code                                                                      |
+| Billing                     | SCAFFOLD ONLY                    | Service exists, no real billing integration                                                  |
+| Reports                     | SCAFFOLD ONLY                    | Service exists with basic reports                                                            |
+| Browser extension           | PARTIAL                          | Manifest V3, content scripts for 5 platforms, popup                                          |
+| Demo isolation              | SCAFFOLD ONLY                    | Demo seed exists, demo provider exists                                                       |
+| Social persistence          | VERIFIED LOCALLY / CI GATE ADDED | Scope-owned connections, canonical accounts, observations, content, interactions, provenance |
+| Connector runtime isolation | VERIFIED LOCALLY / CI GATE ADDED | Registry stores connector factories, not authenticated singleton instances                   |
+| Docker/deployment           | VERIFIED                         | Docker Compose valid, API/web/worker images build in CI                                      |
+| Dependency security         | VERIFIED                         | 0 known production vulnerabilities                                                           |
+| Encryption                  | VERIFIED                         | AES-256-GCM, roundtrip tested, legacy rejection tested                                       |
+| RBAC security               | VERIFIED                         | Permission hierarchy tested, role enforcement tested                                         |
+| CSRF                        | VERIFIED                         | Double-submit cookie pattern enforced                                                        |
+| Observability               | PARTIAL                          | Pino logging with redaction, basic metrics                                                   |
 
 ---
 
@@ -204,19 +297,19 @@ Local browser E2E execution was not completed because Docker is not installed on
 
 ## 8. External Integration Blockers
 
-| Integration      | Status                    | Reason                                              |
-| ---------------- | ------------------------- | --------------------------------------------------- |
-| X (Twitter)      | NOT PRODUCTION VERIFIED   | No test credentials, live API not implemented       |
-| Instagram        | NOT PRODUCTION VERIFIED   | No test credentials, requires Facebook app review   |
-| Facebook         | NOT PRODUCTION VERIFIED   | No test credentials, requires app review            |
-| LinkedIn         | NOT PRODUCTION VERIFIED   | No test credentials, requires app review            |
-| Reddit           | NOT PRODUCTION VERIFIED   | No test credentials                                 |
-| OpenAI           | IMPLEMENTED, NOT VERIFIED | Real HTTP implementation, no test API key           |
-| Anthropic        | IMPLEMENTED, NOT VERIFIED | Real HTTP implementation, no test API key           |
-| DeepSeek         | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                           |
-| xAI/Grok         | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                           |
-| Xiaomi MiMo      | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                           |
-| Stripe (billing) | NOT IMPLEMENTED           | No integration code                                 |
+| Integration      | Status                    | Reason                                                                                    |
+| ---------------- | ------------------------- | ----------------------------------------------------------------------------------------- |
+| X (Twitter)      | NOT PRODUCTION VERIFIED   | No test credentials, live API not implemented                                             |
+| Instagram        | NOT PRODUCTION VERIFIED   | No test credentials, requires Facebook app review                                         |
+| Facebook         | NOT PRODUCTION VERIFIED   | No test credentials, requires app review                                                  |
+| LinkedIn         | NOT PRODUCTION VERIFIED   | No test credentials, requires app review                                                  |
+| Reddit           | NOT PRODUCTION VERIFIED   | No test credentials                                                                       |
+| OpenAI           | IMPLEMENTED, NOT VERIFIED | Real HTTP implementation, no test API key                                                 |
+| Anthropic        | IMPLEMENTED, NOT VERIFIED | Real HTTP implementation, no test API key                                                 |
+| DeepSeek         | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                                                                 |
+| xAI/Grok         | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                                                                 |
+| Xiaomi MiMo      | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                                                                 |
+| Stripe (billing) | NOT IMPLEMENTED           | No integration code                                                                       |
 | SMTP (email)     | IMPLEMENTED, CI VERIFIED  | Mailpit SMTP sink exercised in Application E2E job; production SMTP delivery not verified |
 
 ---

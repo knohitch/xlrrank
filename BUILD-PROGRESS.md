@@ -4,45 +4,45 @@ Tracking completion of each prompt from the Build Prompt Pack.
 
 **Audit Status Layer**: IMPLEMENTED = code exists. VERIFIED = tested and proven. PRODUCTION READY = verified + deployed + monitored.
 
-| Prompt | Title                                     | Implementation | Verification                                                    | Production Ready |
-| ------ | ----------------------------------------- | -------------- | --------------------------------------------------------------- | ---------------- |
-| 0      | Project Constitution                      | DONE           | VERIFIED                                                        | YES              |
-| 1      | Foundation, Monorepo and Infrastructure   | DONE           | VERIFIED (Docker Compose + API/web/worker images)               | PARTIAL          |
-| 2      | Complete Authentication and Authorization | DONE           | VERIFIED (Application E2E CI)                                   | PARTIAL          |
-| 3      | User, Admin and Support Portals           | DONE           | VERIFIED (Application E2E CI)                                   | NO               |
-| 4      | Core Domain Database                      | DONE           | VERIFIED (PostgreSQL in CI)                                     | NO               |
-| 5      | Social Platform Connector Framework       | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 6      | Platform Connection UI and Data Ingestion | DONE           | NOT VERIFIED                                                    | NO               |
-| 7      | AI Provider Framework                     | DONE           | PARTIAL (real HTTP implementations)                             | NO               |
-| 8      | Dynamic Model Registry                    | DONE           | PARTIAL                                                         | NO               |
-| 9      | Reasoning Tier Engine and AI Router       | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 10     | Language Guard                            | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 11     | AI Evaluation and Prompt Registry         | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 12     | Social DNA Engine                         | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 13     | Identity Resolution and Knowledge Graph   | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 14     | Discovery and Explainable Scoring         | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 15     | Relationship Intelligence / Social CRM    | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 16     | Opportunity Radar                         | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 17     | Trend and Network Intelligence            | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 18     | Content Intelligence                      | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 19     | Cross-Platform Intelligence               | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 20     | Global Search / Ask XLRrank               | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 21     | Daily Intelligence Dashboard              | DONE           | NOT VERIFIED                                                    | NO               |
-| 22     | Browser Extension                         | DONE           | PARTIAL (manifest + build verified)                             | NO               |
-| 23     | Notifications                             | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 24     | Commercialization Architecture            | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 25     | BYOK and AI Cost Management               | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 26     | Privacy, Security and Data Governance     | DONE           | VERIFIED (dependency security, encryption, RBAC, regression tests) | PARTIAL        |
-| 27     | Observability and Operations              | DONE           | PARTIAL (logging verified)                                      | NO               |
-| 28     | Feature Flags and Configuration           | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 29     | Reporting and Export                      | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 30     | Complete Testing Pass                     | DONE           | VERIFIED (CI)                                                   | N/A              |
-| 31     | Demo Data Engine                          | DONE           | NOT VERIFIED                                                    | NO               |
-| 32     | Demo AI Provider and Connector Mode       | DONE           | SCAFFOLD ONLY                                                   | NO               |
-| 33     | UX Polish                                 | DONE           | PARTIAL                                                         | NO               |
-| 34     | Extension Polish                          | DONE           | PARTIAL                                                         | NO               |
-| 35     | Open-Source Readiness Audit               | DONE           | VERIFIED                                                        | PARTIAL          |
-| 36     | Final Production Audit                    | DONE           | VERIFIED                                                        | N/A              |
+| Prompt | Title                                     | Implementation | Verification                                                       | Production Ready |
+| ------ | ----------------------------------------- | -------------- | ------------------------------------------------------------------ | ---------------- |
+| 0      | Project Constitution                      | DONE           | VERIFIED                                                           | YES              |
+| 1      | Foundation, Monorepo and Infrastructure   | DONE           | VERIFIED (Docker Compose + API/web/worker images)                  | PARTIAL          |
+| 2      | Complete Authentication and Authorization | DONE           | VERIFIED (Application E2E CI)                                      | PARTIAL          |
+| 3      | User, Admin and Support Portals           | DONE           | VERIFIED (Application E2E CI)                                      | NO               |
+| 4      | Core Domain Database                      | HARDENED       | VERIFIED (ownership/isolation PostgreSQL integration)              | PARTIAL          |
+| 5      | Social Platform Connector Framework       | HARDENED       | VERIFIED CONTRACT (local HTTP reference provider)                  | PARTIAL          |
+| 6      | Platform Connection UI and Data Ingestion | DONE           | NOT VERIFIED                                                       | NO               |
+| 7      | AI Provider Framework                     | DONE           | PARTIAL (real HTTP implementations)                                | NO               |
+| 8      | Dynamic Model Registry                    | DONE           | PARTIAL                                                            | NO               |
+| 9      | Reasoning Tier Engine and AI Router       | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 10     | Language Guard                            | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 11     | AI Evaluation and Prompt Registry         | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 12     | Social DNA Engine                         | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 13     | Identity Resolution and Knowledge Graph   | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 14     | Discovery and Explainable Scoring         | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 15     | Relationship Intelligence / Social CRM    | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 16     | Opportunity Radar                         | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 17     | Trend and Network Intelligence            | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 18     | Content Intelligence                      | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 19     | Cross-Platform Intelligence               | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 20     | Global Search / Ask XLRrank               | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 21     | Daily Intelligence Dashboard              | DONE           | NOT VERIFIED                                                       | NO               |
+| 22     | Browser Extension                         | DONE           | PARTIAL (manifest + build verified)                                | NO               |
+| 23     | Notifications                             | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 24     | Commercialization Architecture            | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 25     | BYOK and AI Cost Management               | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 26     | Privacy, Security and Data Governance     | DONE           | VERIFIED (dependency security, encryption, RBAC, regression tests) | PARTIAL          |
+| 27     | Observability and Operations              | DONE           | PARTIAL (logging verified)                                         | NO               |
+| 28     | Feature Flags and Configuration           | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 29     | Reporting and Export                      | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 30     | Complete Testing Pass                     | DONE           | VERIFIED (CI)                                                      | N/A              |
+| 31     | Demo Data Engine                          | DONE           | NOT VERIFIED                                                       | NO               |
+| 32     | Demo AI Provider and Connector Mode       | DONE           | SCAFFOLD ONLY                                                      | NO               |
+| 33     | UX Polish                                 | DONE           | PARTIAL                                                            | NO               |
+| 34     | Extension Polish                          | DONE           | PARTIAL                                                            | NO               |
+| 35     | Open-Source Readiness Audit               | DONE           | VERIFIED                                                           | PARTIAL          |
+| 36     | Final Production Audit                    | DONE           | VERIFIED                                                           | N/A              |
 
 ## Key
 
@@ -101,6 +101,26 @@ Tracking completion of each prompt from the Build Prompt Pack.
 - **Validation**: Tightened admin query bounds, role arrays, support filters, internal-note input, assignment UUIDs, category length, and avatar URL validation.
 - **Local gates**: lint, typecheck, build, workspace tests, security tests, and production dependency audits passed locally.
 - **E2E status**: Application E2E passed in GitHub Actions run 34013204160 at 648adb9f74b754f3995e09365751dc62c95f5a4b.
+
+## Audit Sprint 04 Results
+
+- **Data scopes**: PERSONAL and ORGANIZATION scopes are formalized in `data_scopes` with database owner checks.
+- **Central authorization**: `authorizeScope` and `authorizeConnection` validate personal ownership and organization social capabilities server-side.
+- **Canonical identity**: `social_external_accounts` stores platform-neutral provider identity by platform + external ID; handles are tracked historically in `social_account_handles`.
+- **Scoped connections**: `social_connections` owns credentials, status, cursor, rate-limit state, and verified external identity per scope.
+- **Credential isolation**: API connection credentials are encrypted with AES-256-GCM and associated-data context binding.
+- **Safe DTOs**: Platform APIs return explicit connection view models and never serialize credential fields.
+- **Connector runtime**: Registry stores manifests and factories only; authenticated customer state is passed per operation.
+- **Reference connector**: Test-only local HTTP connector exercises authentication, pagination, normalization, rate limits, malformed responses, temporary/permanent failures, and capability enforcement.
+- **Normalized contracts**: Profile/content/interaction contracts include visibility, provenance, provider-created timestamps, metadata, and `social-normalized-v2`.
+- **Persistence**: PostgreSQL persistence for normalized profiles, content, interactions, observations, metrics snapshots, ingestion runs, and durable cursors.
+- **Idempotency**: Unique constraints and upserts protect canonical public records, scope-private records, observations, metrics snapshots, and retries.
+- **Cursor atomicity**: Cursor advances only inside the bounded persistence transaction after durable writes.
+- **Sync locking**: Same-connection sync uses a PostgreSQL advisory transaction lock.
+- **Legacy backfill**: Legacy `social_accounts` rows migrate deterministically into personal scopes, canonical identities, scoped connections, and observations without decrypting credentials.
+- **Demo safety**: Demo seed fails closed unless explicitly allowed in development/test/audit databases.
+- **CI gates**: Social Data Isolation and Connector Contract gates added as blocking GitHub Actions jobs.
+- **Production deployment**: NOT VERIFIED.
 
 ## Remaining Product Blockers
 

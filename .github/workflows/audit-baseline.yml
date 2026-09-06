@@ -308,6 +308,68 @@ jobs:
             apps/e2e/test-results
           if-no-files-found: ignore
 
+  social-data-isolation:
+    name: Social Data Isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_social_isolation
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_social_isolation"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_social_isolation
+      ENCRYPTION_MASTER_KEY: social-isolation-master-key-32-bytes-minimum-value-for-ci
+      SESSION_SIGNING_SECRET: social-isolation-session-signing-secret-for-ci
+      RATE_LIMIT_STORE: memory
+      MIGRATION_INTEGRATION_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm db:migrate
+      - name: Run social isolation PostgreSQL tests
+        run: node --test packages/database/test/social-isolation.integration.test.mjs
+
+  connector-contract:
+    name: Connector Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run connector contract tests
+        run: pnpm --filter @xlrrank/social-core test
+
   security-audit-blocking:
     name: Security Gate (High/Critical)
     runs-on: ubuntu-latest
