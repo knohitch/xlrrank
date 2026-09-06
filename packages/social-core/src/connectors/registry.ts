@@ -1,42 +1,64 @@
 import type { ConnectorManifest } from "@xlrrank/shared";
 import type { SocialConnector } from "./types.js";
 
+export interface ConnectorDefinition {
+  manifest: ConnectorManifest;
+  create: () => SocialConnector;
+  testOnly?: boolean;
+}
+
 export class ConnectorRegistry {
-  private connectors = new Map<string, SocialConnector>();
+  private definitions = new Map<string, ConnectorDefinition>();
 
-  register(connector: SocialConnector): void {
+  registerFactory(create: () => SocialConnector, options: { testOnly?: boolean } = {}): void {
+    const connector = create();
     const manifest = connector.getManifest();
-    this.connectors.set(manifest.platformId, connector);
+    if (options.testOnly && process.env.NODE_ENV === "production") {
+      throw new Error(`Refusing to register test-only connector '${manifest.id}' in production`);
+    }
+    this.definitions.set(manifest.platformId, {
+      manifest,
+      create,
+      testOnly: options.testOnly ?? false,
+    });
   }
 
-  get(platformId: string): SocialConnector | undefined {
-    return this.connectors.get(platformId);
+  getDefinition(platformId: string): ConnectorDefinition | undefined {
+    return this.definitions.get(platformId);
   }
 
-  getBySlug(slug: string): SocialConnector | undefined {
-    for (const connector of this.connectors.values()) {
-      if (connector.getManifest().id === slug) return connector;
+  create(platformId: string): SocialConnector | undefined {
+    return this.definitions.get(platformId)?.create();
+  }
+
+  getBySlug(slug: string): ConnectorDefinition | undefined {
+    for (const definition of this.definitions.values()) {
+      if (definition.manifest.id === slug) return definition;
     }
     return undefined;
   }
 
   list(): Array<{ manifest: ConnectorManifest; status: string }> {
-    return [...this.connectors.values()].map((c) => ({
-      manifest: c.getManifest(),
-      status: c.getStatus(),
+    return [...this.definitions.values()].map((definition) => ({
+      manifest: definition.manifest,
+      status: "DISCONNECTED",
     }));
   }
 
-  listRegistered(): SocialConnector[] {
-    return [...this.connectors.values()];
+  listRegistered(): ConnectorDefinition[] {
+    return [...this.definitions.values()];
   }
 
   has(platformId: string): boolean {
-    return this.connectors.has(platformId);
+    return this.definitions.has(platformId);
   }
 
   unregister(platformId: string): boolean {
-    return this.connectors.delete(platformId);
+    return this.definitions.delete(platformId);
+  }
+
+  clear(): void {
+    this.definitions.clear();
   }
 }
 

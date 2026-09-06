@@ -43,8 +43,14 @@ export interface AccountMetrics {
 }
 
 export interface PaginationCursor {
-  value: string;
+  value: string | null;
   hasMore: boolean;
+}
+
+export interface PageResult<T> {
+  items: T[];
+  cursor: PaginationCursor;
+  rateLimit?: RateLimitInfo | undefined;
 }
 
 export interface SyncResult {
@@ -57,8 +63,28 @@ export interface SyncResult {
 
 export interface RateLimitInfo {
   remaining: number;
-  resetAt: string;
-  limit: number;
+  resetAt?: string | undefined;
+  retryAfter?: number | undefined;
+  limit?: number | undefined;
+  providerMetadata?: Record<string, unknown> | undefined;
+}
+
+export type ConnectorErrorCategory =
+  | "AUTHENTICATION"
+  | "AUTHORIZATION"
+  | "RATE_LIMIT"
+  | "TEMPORARY_PROVIDER_FAILURE"
+  | "PERMANENT_PROVIDER_FAILURE"
+  | "MALFORMED_PROVIDER_RESPONSE"
+  | "CAPABILITY_UNAVAILABLE"
+  | "CONFIGURATION";
+
+export type RetryClassification = "RETRYABLE" | "NON_RETRYABLE" | "REAUTH_REQUIRED";
+
+export interface ConnectorOperationContext {
+  scopeId: string;
+  connectionId: string;
+  credentials: ConnectorCredentials;
 }
 
 export interface SocialConnector {
@@ -66,15 +92,52 @@ export interface SocialConnector {
   getStatus(): ConnectorStatus;
   checkHealth(): Promise<boolean>;
   getCapabilities(): Partial<Record<ConnectorCapability, AvailabilityState>>;
-  authenticate(credentials: ConnectorCredentials): Promise<AuthResult>;
+  authenticate(
+    credentials: ConnectorCredentials,
+    context?: ConnectorOperationContext,
+  ): Promise<AuthResult>;
   disconnect(): Promise<void>;
-  getAuthenticatedProfile(): Promise<NormalizedProfile | null>;
-  getProfile(identifier: string): Promise<NormalizedProfile | null>;
-  getContent(options: ContentQuery): Promise<NormalizedContent[]>;
-  getComments(contentId: string, options?: ContentQuery): Promise<NormalizedInteraction[]>;
-  searchProfiles(query: string, limit?: number): Promise<NormalizedProfile[]>;
-  searchContent(query: string, limit?: number): Promise<NormalizedContent[]>;
-  getMetrics(accountId: string): Promise<AccountMetrics>;
-  getFollowers(accountId: string, limit?: number): Promise<NormalizedProfile[]>;
-  getFollowing(accountId: string, limit?: number): Promise<NormalizedProfile[]>;
+  getAuthenticatedProfile(context?: ConnectorOperationContext): Promise<NormalizedProfile | null>;
+  getProfile(
+    identifier: string,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedProfile | null>;
+  getContent(
+    options: ContentQuery,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedContent[]>;
+  getContentPage(
+    options: ContentQuery,
+    context?: ConnectorOperationContext,
+  ): Promise<PageResult<NormalizedContent>>;
+  getComments(
+    contentId: string,
+    options?: ContentQuery,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedInteraction[]>;
+  getInteractionsPage(
+    options: ContentQuery,
+    context?: ConnectorOperationContext,
+  ): Promise<PageResult<NormalizedInteraction>>;
+  searchProfiles(
+    query: string,
+    limit?: number,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedProfile[]>;
+  searchContent(
+    query: string,
+    limit?: number,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedContent[]>;
+  getMetrics(accountId: string, context?: ConnectorOperationContext): Promise<AccountMetrics>;
+  getFollowers(
+    accountId: string,
+    limit?: number,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedProfile[]>;
+  getFollowing(
+    accountId: string,
+    limit?: number,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedProfile[]>;
 }
