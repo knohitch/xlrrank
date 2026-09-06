@@ -1,0 +1,25 @@
+{
+  "name": "@xlrrank/e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "seed": "tsx scripts/seed-e2e.ts",
+    "test:e2e": "playwright test",
+    "test:headed": "playwright test --headed",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@xlrrank/auth": "workspace:*",
+    "@xlrrank/database": "workspace:*",
+    "@xlrrank/queue": "workspace:*",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.3"
+  }
+}

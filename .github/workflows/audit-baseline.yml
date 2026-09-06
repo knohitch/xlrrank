@@ -195,6 +195,119 @@ jobs:
       - name: Build worker image
         run: docker build -f infra/Dockerfile --target worker -t xlrrank-worker:test .
 
+  application-e2e:
+    name: Application E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mailpit:
+        image: axllent/mailpit:v1.21
+        ports:
+          - 1025:1025
+          - 8025:8025
+    env:
+      NODE_ENV: production
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_e2e
+      REDIS_URL: redis://localhost:6379
+      QUEUE_URL: redis://localhost:6379
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      API_PUBLIC_URL: http://localhost:4000
+      E2E_WEB_URL: http://localhost:3000
+      E2E_MAILPIT_URL: http://localhost:8025
+      CORS_ORIGIN: http://localhost:3000
+      STORAGE_DRIVER: filesystem
+      STORAGE_LOCAL_PATH: ./storage-e2e
+      ENCRYPTION_MASTER_KEY: e2e-only-master-key-32-bytes-minimum-value-for-ci
+      SESSION_SIGNING_SECRET: e2e-only-session-signing-secret-value-for-ci
+      SESSION_ENCRYPTION_SECRET: e2e-only-session-encryption-secret-value-for-ci
+      PASSWORD_RESET_SECRET: e2e-only-password-reset-secret-value-for-ci
+      EMAIL_TRANSPORT: smtp
+      SMTP_HOST: localhost
+      SMTP_PORT: "1025"
+      SMTP_FROM: noreply@xlrrank.test
+      RATE_LIMIT_STORE: redis
+      RATE_LIMIT_SIGNIN_LIMIT: "3"
+      RATE_LIMIT_SIGNUP_LIMIT: "20"
+      RATE_LIMIT_RECOVERY_LIMIT: "5"
+      RATE_LIMIT_TOKEN_LIMIT: "20"
+      RATE_LIMIT_WINDOW_SECONDS: "60"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm build
+      - name: Prepare E2E database
+        run: |
+          pnpm db:migrate
+          pnpm --filter @xlrrank/e2e seed
+      - name: Start API
+        run: |
+          pnpm --filter @xlrrank/api start > api-e2e.log 2>&1 &
+          echo $! > api-e2e.pid
+      - name: Wait for API
+        run: |
+          for i in {1..60}; do
+            curl -fsS http://localhost:4000/api/health/ready && exit 0
+            sleep 2
+          done
+          cat api-e2e.log
+          exit 1
+      - name: Start web
+        run: |
+          pnpm --filter @xlrrank/web start > web-e2e.log 2>&1 &
+          echo $! > web-e2e.pid
+      - name: Wait for web
+        run: |
+          for i in {1..60}; do
+            curl -fsS http://localhost:3000/signin && exit 0
+            sleep 2
+          done
+          cat web-e2e.log
+          exit 1
+      - name: Run browser application E2E
+        run: pnpm --filter @xlrrank/e2e test:e2e
+      - name: Upload E2E diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-e2e-diagnostics
+          path: |
+            api-e2e.log
+            web-e2e.log
+            apps/e2e/playwright-report
+            apps/e2e/test-results
+          if-no-files-found: ignore
+
   security-audit-blocking:
     name: Security Gate (High/Critical)
     runs-on: ubuntu-latest

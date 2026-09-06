@@ -1,21 +1,13 @@
-import {
-  BadRequestException,
-  Injectable,
-  UnauthorizedException,
-} from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, UnauthorizedException } from "@nestjs/common";
 import { getEnv } from "@xlrrank/config";
 import { createChildLogger } from "@xlrrank/observability";
-import type { UsersService } from "../users/users.service.js";
-import type { SessionService} from "./session.service.js";
+import { UsersService } from "../users/users.service.js";
+import { SessionService } from "./session.service.js";
 import { type SessionInfo } from "./session.service.js";
-import type {
-  EmailTokenService} from "./email-token.service.js";
-import {
-  EMAIL_TOKEN_RESET,
-  EMAIL_TOKEN_VERIFY,
-} from "./email-token.service.js";
-import type { EmailService } from "../email/email.service.js";
-import type { AuditService } from "../audit/audit.service.js";
+import { EmailTokenService } from "./email-token.service.js";
+import { EMAIL_TOKEN_RESET, EMAIL_TOKEN_VERIFY } from "./email-token.service.js";
+import { EmailService } from "../email/email.service.js";
+import { AuditService } from "../audit/audit.service.js";
 
 export interface SignupInput {
   email: string;
@@ -33,10 +25,15 @@ export class AuthService {
   private readonly logger = createChildLogger("auth");
 
   constructor(
+    @Inject(UsersService)
     private readonly usersService: UsersService,
+    @Inject(SessionService)
     private readonly sessions: SessionService,
+    @Inject(EmailTokenService)
     private readonly emailTokens: EmailTokenService,
+    @Inject(EmailService)
     private readonly emailService: EmailService,
+    @Inject(AuditService)
     private readonly audit: AuditService,
   ) {}
 
@@ -70,10 +67,7 @@ export class AuthService {
   }
 
   async verifyEmail(rawToken: string, ip?: string): Promise<void> {
-    const result = await this.emailTokens.verifyAndConsume(
-      rawToken,
-      EMAIL_TOKEN_VERIFY,
-    );
+    const result = await this.emailTokens.verifyAndConsume(rawToken, EMAIL_TOKEN_VERIFY);
     if (!result) {
       throw new BadRequestException("Verification link is invalid or expired.");
     }
@@ -106,20 +100,13 @@ export class AuthService {
     await this.sendVerificationEmail(user.email, token);
   }
 
-  async signin(
-    input: SigninInput,
-    ip?: string,
-    userAgent?: string,
-  ): Promise<SessionInfo> {
+  async signin(input: SigninInput, ip?: string, userAgent?: string): Promise<SessionInfo> {
     const user = await this.usersService.findByEmail(input.email);
     if (!user) {
       throw new UnauthorizedException("Invalid email or password.");
     }
 
-    const passwordOk = await this.usersService.verifyPasswordForUser(
-      user.id,
-      input.password,
-    );
+    const passwordOk = await this.usersService.verifyPasswordForUser(user.id, input.password);
     if (!passwordOk) {
       await this.audit.record({
         actorUserId: user.id,
@@ -134,9 +121,7 @@ export class AuthService {
     const status = user.status as string;
     if (status !== "ACTIVE") {
       if (status === "PENDING_VERIFICATION") {
-        throw new UnauthorizedException(
-          "Please verify your email address before signing in.",
-        );
+        throw new UnauthorizedException("Please verify your email address before signing in.");
       }
       throw new UnauthorizedException(
         "This account is not active. Contact support for assistance.",
@@ -181,10 +166,7 @@ export class AuthService {
   }
 
   async resetPassword(rawToken: string, newPassword: string): Promise<void> {
-    const result = await this.emailTokens.verifyAndConsume(
-      rawToken,
-      EMAIL_TOKEN_RESET,
-    );
+    const result = await this.emailTokens.verifyAndConsume(rawToken, EMAIL_TOKEN_RESET);
     if (!result) {
       throw new BadRequestException("Reset link is invalid or expired.");
     }
@@ -202,15 +184,14 @@ export class AuthService {
     userId: string,
     currentPassword: string,
     newPassword: string,
+    currentSessionId: string,
   ): Promise<void> {
-    const ok = await this.usersService.verifyPasswordForUser(
-      userId,
-      currentPassword,
-    );
+    const ok = await this.usersService.verifyPasswordForUser(userId, currentPassword);
     if (!ok) {
       throw new UnauthorizedException("Current password is incorrect.");
     }
     await this.usersService.changePassword(userId, newPassword);
+    await this.sessions.revokeOtherSessionsForUser(userId, currentSessionId);
     await this.audit.record({
       actorUserId: userId,
       action: "auth.change_password",

@@ -1,16 +1,18 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
   HttpCode,
   HttpStatus,
+  Inject,
   Param,
   Patch,
   Put,
   Query,
   UseGuards,
 } from "@nestjs/common";
-import { IsEnum, IsString } from "class-validator";
+import { IsArray, IsEnum } from "class-validator";
 import { SessionAuthGuard } from "../common/guards/session-auth.guard.js";
 import { PermissionsGuard } from "../common/guards/permissions.guard.js";
 import { RolesGuard } from "../common/guards/roles.guard.js";
@@ -18,9 +20,9 @@ import { RequirePermissions } from "../common/decorators/permissions.decorator.j
 import { RequireRoles } from "../common/decorators/roles.decorator.js";
 import { CurrentUser } from "../common/decorators/current-user.decorator.js";
 import type { AuthContext } from "../common/types/auth-context.js";
-import { PERMISSIONS, type Role } from "@xlrrank/auth";
-import type { AdminService } from "./admin.service.js";
-import type { AuditService } from "../audit/audit.service.js";
+import { PERMISSIONS, ROLES, type Role } from "@xlrrank/auth";
+import { AdminService } from "./admin.service.js";
+import { AuditService } from "../audit/audit.service.js";
 
 const VALID_STATUSES = [
   "ACTIVE",
@@ -36,7 +38,8 @@ class SetStatusDto {
 }
 
 class SetRolesDto {
-  @IsString({ each: true })
+  @IsArray()
+  @IsEnum(ROLES, { each: true })
   roles!: Role[];
 }
 
@@ -44,7 +47,9 @@ class SetRolesDto {
 @UseGuards(SessionAuthGuard, PermissionsGuard, RolesGuard)
 export class AdminController {
   constructor(
+    @Inject(AdminService)
     private readonly adminService: AdminService,
+    @Inject(AuditService)
     private readonly audit: AuditService,
   ) {}
 
@@ -73,12 +78,17 @@ export class AdminController {
     @Query("search") search?: string,
     @Query("status") status?: string,
   ) {
+    const parsedPage = this.parseBoundedInt(page, "page", 1, 10_000);
+    const parsedPageSize = this.parseBoundedInt(pageSize, "pageSize", 1, 100);
+    if (status !== undefined && !VALID_STATUSES.includes(status as never)) {
+      throw new BadRequestException("Invalid status filter.");
+    }
     const input: {
       page: number;
       pageSize: number;
       search?: string;
       status?: string;
-    } = { page: Number(page), pageSize: Number(pageSize) };
+    } = { page: parsedPage, pageSize: parsedPageSize };
     if (search !== undefined) input.search = search;
     if (status !== undefined) input.status = status;
     return this.adminService.listUsers(input);
@@ -92,7 +102,7 @@ export class AdminController {
     @Body() body: SetStatusDto,
     @CurrentUser() auth: AuthContext,
   ) {
-    await this.adminService.setUserStatus(id, body.status);
+    await this.adminService.setUserStatus(id, body.status, auth.userId);
     await this.audit.record({
       actorUserId: auth.userId,
       action: "admin.user.set_status",
@@ -110,7 +120,7 @@ export class AdminController {
     @Body() body: SetRolesDto,
     @CurrentUser() auth: AuthContext,
   ) {
-    const result = await this.adminService.setUserRoles(id, body.roles);
+    const result = await this.adminService.setUserRoles(id, body.roles, auth.userId);
     await this.audit.record({
       actorUserId: auth.userId,
       action: "admin.user.set_roles",
@@ -124,6 +134,19 @@ export class AdminController {
   @Get("audit-logs")
   @RequirePermissions(PERMISSIONS.ADMIN_SYSTEM_MANAGE)
   async auditLogs(@Query("limit") limit = "50") {
-    return { logs: await this.adminService.recentAuditLogs(Number(limit)) };
+    return {
+      logs: await this.adminService.recentAuditLogs(this.parseBoundedInt(limit, "limit", 1, 200)),
+    };
+  }
+
+  private parseBoundedInt(raw: string, field: string, min: number, max: number): number {
+    if (!/^\d+$/.test(raw)) {
+      throw new BadRequestException(`${field} must be a positive integer.`);
+    }
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < min || value > max) {
+      throw new BadRequestException(`${field} must be between ${min} and ${max}.`);
+    }
+    return value;
   }
 }

@@ -22,6 +22,7 @@
     "clean": "turbo clean && rm -rf node_modules/.cache"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^22.10.2",
     "eslint": "^9.17.0",
     "prettier": "^3.4.2",

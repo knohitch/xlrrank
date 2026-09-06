@@ -41,6 +41,13 @@ const baseEnvSchema = z.object({
   EMAIL_VERIFY_EXPIRY_MINUTES: z.coerce.number().default(60),
   PASSWORD_RESET_EXPIRY_MINUTES: z.coerce.number().default(30),
 
+  RATE_LIMIT_STORE: z.enum(["redis", "memory"]).default("redis"),
+  RATE_LIMIT_SIGNIN_LIMIT: z.coerce.number().int().positive().default(10),
+  RATE_LIMIT_SIGNUP_LIMIT: z.coerce.number().int().positive().default(20),
+  RATE_LIMIT_RECOVERY_LIMIT: z.coerce.number().int().positive().default(5),
+  RATE_LIMIT_TOKEN_LIMIT: z.coerce.number().int().positive().default(20),
+  RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(900),
+
   API_PORT: z.coerce.number().default(4000),
   WEB_PORT: z.coerce.number().default(3000),
   WORKER_CONCURRENCY: z.coerce.number().default(5),
@@ -80,6 +87,14 @@ export const envSchema = baseEnvSchema.superRefine((env, ctx) => {
         });
       }
     }
+  }
+
+  if (env.NODE_ENV === "production" && env.RATE_LIMIT_STORE !== "redis") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["RATE_LIMIT_STORE"],
+      message: "RATE_LIMIT_STORE=redis is required in production",
+    });
   }
 });
 

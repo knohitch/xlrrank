@@ -1,23 +1,12 @@
-import {
-  Body,
-  Controller,
-  Get,
-  Patch,
-  UseGuards,
-} from "@nestjs/common";
-import {
-  IsOptional,
-  IsString,
-  MaxLength,
-  MinLength,
-} from "class-validator";
+import { Body, Controller, Get, Inject, Patch, UseGuards } from "@nestjs/common";
+import { IsOptional, IsString, IsUrl, MaxLength, MinLength } from "class-validator";
 import { SessionAuthGuard } from "../common/guards/session-auth.guard.js";
 import { CurrentUser } from "../common/decorators/current-user.decorator.js";
 import { RequirePermissions } from "../common/decorators/permissions.decorator.js";
 import { PERMISSIONS } from "@xlrrank/auth";
 import type { AuthContext } from "../common/types/auth-context.js";
-import type { UsersService } from "./users.service.js";
-import type { AuditService } from "../audit/audit.service.js";
+import { UsersService } from "./users.service.js";
+import { AuditService } from "../audit/audit.service.js";
 
 export class UpdateProfileDto {
   @IsString()
@@ -27,6 +16,7 @@ export class UpdateProfileDto {
 
   @IsOptional()
   @IsString()
+  @IsUrl({ require_tld: false })
   @MaxLength(500)
   avatarUrl?: string | null;
 }
@@ -35,7 +25,9 @@ export class UpdateProfileDto {
 @UseGuards(SessionAuthGuard)
 export class UsersController {
   constructor(
+    @Inject(UsersService)
     private readonly usersService: UsersService,
+    @Inject(AuditService)
     private readonly audit: AuditService,
   ) {}
 

@@ -1,5 +1,5 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { getDb } from "@xlrrank/database";
 import { sessions } from "@xlrrank/database/schema";
 import {
@@ -37,16 +37,10 @@ export interface SessionListItem {
 export class SessionService {
   private readonly logger = new Logger(SessionService.name);
 
-  async create(
-    userId: string,
-    ipAddress?: string,
-    userAgent?: string,
-  ): Promise<SessionInfo> {
+  async create(userId: string, ipAddress?: string, userAgent?: string): Promise<SessionInfo> {
     const env = getEnv();
     const db = getDb();
-    const expiresAt = new Date(
-      Date.now() + env.SESSION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000,
-    );
+    const expiresAt = new Date(Date.now() + env.SESSION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000);
     const sessionId = crypto.randomUUID();
     const token = createSessionToken(sessionId);
     const signed = signToken(`${token.sessionId}.${token.secret}`);
@@ -75,11 +69,7 @@ export class SessionService {
     }
 
     const db = getDb();
-    const rows = await db
-      .select()
-      .from(sessions)
-      .where(eq(sessions.id, token.sessionId))
-      .limit(1);
+    const rows = await db.select().from(sessions).where(eq(sessions.id, token.sessionId)).limit(1);
 
     const session = rows[0];
     if (!session) return null;
@@ -125,11 +115,7 @@ export class SessionService {
       .update(sessions)
       .set({ revokedAt: new Date() })
       .where(
-        and(
-          eq(sessions.id, sessionId),
-          eq(sessions.userId, userId),
-          isNull(sessions.revokedAt),
-        ),
+        and(eq(sessions.id, sessionId), eq(sessions.userId, userId), isNull(sessions.revokedAt)),
       )
       .returning({ id: sessions.id });
     return updated.length > 0;
@@ -141,6 +127,20 @@ export class SessionService {
       .update(sessions)
       .set({ revokedAt: new Date() })
       .where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt)));
+  }
+
+  async revokeOtherSessionsForUser(userId: string, currentSessionId: string): Promise<void> {
+    const db = getDb();
+    await db
+      .update(sessions)
+      .set({ revokedAt: new Date() })
+      .where(
+        and(
+          eq(sessions.userId, userId),
+          isNull(sessions.revokedAt),
+          sql`${sessions.id} <> ${currentSessionId}`,
+        ),
+      );
   }
 
   private safeEqual(a: string, b: string): boolean {

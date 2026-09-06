@@ -73,11 +73,6 @@ async function request<T = unknown>(
 
   const res = await fetch(`${API_BASE}${normalizedPath}`, init);
 
-  if (res.status === 401 && typeof window !== "undefined") {
-    window.location.href = "/signin";
-    return { ok: false, status: 401, data: null as T };
-  }
-
   let data: T;
   const contentType = res.headers.get("content-type") || "";
   if (contentType.includes("application/json")) {
@@ -91,12 +86,8 @@ async function request<T = unknown>(
 
 export const api = {
   get: <T = unknown>(path: string) => request<T>(path, { method: "GET" }),
-  post: <T = unknown>(path: string, body?: unknown) =>
-    request<T>(path, { method: "POST", body }),
-  put: <T = unknown>(path: string, body?: unknown) =>
-    request<T>(path, { method: "PUT", body }),
-  patch: <T = unknown>(path: string, body?: unknown) =>
-    request<T>(path, { method: "PATCH", body }),
-  delete: <T = unknown>(path: string) =>
-    request<T>(path, { method: "DELETE" }),
+  post: <T = unknown>(path: string, body?: unknown) => request<T>(path, { method: "POST", body }),
+  put: <T = unknown>(path: string, body?: unknown) => request<T>(path, { method: "PUT", body }),
+  patch: <T = unknown>(path: string, body?: unknown) => request<T>(path, { method: "PATCH", body }),
+  delete: <T = unknown>(path: string) => request<T>(path, { method: "DELETE" }),
 };

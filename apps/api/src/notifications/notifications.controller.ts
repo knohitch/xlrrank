@@ -1,13 +1,26 @@
-import { Controller, Get, HttpCode, HttpStatus, Param, Post, Query, UseGuards } from "@nestjs/common";
+import {
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Inject,
+  Param,
+  Post,
+  Query,
+  UseGuards,
+} from "@nestjs/common";
 import { SessionAuthGuard } from "../common/guards/session-auth.guard.js";
 import { CurrentUser } from "../common/decorators/current-user.decorator.js";
 import type { AuthContext } from "../common/types/auth-context.js";
-import type { NotificationsService } from "./notifications.service.js";
+import { NotificationsService } from "./notifications.service.js";
 
 @Controller("notifications")
 @UseGuards(SessionAuthGuard)
 export class NotificationsController {
-  constructor(private readonly notificationsService: NotificationsService) {}
+  constructor(
+    @Inject(NotificationsService)
+    private readonly notificationsService: NotificationsService,
+  ) {}
 
   @Get()
   async list(
