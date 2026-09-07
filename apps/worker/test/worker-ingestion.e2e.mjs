@@ -299,6 +299,12 @@ test.afterEach(async () => {
   await queue?.closeConnections?.();
 });
 
+test.after(async () => {
+  await queue?.closeConnections?.();
+  await pool?.end?.();
+  await database?.closeDatabase?.();
+});
+
 test(
   "worker ingestion e2e: outbox to BullMQ to real worker persists two pages",
   { skip },
@@ -601,7 +607,7 @@ test(
       });
       worker = await startWorker({
         WORKER_TEST_PAUSE_AFTER_CURSOR: "page-1",
-        WORKER_TEST_PAUSE_MS: "2_000",
+        WORKER_TEST_PAUSE_MS: "2000",
       });
       await waitFor(async () => {
         const cursor = (
