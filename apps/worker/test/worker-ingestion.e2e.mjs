@@ -221,19 +221,29 @@ function workerEnv(extra = {}) {
 }
 
 async function startWorker(extra = {}) {
+  const stdout = [];
+  const stderr = [];
   const child = spawn(process.execPath, ["apps/worker/dist/main.js"], {
     cwd: process.cwd(),
     env: workerEnv(extra),
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stdout.on("data", () => {});
-  child.stderr.on("data", () => {});
-  await waitFor(async () => {
-    const result = await pool.query(
-      "SELECT count(*) FROM worker_heartbeats WHERE status = 'READY'",
-    );
-    return Number(result.rows[0].count) > 0;
-  }, 10_000);
+  child.stdout.on("data", (chunk) => stdout.push(String(chunk)));
+  child.stderr.on("data", (chunk) => stderr.push(String(chunk)));
+  try {
+    await waitFor(async () => {
+      if (child.exitCode !== null) {
+        throw new Error(`Worker exited before readiness with code ${child.exitCode}`);
+      }
+      const result = await pool.query(
+        "SELECT count(*) FROM worker_heartbeats WHERE status = 'READY'",
+      );
+      return Number(result.rows[0].count) > 0;
+    }, 10_000);
+  } catch (err) {
+    const detail = [...stdout, ...stderr].join("").slice(-4000);
+    throw new Error(`${err instanceof Error ? err.message : String(err)}\n${detail}`);
+  }
   return child;
 }
 

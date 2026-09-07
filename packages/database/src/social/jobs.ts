@@ -271,25 +271,39 @@ export async function markOutboxDispatched(input: {
   jobId: string;
   bullmqJobId: string;
 }): Promise<void> {
-  await getPool().query(
-    `
-      UPDATE job_outbox
-      SET status = 'DISPATCHED',
-          bullmq_job_id = $3,
-          dispatched_at = now(),
-          locked_by = NULL,
-          locked_until = NULL,
-          updated_at = now()
-      WHERE id = $1 AND job_id = $2;
-
-      UPDATE jobs
-      SET status = 'QUEUED',
-          bullmq_job_id = $3,
-          updated_at = now()
-      WHERE id = $2 AND status IN ('PENDING_DISPATCH', 'RETRY_SCHEDULED');
-    `,
-    [input.outboxId, input.jobId, input.bullmqJobId],
-  );
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `
+        UPDATE job_outbox
+        SET status = 'DISPATCHED',
+            bullmq_job_id = $3,
+            dispatched_at = now(),
+            locked_by = NULL,
+            locked_until = NULL,
+            updated_at = now()
+        WHERE id = $1 AND job_id = $2
+      `,
+      [input.outboxId, input.jobId, input.bullmqJobId],
+    );
+    await client.query(
+      `
+        UPDATE jobs
+        SET status = 'QUEUED',
+            bullmq_job_id = $2,
+            updated_at = now()
+        WHERE id = $1 AND status IN ('PENDING_DISPATCH', 'RETRY_SCHEDULED')
+      `,
+      [input.jobId, input.bullmqJobId],
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function markOutboxFailed(input: { outboxId: string; error: unknown }): Promise<void> {
@@ -573,8 +587,11 @@ export async function reconcileWorkerState(workerId: string): Promise<void> {
     `
       UPDATE job_outbox
       SET locked_by = NULL, locked_until = NULL, updated_at = now()
-      WHERE locked_until < now();
-
+      WHERE locked_until < now()
+    `,
+  );
+  await pool.query(
+    `
       UPDATE jobs
       SET status = 'RETRY_SCHEDULED',
           next_retry_at = now(),
@@ -585,15 +602,19 @@ export async function reconcileWorkerState(workerId: string): Promise<void> {
           SELECT 1
           FROM social_sync_leases ssl
           WHERE ssl.job_id = jobs.id AND ssl.expires_at > now()
-        );
-
+        )
+    `,
+    [JOB_TYPES.socialConnectionSync],
+  );
+  await pool.query(
+    `
       UPDATE worker_heartbeats
       SET status = 'STOPPED'
-      WHERE worker_id <> $2
+      WHERE worker_id <> $1
         AND status IN ('STARTING', 'READY', 'DRAINING')
         AND last_seen_at < now() - interval '5 minutes'
     `,
-    [JOB_TYPES.socialConnectionSync, workerId],
+    [workerId],
   );
 }
 
@@ -743,23 +764,37 @@ export async function enableSocialSyncSchedule(input: {
   cadenceSeconds: number;
   nextSyncAt: Date;
 }): Promise<void> {
-  await getPool().query(
-    `
-      INSERT INTO social_sync_schedules (connection_id, cadence_seconds, next_sync_at, enabled)
-      VALUES ($1, $2, $3, true)
-      ON CONFLICT (connection_id) DO UPDATE SET
-        cadence_seconds = EXCLUDED.cadence_seconds,
-        next_sync_at = EXCLUDED.next_sync_at,
-        enabled = true,
-        updated_at = now();
-
-      UPDATE social_connections
-      SET sync_enabled = true,
-          schedule_cadence_seconds = $2,
-          next_sync_at = $3,
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `
+        INSERT INTO social_sync_schedules (connection_id, cadence_seconds, next_sync_at, enabled)
+        VALUES ($1, $2, $3, true)
+        ON CONFLICT (connection_id) DO UPDATE SET
+          cadence_seconds = EXCLUDED.cadence_seconds,
+          next_sync_at = EXCLUDED.next_sync_at,
+          enabled = true,
           updated_at = now()
-      WHERE id = $1;
-    `,
-    [input.connectionId, input.cadenceSeconds, input.nextSyncAt],
-  );
+      `,
+      [input.connectionId, input.cadenceSeconds, input.nextSyncAt],
+    );
+    await client.query(
+      `
+        UPDATE social_connections
+        SET sync_enabled = true,
+            schedule_cadence_seconds = $2,
+            next_sync_at = $3,
+            updated_at = now()
+        WHERE id = $1
+      `,
+      [input.connectionId, input.cadenceSeconds, input.nextSyncAt],
+    );
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 }
