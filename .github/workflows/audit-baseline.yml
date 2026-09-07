@@ -421,7 +421,7 @@ jobs:
       - run: pnpm build
       - run: pnpm db:migrate
       - name: Run real worker ingestion E2E
-        run: node --test apps/worker/test/worker-ingestion.e2e.mjs
+        run: node --test --test-force-exit apps/worker/test/worker-ingestion.e2e.mjs
 
   worker-docker-runtime:
     name: Worker Docker Runtime
