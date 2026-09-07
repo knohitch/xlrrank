@@ -152,6 +152,8 @@ function createFixtureServer() {
       return `http://127.0.0.1:${address.port}`;
     },
     async stop() {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     },
   };
