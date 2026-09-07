@@ -262,6 +262,18 @@ async function stopWorker(child) {
   return result;
 }
 
+async function waitWorkerExit(child, expectedCode, timeout = 10_000) {
+  const result = await Promise.race([
+    new Promise((resolve) => child.once("exit", (code) => resolve(code))),
+    delay(timeout).then(() => {
+      child.kill("SIGKILL");
+      return "timeout";
+    }),
+  ]);
+  assert.equal(result, expectedCode);
+  return result;
+}
+
 async function waitFor(fn, timeout = 15_000) {
   const deadline = Date.now() + timeout;
   let lastError;
@@ -465,10 +477,7 @@ test(
         reason: "MANUAL",
       });
       crashingWorker = await startWorker({ WORKER_TEST_CRASH_AFTER_CURSOR: "page-1" });
-      const exitCode = await new Promise((resolve) =>
-        crashingWorker.once("exit", (code) => resolve(code)),
-      );
-      assert.equal(exitCode, 76);
+      await waitWorkerExit(crashingWorker, 76);
       await delay(1_500);
       worker = await startWorker();
       await waitForJob(request.jobId, ["COMPLETED"], 30_000);
@@ -505,10 +514,7 @@ test(
         reason: "MANUAL",
       });
       crashingWorker = await startWorker({ WORKER_TEST_CRASH_BEFORE_PERSIST_CURSOR: "START" });
-      const exitCode = await new Promise((resolve) =>
-        crashingWorker.once("exit", (code) => resolve(code)),
-      );
-      assert.equal(exitCode, 75);
+      await waitWorkerExit(crashingWorker, 75);
       assert.equal(await contentCount("before-commit"), 0);
       assert.equal(
         (
