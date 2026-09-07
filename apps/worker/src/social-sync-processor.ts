@@ -239,7 +239,7 @@ export async function processSocialConnectionSync(job: Job): Promise<void> {
     await transitionSocialSyncJob({
       jobId: durableJob.id,
       to: "RUNNING",
-      from: ["QUEUED", "RETRY_SCHEDULED"],
+      from: ["PENDING_DISPATCH", "QUEUED", "RETRY_SCHEDULED"],
       attemptCount: attempt,
     });
 
