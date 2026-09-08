@@ -48,3 +48,10 @@ test("social sync job payloads are versioned and identifier-only", async () => {
     /credential/,
   );
 });
+
+test("social sync BullMQ job IDs are deterministic and BullMQ-safe", async () => {
+  const m = await import("../dist/index.js");
+  const jobId = m.socialSyncBullMqJobId("11111111-1111-4111-8111-111111111111");
+  assert.equal(jobId, "social-connection-sync-11111111-1111-4111-8111-111111111111");
+  assert.equal(jobId.includes(":"), false);
+});

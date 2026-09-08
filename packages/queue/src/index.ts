@@ -150,7 +150,7 @@ export function parseSocialConnectionSyncPayload(payload: unknown): SocialConnec
 }
 
 export function socialSyncBullMqJobId(jobRequestId: string): string {
-  return `${JOB_TYPES.socialConnectionSync}:${jobRequestId}`;
+  return `${JOB_TYPES.socialConnectionSync.replaceAll(".", "-")}-${jobRequestId}`;
 }
 
 export function defaultSocialSyncJobOptions(): JobsOptions {
