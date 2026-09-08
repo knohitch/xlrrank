@@ -42,6 +42,11 @@ import {
   type RetryClassification,
 } from "@xlrrank/social-core";
 import type { ContentQuery } from "@xlrrank/social-core";
+import type {
+  NormalizedContent,
+  NormalizedInteraction,
+  NormalizedProfile,
+} from "@xlrrank/social-core";
 
 const logger = createChildLogger("worker.social-sync");
 const metrics = getMetrics();
@@ -155,6 +160,13 @@ function parseCredentials(
     }),
   );
   return JSON.parse(plaintext) as ConnectorCredentials;
+}
+
+function bindNormalizedPlatformId<T extends NormalizedProfile | NormalizedContent | NormalizedInteraction>(
+  item: T,
+  platformId: string,
+): T {
+  return { ...item, platformId };
 }
 
 async function updateConnectionAfterFailure(input: {
@@ -347,9 +359,15 @@ export async function processSocialConnectionSync(job: Job): Promise<void> {
         ingestionRunId: runId,
         cursorBefore: cursor,
         cursorAfter: nextCursor,
-        profiles: includeProfile ? [profile.profile] : [],
-        content: contentPage.items,
-        interactions: interactionPage.items,
+        profiles: includeProfile
+          ? [bindNormalizedPlatformId(profile.profile, connection.platformId)]
+          : [],
+        content: contentPage.items.map((item) =>
+          bindNormalizedPlatformId(item, connection.platformId),
+        ),
+        interactions: interactionPage.items.map((item) =>
+          bindNormalizedPlatformId(item, connection.platformId),
+        ),
         normalizationVersion: NORMALIZATION_VERSION,
         adapterVersion: connector.getManifest().version,
         completeRun: false,
