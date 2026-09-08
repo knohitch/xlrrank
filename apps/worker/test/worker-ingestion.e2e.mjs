@@ -18,6 +18,7 @@ let pool;
 let database;
 let shared;
 let queue;
+const activeWorkers = new Set();
 
 async function setup() {
   if (pool) return;
@@ -232,6 +233,8 @@ async function startWorker(extra = {}) {
   });
   child.stdout.on("data", (chunk) => stdout.push(String(chunk)));
   child.stderr.on("data", (chunk) => stderr.push(String(chunk)));
+  activeWorkers.add(child);
+  child.once("exit", () => activeWorkers.delete(child));
   try {
     await waitFor(async () => {
       if (child.exitCode !== null) {
@@ -246,6 +249,8 @@ async function startWorker(extra = {}) {
     const detail = [...stdout, ...stderr].join("").slice(-4000);
     throw new Error(`${err instanceof Error ? err.message : String(err)}\n${detail}`);
   }
+  child.__stdout = stdout;
+  child.__stderr = stderr;
   return child;
 }
 
@@ -290,15 +295,77 @@ async function waitFor(fn, timeout = 15_000) {
   throw new Error("Timed out waiting for condition");
 }
 
-async function waitForJob(jobId, statuses, timeout = 20_000) {
-  return waitFor(async () => {
-    const result = await pool.query(
-      "SELECT status, attempt_count, ingestion_run_id FROM jobs WHERE id = $1",
+async function jobDiagnostics(jobId) {
+  const [jobs, outbox, runs, deadLetters, connections, heartbeats] = await Promise.all([
+    pool.query(
+      `SELECT id, status, attempt_count, max_attempts, retry_classification,
+              next_retry_at, bullmq_job_id, ingestion_run_id, safe_error
+       FROM jobs WHERE id = $1`,
       [jobId],
+    ),
+    pool.query(
+      `SELECT status, attempt_count, bullmq_job_id, locked_by, locked_until, last_error
+       FROM job_outbox WHERE job_id = $1`,
+      [jobId],
+    ),
+    pool.query(
+      `SELECT id, status, cursor_before, cursor_after, errors, retry_classification
+       FROM social_ingestion_runs
+       WHERE id = (SELECT ingestion_run_id FROM jobs WHERE id = $1)`,
+      [jobId],
+    ),
+    pool.query(
+      `SELECT queue_name, job_type, attempt_count, retry_classification, safe_error
+       FROM job_dead_letters WHERE job_id = $1`,
+      [jobId],
+    ),
+    pool.query(
+      `SELECT id, status, sync_cursor, sync_error, retry_after_seconds, rate_limit_reset_at
+       FROM social_connections
+       WHERE id = (SELECT connection_id FROM jobs WHERE id = $1)`,
+      [jobId],
+    ),
+    pool.query(
+      `SELECT worker_id, kind, status, metadata, last_seen_at
+       FROM worker_heartbeats
+       ORDER BY last_seen_at DESC
+       LIMIT 5`,
+    ),
+  ]);
+  const workerOutput = [...activeWorkers]
+    .flatMap((worker) => [...(worker.__stdout ?? []), ...(worker.__stderr ?? [])])
+    .join("")
+    .slice(-8000);
+  return JSON.stringify(
+    {
+      jobs: jobs.rows,
+      outbox: outbox.rows,
+      runs: runs.rows,
+      deadLetters: deadLetters.rows,
+      connections: connections.rows,
+      heartbeats: heartbeats.rows,
+      workerOutput,
+    },
+    null,
+    2,
+  );
+}
+
+async function waitForJob(jobId, statuses, timeout = 20_000) {
+  try {
+    return await waitFor(async () => {
+      const result = await pool.query(
+        "SELECT status, attempt_count, ingestion_run_id FROM jobs WHERE id = $1",
+        [jobId],
+      );
+      const row = result.rows[0];
+      return row && statuses.includes(row.status) ? row : false;
+    }, timeout);
+  } catch (err) {
+    throw new Error(
+      `${err instanceof Error ? err.message : String(err)}\n${await jobDiagnostics(jobId)}`,
     );
-    const row = result.rows[0];
-    return row && statuses.includes(row.status) ? row : false;
-  }, timeout);
+  }
 }
 
 async function contentCount(token) {
