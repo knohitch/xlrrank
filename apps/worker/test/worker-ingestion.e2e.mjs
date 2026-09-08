@@ -310,7 +310,11 @@ async function createXConnection(name, refreshToken) {
   const platform = await pool.query(
     "INSERT INTO platforms (slug, display_name, enabled) VALUES ('x', 'X', true) ON CONFLICT (slug) DO UPDATE SET enabled = true RETURNING id",
   );
-  const providerConfigId = randomUUID();
+  const existingProviderConfig = await pool.query(
+    "SELECT id FROM provider_app_configurations WHERE platform_id = $1 AND environment = 'test' LIMIT 1",
+    [platform.rows[0].id],
+  );
+  const providerConfigId = existingProviderConfig.rows[0]?.id ?? randomUUID();
   const encryptedClientSecret = shared.encryptSecret(
     "x-client-secret-fixture",
     undefined,
@@ -330,7 +334,7 @@ async function createXConnection(name, refreshToken) {
         'https://app.example.test/platforms/x/oauth/callback', true, '{}'::jsonb)
       ON CONFLICT (platform_id, environment) DO UPDATE SET
         client_id = EXCLUDED.client_id,
-        client_secret_encrypted = EXCLUDED.client_secret_encrypted,
+        client_secret_encrypted = provider_app_configurations.client_secret_encrypted,
         redirect_uri = EXCLUDED.redirect_uri,
         enabled = true
     `,
