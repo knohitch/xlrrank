@@ -44,10 +44,10 @@ Foundation security has been hardened. All known dependency vulnerabilities are 
 | Security Gate (High/Critical) | CI PASS  | pnpm audit --prod --audit-level=high (blocking)                                                      |
 | Full Dependency Audit         | CI PASS  | pnpm audit --prod: 0 critical, 0 high, 0 moderate, 0 low                                             |
 | Application E2E               | CI PASS  | apps/e2e Playwright suite with PostgreSQL 16 + pgvector, Redis 7, Mailpit, API, web, Chromium        |
-| Social Data Isolation         | ADDED    | Real PostgreSQL gate for scope isolation, connection ownership, idempotency, cursor, legacy backfill |
-| Connector Contract            | ADDED    | Local HTTP fixture connector gate for factory isolation, auth, pagination, error taxonomy            |
-| Worker Ingestion E2E          | ADDED    | Real worker process with PostgreSQL, Redis, BullMQ, local HTTP reference provider, crash/retry tests |
-| Worker Docker Runtime         | ADDED    | Built worker image readiness check against PostgreSQL and Redis                                      |
+| Social Data Isolation         | VERIFIED | Real PostgreSQL gate for scope isolation, connection ownership, idempotency, cursor, legacy backfill |
+| Connector Contract            | VERIFIED | Local HTTP fixture connector gate for factory isolation, auth, pagination, error taxonomy            |
+| Worker Ingestion E2E          | VERIFIED | Real worker process with PostgreSQL, Redis, BullMQ, local HTTP reference provider, crash/retry tests |
+| Worker Docker Runtime         | VERIFIED | Built worker image readiness check against PostgreSQL and Redis                                      |
 
 ### Dependency Audit Status
 
@@ -86,21 +86,21 @@ Sprint 05 replaces the fail-closed social-ingestion worker stub with a durable w
 
 | Requirement           | Implementation                                                 | Redis                                | PostgreSQL                                          | Real Worker                                                | Status        |
 | --------------------- | -------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------- | ---------------------------------------------------------- | ------------- |
-| Durable sync request  | API/service creates durable job + outbox                       | Not required for request             | `jobs`, `job_outbox` transaction                    | Worker consumes after dispatch                             | CI GATE ADDED |
-| Outbox                | Dispatcher publishes pending rows                              | BullMQ receives deterministic job ID | `job_outbox` status/locks                           | Runtime dispatcher loop                                    | CI GATE ADDED |
-| Dispatch idempotency  | Deterministic BullMQ job IDs and unique active job constraints | Duplicate add is harmless            | Unique job/outbox constraints                       | Duplicate request E2E                                      | CI GATE ADDED |
-| Worker processor      | Real social sync processor                                     | BullMQ delivery                      | Loads authoritative job/connection state            | Built worker process                                       | CI GATE ADDED |
-| Run-level lease       | Owner-token connection lease                                   | N/A                                  | `social_sync_leases`                                | Prevents same-connection concurrent sync                   | CI GATE ADDED |
-| Cursor resume         | Cursor read from `social_connections`                          | Redelivery tolerated                 | Cursor advances only after page persistence         | Crash/restart E2E                                          | CI GATE ADDED |
-| Temporary retry       | RETRYABLE maps to delayed retry                                | BullMQ delayed job                   | attempt/retry state persisted                       | Reference provider 500 then success                        | CI GATE ADDED |
-| Rate-limit retry      | Normalized retryAfter/resetAt with safe bounds                 | Delayed retry                        | rate-limit state and next retry persisted           | Reference provider 429 then success                        | CI GATE ADDED |
-| Reauth handling       | AUTHENTICATION marks connection `REAUTH_REQUIRED`              | No hot loop                          | Job/run safe failure state                          | Reference provider 401                                     | CI GATE ADDED |
-| DLQ                   | Terminal dead-letter records                                   | Failed transport state bounded       | `job_dead_letters` and job terminal state           | Permanent/malformed failures                               | CI GATE ADDED |
-| Crash recovery        | Durable cursor + stale lease + BullMQ stalled recovery         | Job redelivery                       | Lease expiry and idempotent persistence             | Killed worker process                                      | CI GATE ADDED |
-| Redis outage recovery | Request path persists without Redis transport                  | Dispatch after recovery              | Pending outbox survives                             | Worker completes after start                               | CI GATE ADDED |
-| Scheduled sync        | Due schedules claimed with `SKIP LOCKED`                       | Same outbox transport                | `social_sync_schedules`, connection schedule mirror | Two scheduler instances in worker E2E                      | CI GATE ADDED |
-| Graceful shutdown     | Runtime drains intervals/workers and closes resources          | Queues/workers closed                | Heartbeat marked draining/stopped                   | Worker process stop exercised                              | CI GATE ADDED |
-| Worker Docker runtime | Worker image readiness check                                   | Redis service                        | PostgreSQL service                                  | `node apps/worker/dist/main.js --readiness-check` in image | CI GATE ADDED |
+| Durable sync request  | API/service creates durable job + outbox                       | Not required for request             | `jobs`, `job_outbox` transaction                    | Worker consumes after dispatch                             | VERIFIED |
+| Outbox                | Dispatcher publishes pending rows                              | BullMQ receives deterministic job ID | `job_outbox` status/locks                           | Runtime dispatcher loop                                    | VERIFIED |
+| Dispatch idempotency  | Deterministic BullMQ job IDs and unique active job constraints | Duplicate add is harmless            | Unique job/outbox constraints                       | Duplicate request E2E                                      | VERIFIED |
+| Worker processor      | Real social sync processor                                     | BullMQ delivery                      | Loads authoritative job/connection state            | Built worker process                                       | VERIFIED |
+| Run-level lease       | Owner-token connection lease                                   | N/A                                  | `social_sync_leases`                                | Prevents same-connection concurrent sync                   | VERIFIED |
+| Cursor resume         | Cursor read from `social_connections`                          | Redelivery tolerated                 | Cursor advances only after page persistence         | Crash/restart E2E                                          | VERIFIED |
+| Temporary retry       | RETRYABLE maps to delayed retry                                | BullMQ delayed job                   | attempt/retry state persisted                       | Reference provider 500 then success                        | VERIFIED |
+| Rate-limit retry      | Normalized retryAfter/resetAt with safe bounds                 | Delayed retry                        | rate-limit state and next retry persisted           | Reference provider 429 then success                        | VERIFIED |
+| Reauth handling       | AUTHENTICATION marks connection `REAUTH_REQUIRED`              | No hot loop                          | Job/run safe failure state                          | Reference provider 401                                     | VERIFIED |
+| DLQ                   | Terminal dead-letter records                                   | Failed transport state bounded       | `job_dead_letters` and job terminal state           | Permanent/malformed failures                               | VERIFIED |
+| Crash recovery        | Durable cursor + stale lease + BullMQ stalled recovery         | Job redelivery                       | Lease expiry and idempotent persistence             | Killed worker process                                      | VERIFIED |
+| Redis outage recovery | Request path persists without Redis transport                  | Dispatch after recovery              | Pending outbox survives                             | Worker completes after start                               | VERIFIED |
+| Scheduled sync        | Due schedules claimed with `SKIP LOCKED`                       | Same outbox transport                | `social_sync_schedules`, connection schedule mirror | Two scheduler instances in worker E2E                      | VERIFIED |
+| Graceful shutdown     | Runtime drains intervals/workers and closes resources          | Queues/workers closed                | Heartbeat marked draining/stopped                   | Worker process stop exercised                              | VERIFIED |
+| Worker Docker runtime | Worker image readiness check                                   | Redis service                        | PostgreSQL service                                  | `node apps/worker/dist/main.js --readiness-check` in image | VERIFIED |
 
 ---
 
@@ -270,7 +270,7 @@ Local browser E2E execution was not completed because Docker is not installed on
 | Demo isolation               | SCAFFOLD ONLY                    | Demo seed exists, demo provider exists                                                         |
 | Social persistence           | VERIFIED LOCALLY / CI GATE ADDED | Scope-owned connections, canonical accounts, observations, content, interactions, provenance   |
 | Connector runtime isolation  | VERIFIED LOCALLY / CI GATE ADDED | Registry stores connector factories, not authenticated singleton instances                     |
-| Worker ingestion reliability | CI GATE ADDED                    | Durable job outbox, run lease, retries, DLQ, scheduling, crash recovery via reference provider |
+| Worker ingestion reliability | VERIFIED                         | Durable job outbox, run lease, retries, DLQ, scheduling, crash recovery via reference provider |
 | Docker/deployment            | VERIFIED                         | Docker Compose valid, API/web/worker images build in CI                                        |
 | Dependency security          | VERIFIED                         | 0 known production vulnerabilities                                                             |
 | Encryption                   | VERIFIED                         | AES-256-GCM, roundtrip tested, legacy rejection tested                                         |

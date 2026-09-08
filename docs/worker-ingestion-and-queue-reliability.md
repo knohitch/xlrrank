@@ -65,3 +65,7 @@ The platform UI calls the asynchronous sync endpoint and polls the status endpoi
 Worker logs include low-cardinality correlation fields such as job ID, job type, connection ID, ingestion run ID, attempt, and error category. Logs avoid credentials, raw authorization, and provider content bodies. Metrics track job counts, retry/dead-letter events, sync duration, persisted page counts, and lease conflicts without user IDs, emails, external IDs, or URLs as labels.
 
 Successful Redis jobs have bounded retention because PostgreSQL keeps durable business history. Cleanup policy is intentionally conservative: expire transient outbox locks and stale heartbeats, allow leases to expire, and retain durable job/dead-letter/audit history for later operator review.
+
+## Verification Evidence
+
+Sprint 05 is verified by blocking GitHub Actions gates for Worker Ingestion E2E and Worker Docker Runtime. Worker Ingestion E2E runs PostgreSQL, Redis, BullMQ, a local HTTP reference provider, and the built worker process to prove outbox dispatch, retries, rate limits, reauth handling, dead letters, crash restart, Redis outage recovery, duplicate request safety, concurrent connections, scheduled sync, and disconnect races. Worker Docker Runtime builds the worker image and runs its readiness check against PostgreSQL and Redis.

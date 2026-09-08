@@ -136,7 +136,7 @@ Tracking completion of each prompt from the Build Prompt Pack.
 - **Scheduling**: `social_sync_schedules` adds UTC due scheduling, cadence, multi-scheduler locking, and durable outbox dispatch.
 - **API/UI**: Manual sync endpoint returns HTTP 202 with truthful job status; status endpoint is scope-authorized; platform UI shows queued/running/retrying/completed/failed states without fake progress.
 - **Worker runtime**: Startup reconciliation, readiness checks, worker heartbeat, graceful shutdown, bounded BullMQ retention, and safe structured logs/metrics added.
-- **CI gates**: Worker Ingestion E2E and Worker Docker Runtime gates added as blocking GitHub Actions jobs.
+- **CI gates**: Worker Ingestion E2E and Worker Docker Runtime pass as blocking GitHub Actions jobs on the audit branch.
 - **Production deployment**: NOT VERIFIED.
 
 ## Remaining Product Blockers
