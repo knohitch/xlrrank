@@ -795,6 +795,60 @@ export const platformConnectors = pgTable(
   (t) => [uniqueIndex("platform_connectors_platform_unique").on(t.platformId)],
 );
 
+export const providerAppConfigurations = pgTable(
+  "provider_app_configurations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    platformId: uuid("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "cascade" }),
+    environment: text("environment").notNull().default("production"),
+    clientId: text("client_id").notNull(),
+    clientSecretEncrypted: text("client_secret_encrypted"),
+    redirectUri: text("redirect_uri").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("provider_app_configurations_platform_environment_unique").on(
+      t.platformId,
+      t.environment,
+    ),
+    index("provider_app_configurations_platform_idx").on(t.platformId),
+  ],
+);
+
+export const oauthAuthorizationTransactions = pgTable(
+  "oauth_authorization_transactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    platformId: uuid("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "cascade" }),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    actorUserId: uuid("actor_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    stateDigest: text("state_digest").notNull(),
+    pkceVerifier: text("pkce_verifier").notNull(),
+    requestedScopes: jsonb("requested_scopes").notNull(),
+    redirectTo: text("redirect_to").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [
+    uniqueIndex("oauth_authorization_transactions_state_unique").on(t.stateDigest),
+    index("oauth_authorization_transactions_actor_idx").on(t.actorUserId),
+    index("oauth_authorization_transactions_expires_idx").on(t.expiresAt),
+  ],
+);
+
 export const communityMemberships = pgTable(
   "community_memberships",
   {

@@ -26,6 +26,7 @@ export const AVAILABILITY_STATES = [
   "AVAILABLE",
   "CONFIGURATION_REQUIRED",
   "PERMISSION_REQUIRED",
+  "ACCESS_TIER_REQUIRED",
   "APP_REVIEW_REQUIRED",
   "UNAVAILABLE",
 ] as const;
@@ -36,6 +37,7 @@ export const CONNECTOR_STATUSES = [
   "CONNECTED",
   "DISCONNECTED",
   "AUTHENTICATION_EXPIRED",
+  "REAUTH_REQUIRED",
   "PERMISSION_MISSING",
   "RATE_LIMITED",
   "CONFIGURATION_UNAVAILABLE",
@@ -52,7 +54,23 @@ export interface ConnectorManifest {
   name: string;
   version: string;
   apiVersion?: string;
-  capabilities: Partial<
-    Record<ConnectorCapability, AvailabilityState>
-  >;
+  capabilities: Partial<Record<ConnectorCapability, AvailabilityState>>;
+  providerConfig?: {
+    fields: Array<{
+      key: string;
+      label: string;
+      required: boolean;
+      secret: boolean;
+      kind: "string" | "url" | "boolean";
+    }>;
+  };
+  oauth?: {
+    type: "authorization_code_pkce";
+    authorizationEndpoint: string;
+    tokenEndpoint: string;
+    defaultScopes: string[];
+    pkceRequired: boolean;
+    supportsRefresh: boolean;
+    supportsRevocation: boolean;
+  };
 }

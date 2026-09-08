@@ -160,6 +160,115 @@ function createFixtureServer() {
   };
 }
 
+function createXFixtureServer() {
+  const tokenLog = [];
+  const contentCalls = new Map();
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const authorization = String(req.headers.authorization ?? "");
+    tokenLog.push({ authorization, url: url.pathname + url.search, at: Date.now() });
+
+    if (url.pathname === "/2/oauth2/token" && req.method === "POST") {
+      const body = await readBody(req);
+      const refreshToken = new URLSearchParams(body).get("refresh_token");
+      res.setHeader("content-type", "application/json");
+      if (refreshToken === "x-refresh-reauth") {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: "invalid_grant" }));
+        return;
+      }
+      const suffix = refreshToken === "x-refresh-rate" ? "rate" : "ok";
+      res.end(
+        JSON.stringify({
+          token_type: "bearer",
+          access_token: `x-access-${suffix}`,
+          refresh_token: `x-refresh-${suffix}-rotated`,
+          expires_in: 7200,
+          scope: "tweet.read users.read follows.read offline.access",
+        }),
+      );
+      return;
+    }
+
+    const accessToken = authorization.replace("Bearer ", "");
+    if (!accessToken.startsWith("x-access-")) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ errors: [{ title: "Unauthorized" }] }));
+      return;
+    }
+    res.setHeader("content-type", "application/json");
+    res.setHeader("x-rate-limit-limit", "900");
+    res.setHeader("x-rate-limit-remaining", "899");
+    res.setHeader("x-rate-limit-reset", String(Math.ceil(Date.now() / 1000) + 60));
+
+    if (url.pathname === "/2/users/me") {
+      res.end(JSON.stringify({ data: xUser() }));
+      return;
+    }
+    if (url.pathname === "/2/users/9001/tweets") {
+      const calls = (contentCalls.get(accessToken) ?? 0) + 1;
+      contentCalls.set(accessToken, calls);
+      if (accessToken === "x-access-rate" && calls === 1) {
+        res.writeHead(429, { "content-type": "application/json", "retry-after": "1" });
+        res.end(JSON.stringify({ errors: [{ title: "Rate limit exceeded" }] }));
+        return;
+      }
+      const second = url.searchParams.get("pagination_token") === "x-page-2";
+      res.end(
+        JSON.stringify({
+          data: [
+            {
+              id: second ? "x-post-2" : "x-post-1",
+              author_id: "9001",
+              text: second ? "x page two" : "x page one",
+              created_at: second ? "2030-02-02T00:00:00.000Z" : "2030-02-01T00:00:00.000Z",
+              conversation_id: second ? "x-post-2" : "x-post-1",
+              public_metrics: { like_count: 1, reply_count: 0, repost_count: 0, quote_count: 0 },
+            },
+          ],
+          includes: { users: [xUser()] },
+          meta: second ? { result_count: 1 } : { result_count: 1, next_token: "x-page-2" },
+        }),
+      );
+      return;
+    }
+    res.writeHead(404);
+    res.end(JSON.stringify({ errors: [{ title: "not found" }] }));
+  });
+  return {
+    tokenLog,
+    async start() {
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("X fixture server did not bind");
+      return `http://127.0.0.1:${address.port}`;
+    },
+    async stop() {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
+function xUser() {
+  return {
+    id: "9001",
+    username: "xlr_x_fixture",
+    name: "XLR X Fixture",
+    public_metrics: { followers_count: 10, following_count: 5, post_count: 2 },
+  };
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
 async function createConnection(token, fixtureBaseUrl) {
   const user = await pool.query(
     "INSERT INTO users (email, password_hash, display_name, status) VALUES ($1, 'hash', $2, 'ACTIVE') RETURNING id",
@@ -189,6 +298,71 @@ async function createConnection(token, fixtureBaseUrl) {
       VALUES ($1, $2, $3, 'CONNECTED', $4, $5, $6)
     `,
     [connectionId, scope.scopeId, platform.rows[0].id, encrypted, `profile-${token}`, token],
+  );
+  return { userId: user.rows[0].id, platformId: platform.rows[0].id, scope, connectionId };
+}
+
+async function createXConnection(name, refreshToken) {
+  const user = await pool.query(
+    "INSERT INTO users (email, password_hash, display_name, status) VALUES ($1, 'hash', $2, 'ACTIVE') RETURNING id",
+    [`${name}-${randomUUID()}@example.test`, name],
+  );
+  const platform = await pool.query(
+    "INSERT INTO platforms (slug, display_name, enabled) VALUES ('x', 'X', true) ON CONFLICT (slug) DO UPDATE SET enabled = true RETURNING id",
+  );
+  const providerConfigId = randomUUID();
+  const encryptedClientSecret = shared.encryptSecret(
+    "x-client-secret-fixture",
+    undefined,
+    shared.providerAppSecretAssociatedData({
+      providerConfigId,
+      platformSlug: "x",
+      secretName: "clientSecret",
+    }),
+  );
+  await pool.query(
+    `
+      INSERT INTO provider_app_configurations (
+        id, platform_id, environment, client_id, client_secret_encrypted,
+        redirect_uri, enabled, metadata
+      )
+      VALUES ($1, $2, 'test', 'x-client-fixture', $3,
+        'https://app.example.test/platforms/x/oauth/callback', true, '{}'::jsonb)
+      ON CONFLICT (platform_id, environment) DO UPDATE SET
+        client_id = EXCLUDED.client_id,
+        client_secret_encrypted = EXCLUDED.client_secret_encrypted,
+        redirect_uri = EXCLUDED.redirect_uri,
+        enabled = true
+    `,
+    [providerConfigId, platform.rows[0].id, encryptedClientSecret],
+  );
+  const scope = await database.ensurePersonalScope(user.rows[0].id);
+  const connectionId = randomUUID();
+  const credentials = {
+    accessToken: "x-expired",
+    refreshToken,
+    expiresAt: "2000-01-01T00:00:00.000Z",
+    scopes: ["tweet.read", "users.read", "offline.access"],
+    metadata: { providerUserId: "9001" },
+  };
+  const encrypted = shared.encryptSecret(
+    JSON.stringify(credentials),
+    undefined,
+    shared.socialCredentialAssociatedData({
+      connectionId,
+      scopeId: scope.scopeId,
+      platformSlug: "x",
+    }),
+  );
+  await pool.query(
+    `
+      INSERT INTO social_connections (
+        id, scope_id, platform_id, status, credentials_encrypted,
+        verified_external_id, verified_handle
+      )
+      VALUES ($1, $2, $3, 'CONNECTED', $4, '9001', 'xlr_x_fixture')
+    `,
+    [connectionId, scope.scopeId, platform.rows[0].id, encrypted],
   );
   return { userId: user.rows[0].id, platformId: platform.rows[0].id, scope, connectionId };
 }
@@ -698,6 +872,90 @@ test(
       );
       await waitForJob(runningRequest.jobId, ["CANCELLED"], 25_000);
       assert.equal(await contentCount("running-disconnect"), 1);
+    } finally {
+      if (worker) await stopWorker(worker);
+      await fixture.stop();
+    }
+  },
+);
+
+test(
+  "X worker ingestion e2e: OAuth refresh, BullMQ worker, pagination, 429 retry, reauth, and tenant isolation",
+  { skip },
+  async () => {
+    await reset();
+    const fixture = createXFixtureServer();
+    const baseUrl = await fixture.start();
+    let worker;
+    try {
+      const ok = await createXConnection("x-ok", "x-refresh-ok");
+      const rate = await createXConnection("x-rate", "x-refresh-rate");
+      const reauth = await createXConnection("x-reauth", "x-refresh-reauth");
+      const requests = await Promise.all(
+        [ok, rate, reauth].map((item) =>
+          database.createSocialConnectionSyncRequest({
+            connectionId: item.connectionId,
+            reason: "MANUAL",
+          }),
+        ),
+      );
+      worker = await startWorker({ X_API_BASE_URL: baseUrl });
+      const okJob = await waitForJob(requests[0].jobId, ["COMPLETED"], 30_000);
+      const rateJob = await waitForJob(requests[1].jobId, ["COMPLETED"], 30_000);
+      const reauthJob = await waitForJob(requests[2].jobId, ["FAILED"], 30_000);
+      assert.equal(okJob.attempt_count, 1);
+      assert.equal(rateJob.attempt_count, 2);
+      assert.equal(reauthJob.attempt_count, 1);
+      assert.equal(
+        Number((await pool.query("SELECT count(*) FROM social_content_items")).rows[0].count),
+        2,
+      );
+      assert.equal(
+        Number(
+          (
+            await pool.query(
+              "SELECT count(*) FROM social_ingestion_runs WHERE connection_id = $1 AND cursor_after = $2",
+              [
+                ok.connectionId,
+                Buffer.from(JSON.stringify({ timeline: "x-page-2" }), "utf8").toString("base64url"),
+              ],
+            )
+          ).rows[0].count,
+        ),
+        1,
+      );
+      const refreshed = (
+        await pool.query(
+          "SELECT credentials_encrypted, status FROM social_connections WHERE id = $1",
+          [ok.connectionId],
+        )
+      ).rows[0];
+      assert.equal(refreshed.status, "CONNECTED");
+      assert.equal(refreshed.credentials_encrypted.includes("x-access-ok"), false);
+      const plaintext = shared.decryptSecret(
+        refreshed.credentials_encrypted,
+        undefined,
+        shared.socialCredentialAssociatedData({
+          connectionId: ok.connectionId,
+          scopeId: ok.scope.scopeId,
+          platformSlug: "x",
+        }),
+      );
+      assert.equal(JSON.parse(plaintext).refreshToken, "x-refresh-ok-rotated");
+      assert.equal(
+        (
+          await pool.query("SELECT status FROM social_connections WHERE id = $1", [
+            reauth.connectionId,
+          ])
+        ).rows[0].status,
+        "REAUTH_REQUIRED",
+      );
+      const scopedRows = await pool.query(
+        "SELECT scope_id, count(*) FROM social_content_items GROUP BY scope_id ORDER BY scope_id NULLS LAST",
+      );
+      assert.ok(scopedRows.rows.every((row) => row.scope_id === null || Number(row.count) <= 2));
+      assert.ok(fixture.tokenLog.some((entry) => entry.url.startsWith("/2/oauth2/token")));
+      assert.ok(fixture.tokenLog.some((entry) => entry.url.startsWith("/2/users/9001/tweets")));
     } finally {
       if (worker) await stopWorker(worker);
       await fixture.stop();

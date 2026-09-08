@@ -1,32 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  XConnector,
-  AuthenticationError,
-  CapabilityUnavailableError,
-} from "../dist/index.js";
+import { XConnector } from "../dist/index.js";
 
-test("interface-only connector cannot claim authentication success", async () => {
+test("X connector requires real OAuth user credentials before authentication", async () => {
   const connector = new XConnector();
   assert.equal(connector.getStatus(), "DISCONNECTED");
 
-  await assert.rejects(
-    connector.authenticate({ accessToken: "not-a-real-token" }),
-    AuthenticationError,
-  );
+  const result = await connector.authenticate({});
+  assert.equal(result.success, false);
+  assert.equal(result.status, "REAUTH_REQUIRED");
   assert.equal(connector.getStatus(), "DISCONNECTED");
   assert.equal(await connector.checkHealth(), false);
 });
 
-test("configuration-required capability cannot return fake empty production data", async () => {
+test("X connector does not report capabilities available without configuration", async () => {
   const connector = new XConnector();
-  await assert.rejects(
-    connector.getProfile("someone"),
-    CapabilityUnavailableError,
-  );
-  await assert.rejects(
-    connector.getContent({ limit: 10 }),
-    CapabilityUnavailableError,
-  );
+  assert.equal(connector.getCapabilities().profiles, "CONFIGURATION_REQUIRED");
+  assert.equal(connector.getCapabilities().search, "CONFIGURATION_REQUIRED");
+  assert.equal(connector.getCapabilities().followers, "CONFIGURATION_REQUIRED");
+  assert.equal(connector.getManifest().oauth.type, "authorization_code_pkce");
+  assert.equal(connector.getManifest().oauth.pkceRequired, true);
 });

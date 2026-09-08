@@ -139,6 +139,46 @@ export class AdminController {
     };
   }
 
+  @Get("provider-app-configs")
+  @RequireRoles("ADMIN", "SUPER_ADMIN")
+  @RequirePermissions(PERMISSIONS.ADMIN_PROVIDERS_MANAGE)
+  async listProviderAppConfigs() {
+    return this.adminService.listProviderAppConfigs();
+  }
+
+  @Put("provider-app-configs/:platform")
+  @RequireRoles("ADMIN", "SUPER_ADMIN")
+  @RequirePermissions(PERMISSIONS.ADMIN_PROVIDERS_MANAGE)
+  async upsertProviderAppConfig(
+    @Param("platform") platform: string,
+    @Body()
+    body: {
+      environment?: string;
+      clientId?: string;
+      clientSecret?: string;
+      redirectUri?: string;
+      enabled?: boolean;
+      metadata?: Record<string, unknown>;
+    },
+    @CurrentUser() auth: AuthContext,
+  ) {
+    const result = await this.adminService.upsertProviderAppConfig(platform, body);
+    await this.audit.record({
+      actorUserId: auth.userId,
+      action: "admin.provider_app_config.upserted",
+      entityType: "provider_app_configuration",
+      entityId: result.config.id,
+      metadata: {
+        platformId: result.config.platformId,
+        platformSlug: result.config.platformSlug,
+        environment: result.config.environment,
+        enabled: result.config.enabled,
+        clientSecretConfigured: result.config.clientSecretConfigured,
+      },
+    });
+    return result;
+  }
+
   private parseBoundedInt(raw: string, field: string, min: number, max: number): number {
     if (!/^\d+$/.test(raw)) {
       throw new BadRequestException(`${field} must be a positive integer.`);

@@ -18,6 +18,75 @@ export interface ConnectorCredentials {
   metadata?: Record<string, unknown>;
 }
 
+export interface ProviderApplicationConfig {
+  platformId: string;
+  clientId: string;
+  clientSecret?: string;
+  redirectUri: string;
+  enabled: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface OAuthAuthorizationRequest {
+  providerConfig: ProviderApplicationConfig;
+  state: string;
+  codeChallenge: string;
+  requestedScopes: string[];
+}
+
+export interface OAuthTokenExchangeRequest {
+  providerConfig: ProviderApplicationConfig;
+  code: string;
+  codeVerifier: string;
+  redirectUri: string;
+}
+
+export interface OAuthTokenRefreshRequest {
+  providerConfig: ProviderApplicationConfig;
+  refreshToken: string;
+}
+
+export interface OAuthTokenResult {
+  accessToken: string;
+  refreshToken?: string;
+  tokenType?: string;
+  expiresAt?: string;
+  expiresIn?: number;
+  grantedScopes: string[];
+  rawProviderMetadata?: Record<string, unknown>;
+}
+
+export interface OAuthProviderAdapter {
+  buildAuthorizationUrl(request: OAuthAuthorizationRequest): URL;
+  exchangeAuthorizationCode(
+    request: OAuthTokenExchangeRequest,
+    signal?: AbortSignal,
+  ): Promise<OAuthTokenResult>;
+  refreshAccessToken(
+    request: OAuthTokenRefreshRequest,
+    signal?: AbortSignal,
+  ): Promise<OAuthTokenResult>;
+  verifyIdentity(
+    credentials: ConnectorCredentials,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedProfile>;
+  revoke?(
+    credentials: ConnectorCredentials,
+    providerConfig: ProviderApplicationConfig,
+    signal?: AbortSignal,
+  ): Promise<{ providerRevoked: boolean; reason?: string }>;
+}
+
+export interface OAuthCapableConnector extends SocialConnector {
+  getOAuthAdapter(): OAuthProviderAdapter;
+}
+
+export interface CapabilityEvaluationInput {
+  configured: boolean;
+  grantedScopes?: string[];
+  access?: Record<string, unknown>;
+}
+
 export interface AuthResult {
   success: boolean;
   status: ConnectorStatus;
@@ -93,6 +162,9 @@ export interface SocialConnector {
   getStatus(): ConnectorStatus;
   checkHealth(): Promise<boolean>;
   getCapabilities(): Partial<Record<ConnectorCapability, AvailabilityState>>;
+  evaluateCapabilities?(
+    input: CapabilityEvaluationInput,
+  ): Partial<Record<ConnectorCapability, AvailabilityState>>;
   authenticate(
     credentials: ConnectorCredentials,
     context?: ConnectorOperationContext,

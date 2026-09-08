@@ -15,6 +15,7 @@ import type {
   NormalizedInteraction,
   ConnectorOperationContext,
   PageResult,
+  CapabilityEvaluationInput,
 } from "./types.js";
 import { CapabilityUnavailableError, AuthenticationError } from "./errors.js";
 
@@ -30,6 +31,12 @@ export abstract class BaseSocialConnector implements SocialConnector {
   }
 
   getCapabilities(): Partial<Record<ConnectorCapability, AvailabilityState>> {
+    return this.manifest.capabilities;
+  }
+
+  evaluateCapabilities(
+    _input: CapabilityEvaluationInput,
+  ): Partial<Record<ConnectorCapability, AvailabilityState>> {
     return this.manifest.capabilities;
   }
 

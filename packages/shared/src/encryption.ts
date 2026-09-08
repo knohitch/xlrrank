@@ -121,3 +121,11 @@ export function socialCredentialAssociatedData(input: {
 }): string {
   return `social-connection:${input.connectionId}:${input.scopeId}:${input.platformSlug}:credentials:v2`;
 }
+
+export function providerAppSecretAssociatedData(input: {
+  providerConfigId: string;
+  platformSlug: string;
+  secretName: string;
+}): string {
+  return `provider-app:${input.providerConfigId}:${input.platformSlug}:${input.secretName}:v1`;
+}

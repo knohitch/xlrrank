@@ -370,6 +370,123 @@ jobs:
       - name: Run connector contract tests
         run: pnpm --filter @xlrrank/social-core test
 
+  x-connector-contract:
+    name: X Connector Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run X connector fixture contract
+        run: node --test packages/social-core/test/x-connector.test.mjs
+
+  x-oauth-e2e:
+    name: X OAuth E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_x_oauth_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_x_oauth_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_x_oauth_e2e
+      ENCRYPTION_MASTER_KEY: x-oauth-e2e-master-key-32-bytes-minimum
+      SESSION_SIGNING_SECRET: x-oauth-e2e-session-signing-secret
+      RATE_LIMIT_STORE: memory
+      MIGRATION_INTEGRATION_TEST: "1"
+      X_OAUTH_E2E: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run X OAuth fixture flow
+        run: |
+          node --test --test-name-pattern "OAuth" packages/social-core/test/x-connector.test.mjs
+          node --test apps/api/test/platforms-oauth.e2e.mjs
+
+  x-worker-ingestion-e2e:
+    name: X Worker Ingestion E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_worker_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_worker_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_worker_e2e
+      REDIS_URL: redis://localhost:6379
+      QUEUE_URL: redis://localhost:6379
+      WORKER_INGESTION_E2E: "1"
+      ENCRYPTION_MASTER_KEY: worker-e2e-master-key-32-bytes-minimum
+      SESSION_SIGNING_SECRET: worker-e2e-session-signing-secret-value
+      RATE_LIMIT_STORE: memory
+      MIGRATION_INTEGRATION_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm db:migrate
+      - name: Run X real worker ingestion E2E
+        run: node --test --test-force-exit --test-name-pattern "X worker ingestion" apps/worker/test/worker-ingestion.e2e.mjs
+
   worker-ingestion-e2e:
     name: Worker Ingestion E2E
     runs-on: ubuntu-latest

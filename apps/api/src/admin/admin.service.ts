@@ -4,11 +4,13 @@ import {
   Injectable,
   NotFoundException,
 } from "@nestjs/common";
+import { randomUUID } from "node:crypto";
 import { desc, eq, sql } from "drizzle-orm";
 import { getDb, getPool } from "@xlrrank/database";
 import { auditLogs, users, userRoles, roles } from "@xlrrank/database/schema";
 import { getRolesForUser } from "@xlrrank/database";
 import { ROLES, isAdminRole, type Role } from "@xlrrank/auth";
+import { encryptSecret, providerAppSecretAssociatedData } from "../common/encryption.js";
 
 export interface AdminUserSummary {
   id: string;
@@ -19,6 +21,19 @@ export interface AdminUserSummary {
   roles: Role[];
   createdAt: Date;
   lastLoginAt: Date | null;
+}
+
+export interface ProviderAppConfigDto {
+  id: string;
+  platformId: string;
+  platformSlug: string;
+  environment: string;
+  clientId: string;
+  redirectUri: string;
+  enabled: boolean;
+  clientSecretConfigured: boolean;
+  metadata: Record<string, unknown>;
+  updatedAt: Date;
 }
 
 @Injectable()
@@ -171,6 +186,147 @@ export class AdminService {
     }));
   }
 
+  async listProviderAppConfigs(): Promise<{ configs: ProviderAppConfigDto[] }> {
+    const result = await getPool().query<{
+      id: string;
+      platform_id: string;
+      platform_slug: string;
+      environment: string;
+      client_id: string;
+      client_secret_encrypted: string | null;
+      redirect_uri: string;
+      enabled: boolean;
+      metadata: Record<string, unknown> | null;
+      updated_at: Date;
+    }>(
+      `
+        SELECT pac.id, pac.platform_id, p.slug AS platform_slug, pac.environment,
+               pac.client_id, pac.client_secret_encrypted, pac.redirect_uri,
+               pac.enabled, pac.metadata, pac.updated_at
+        FROM provider_app_configurations pac
+        JOIN platforms p ON p.id = pac.platform_id
+        ORDER BY p.slug ASC, pac.environment ASC
+      `,
+    );
+    return {
+      configs: result.rows.map((row) => ({
+        id: row.id,
+        platformId: row.platform_id,
+        platformSlug: row.platform_slug,
+        environment: row.environment,
+        clientId: row.client_id,
+        redirectUri: row.redirect_uri,
+        enabled: row.enabled,
+        clientSecretConfigured: !!row.client_secret_encrypted,
+        metadata: row.metadata ?? {},
+        updatedAt: row.updated_at,
+      })),
+    };
+  }
+
+  async upsertProviderAppConfig(
+    platformSlugOrId: string,
+    input: {
+      environment?: string;
+      clientId?: string;
+      clientSecret?: string;
+      redirectUri?: string;
+      enabled?: boolean;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<{ config: ProviderAppConfigDto }> {
+    const platform = await this.resolvePlatform(platformSlugOrId);
+    const environment = input.environment?.trim() || process.env.NODE_ENV || "development";
+    const clientId = input.clientId?.trim();
+    const redirectUri = input.redirectUri?.trim();
+    if (!clientId) throw new BadRequestException("clientId is required.");
+    if (!redirectUri) throw new BadRequestException("redirectUri is required.");
+    const parsedRedirect = new URL(redirectUri);
+    if (!["https:", "http:"].includes(parsedRedirect.protocol)) {
+      throw new BadRequestException("redirectUri must be http or https.");
+    }
+
+    const existing = await getPool().query<{ id: string; client_secret_encrypted: string | null }>(
+      `
+        SELECT id, client_secret_encrypted
+        FROM provider_app_configurations
+        WHERE platform_id = $1 AND environment = $2
+        LIMIT 1
+      `,
+      [platform.id, environment],
+    );
+    const configId = existing.rows[0]?.id ?? randomUUID();
+    const encryptedSecret =
+      input.clientSecret && input.clientSecret.length > 0
+        ? encryptSecret(
+            input.clientSecret,
+            undefined,
+            providerAppSecretAssociatedData({
+              providerConfigId: configId,
+              platformSlug: platform.slug,
+              secretName: "clientSecret",
+            }),
+          )
+        : (existing.rows[0]?.client_secret_encrypted ?? null);
+
+    const result = await getPool().query<{
+      id: string;
+      platform_id: string;
+      platform_slug: string;
+      environment: string;
+      client_id: string;
+      client_secret_encrypted: string | null;
+      redirect_uri: string;
+      enabled: boolean;
+      metadata: Record<string, unknown> | null;
+      updated_at: Date;
+    }>(
+      `
+        INSERT INTO provider_app_configurations (
+          id, platform_id, environment, client_id, client_secret_encrypted,
+          redirect_uri, enabled, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+        ON CONFLICT (platform_id, environment) DO UPDATE SET
+          client_id = EXCLUDED.client_id,
+          client_secret_encrypted = EXCLUDED.client_secret_encrypted,
+          redirect_uri = EXCLUDED.redirect_uri,
+          enabled = EXCLUDED.enabled,
+          metadata = EXCLUDED.metadata,
+          updated_at = now()
+        RETURNING id, platform_id, (SELECT slug FROM platforms WHERE id = $2) AS platform_slug,
+                  environment, client_id, client_secret_encrypted, redirect_uri,
+                  enabled, metadata, updated_at
+      `,
+      [
+        configId,
+        platform.id,
+        environment,
+        clientId,
+        encryptedSecret,
+        redirectUri,
+        input.enabled ?? true,
+        JSON.stringify(input.metadata ?? {}),
+      ],
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error("Failed to persist provider app configuration");
+    return {
+      config: {
+        id: row.id,
+        platformId: row.platform_id,
+        platformSlug: row.platform_slug,
+        environment: row.environment,
+        clientId: row.client_id,
+        redirectUri: row.redirect_uri,
+        enabled: row.enabled,
+        clientSecretConfigured: !!row.client_secret_encrypted,
+        metadata: row.metadata ?? {},
+        updatedAt: row.updated_at,
+      },
+    };
+  }
+
   private normalizeRoles(roleNames: Role[]): Role[] {
     const allowed = new Set<Role>(ROLES);
     const normalized: Role[] = [];
@@ -184,6 +340,16 @@ export class AdminService {
       throw new BadRequestException("At least one role is required.");
     }
     return normalized;
+  }
+
+  private async resolvePlatform(slugOrId: string): Promise<{ id: string; slug: string }> {
+    const result = await getPool().query<{ id: string; slug: string }>(
+      "SELECT id, slug FROM platforms WHERE id::text = $1 OR slug = $1 LIMIT 1",
+      [slugOrId],
+    );
+    const row = result.rows[0];
+    if (!row) throw new NotFoundException("Platform not found.");
+    return row;
   }
 
   private async assertCanRemoveOperationalPrivileges(userId: string): Promise<void> {

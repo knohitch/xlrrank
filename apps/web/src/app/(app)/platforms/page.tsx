@@ -12,8 +12,20 @@ interface PlatformInfo {
   demo?: boolean;
   status: string;
   lastSyncAt: string | null;
+  nextSyncAt: string | null;
   capabilities: Record<string, string>;
-  connection: { id: string; status: string } | null;
+  connection: {
+    id: string;
+    status: string;
+    verifiedHandle: string | null;
+    displayName: string | null;
+    nextSyncAt: string | null;
+    diagnostics: {
+      rateLimitRemaining: number | null;
+      rateLimitResetAt: string | null;
+      retryAfterSeconds: number | null;
+    };
+  } | null;
 }
 
 export default function PlatformsPage() {
@@ -60,6 +72,42 @@ export default function PlatformsPage() {
     }
   }
 
+  async function startOAuth(platform: PlatformInfo) {
+    setError("");
+    const res = await api.post<{ authorizationUrl: string }>(
+      `/platforms/${platform.slug}/oauth/start`,
+      {
+        scopeType: "PERSONAL",
+        redirectTo: "/platforms",
+      },
+    );
+    if (!res.ok || !res.data.authorizationUrl) {
+      setError("Unable to start OAuth authorization for this platform.");
+      return;
+    }
+    window.location.assign(res.data.authorizationUrl);
+  }
+
+  function capabilitySummary(platform: PlatformInfo): string {
+    const enabled = Object.entries(platform.capabilities)
+      .filter(([, state]) => state === "AVAILABLE")
+      .map(([name]) => friendlyCapability(name));
+    if (enabled.length > 0) return enabled.join(" · ");
+    return Object.entries(platform.capabilities)
+      .map(([name, state]) => `${friendlyCapability(name)}: ${state}`)
+      .join(" · ");
+  }
+
+  function connectionLabel(platform: PlatformInfo): string {
+    if (!platform.connection) return "";
+    const handle = platform.connection.verifiedHandle
+      ? `@${platform.connection.verifiedHandle}`
+      : "Verified account";
+    return platform.connection.displayName
+      ? `${platform.connection.displayName} (${handle})`
+      : handle;
+  }
+
   return (
     <div className="shell-page">
       <div className="page-heading">
@@ -91,22 +139,39 @@ export default function PlatformsPage() {
                 </span>
               </div>
               <p className="muted">
-                {Object.entries(p.capabilities)
-                  .map(([name, state]) => `${name}: ${state}`)
-                  .join(" · ") || "No connector capabilities declared"}
+                {capabilitySummary(p) || "No connector capabilities declared"}
               </p>
+              {p.connection && <p className="muted">{connectionLabel(p)}</p>}
               {p.lastSyncAt && (
                 <p className="muted">Last sync: {new Date(p.lastSyncAt).toLocaleString()}</p>
               )}
+              {(p.connection?.nextSyncAt ?? p.nextSyncAt) && (
+                <p className="muted">
+                  Next sync: {new Date(p.connection?.nextSyncAt ?? p.nextSyncAt!).toLocaleString()}
+                </p>
+              )}
+              {p.connection?.diagnostics.rateLimitResetAt && (
+                <p className="muted">
+                  Rate limit resets:{" "}
+                  {new Date(p.connection.diagnostics.rateLimitResetAt).toLocaleString()}
+                </p>
+              )}
               {syncJobs[p.id] && <p className="muted">Sync state: {syncJobs[p.id]}</p>}
               <div className="card-actions">
-                <button
-                  className="btn btn-secondary btn-sm"
-                  disabled={!p.connected || !p.connection}
-                  onClick={() => requestSync(p)}
-                >
-                  {p.connected ? "Sync" : "Live connection unavailable in current UI"}
-                </button>
+                {p.slug === "x" && !p.connected && (
+                  <button className="btn btn-primary btn-sm" onClick={() => startOAuth(p)}>
+                    {p.status === "REAUTH_REQUIRED" ? "Reconnect X" : "Connect X"}
+                  </button>
+                )}
+                {p.connected && (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    disabled={!p.connection}
+                    onClick={() => requestSync(p)}
+                  >
+                    Sync
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -114,4 +179,17 @@ export default function PlatformsPage() {
       )}
     </div>
   );
+}
+
+function friendlyCapability(name: string): string {
+  const labels: Record<string, string> = {
+    profiles: "Profiles",
+    content: "Posts",
+    comments: "Replies",
+    search: "Recent search",
+    metrics: "Metrics",
+    followers: "Followers",
+    following: "Following",
+  };
+  return labels[name] ?? name;
 }

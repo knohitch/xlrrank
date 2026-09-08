@@ -92,6 +92,8 @@ New social credentials are encrypted with AES-256-GCM using associated data boun
 
 A ciphertext copied from one connection context cannot be decrypted under a different context.
 
+Sprint 06 adds generic OAuth provider application configuration in `provider_app_configurations`. Provider client secrets are encrypted separately from user connection credentials and are not returned by the admin API. OAuth authorization transactions persist only a state digest plus server-side PKCE verifier, requested scopes, local redirect target, expiry, and single-use timestamp.
+
 ## Connection State Machine
 
 Allowed states are centralized:

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   BadRequestException,
   ForbiddenException,
@@ -9,7 +9,9 @@ import {
 import { eq } from "drizzle-orm";
 import {
   authorizeConnection,
+  authorizeScope,
   createSocialConnectionSyncRequest,
+  ensureOrganizationScope,
   ensurePersonalScope,
   getAuthorizedSocialSyncJobStatus,
   getDb,
@@ -24,9 +26,20 @@ import {
   RedditConnector,
   XConnector,
 } from "@xlrrank/social-core";
-import type { ConnectorCredentials } from "@xlrrank/social-core";
+import type {
+  CapabilityEvaluationInput,
+  ConnectorCredentials,
+  NormalizedProfile,
+  OAuthCapableConnector,
+  ProviderApplicationConfig,
+} from "@xlrrank/social-core";
 import { AuditService } from "../audit/audit.service.js";
-import { encryptSecret, socialCredentialAssociatedData } from "../common/encryption.js";
+import {
+  decryptSecret,
+  encryptSecret,
+  providerAppSecretAssociatedData,
+  socialCredentialAssociatedData,
+} from "../common/encryption.js";
 
 interface ConnectionRow {
   id: string;
@@ -42,6 +55,27 @@ interface ConnectionRow {
   rate_limit_reset_at: Date | null;
   retry_after_seconds: number | null;
   sync_error: unknown;
+  provider_metadata: Record<string, unknown> | null;
+  next_sync_at: Date | null;
+}
+
+interface PlatformRow {
+  id: string;
+  slug: string;
+  displayName: string;
+  enabled: boolean;
+}
+
+interface ProviderAppConfigRow {
+  id: string;
+  platform_id: string;
+  platform_slug: string;
+  environment: string;
+  client_id: string;
+  client_secret_encrypted: string | null;
+  redirect_uri: string;
+  enabled: boolean;
+  metadata: Record<string, unknown> | null;
 }
 
 @Injectable()
@@ -79,7 +113,10 @@ export class PlatformsService {
       verifiedExternalId: account.verified_external_id,
       verifiedHandle: account.verified_handle,
       lastSyncAt: account.last_sync_at,
+      nextSyncAt: account.next_sync_at,
       lastSyncAttemptAt: account.last_sync_attempt_at,
+      displayName: stringFromMetadata(account.provider_metadata, "displayName"),
+      grantedCapabilities: account.provider_metadata?.grantedCapabilities ?? {},
       sync: {
         status: account.status,
       },
@@ -98,6 +135,7 @@ export class PlatformsService {
     const pool = getPool();
     const scope = await ensurePersonalScope(userId);
     const allPlatforms = await db.select().from(platforms);
+    const configured = await this.configuredPlatformIds();
     const connections = await pool.query<ConnectionRow>(
       "SELECT * FROM social_connections WHERE scope_id = $1",
       [scope.scopeId],
@@ -107,6 +145,7 @@ export class PlatformsService {
       const connector = connectorRegistry.getDefinition(p.slug);
       const account = connections.rows.find((a) => a.platform_id === p.id);
       const status = account?.status ?? "DISCONNECTED";
+      const grantedScopes = stringArrayFromMetadata(account?.provider_metadata, "grantedScopes");
       return {
         id: p.id,
         slug: p.slug,
@@ -115,7 +154,13 @@ export class PlatformsService {
         connected: this.isLiveConnected(status),
         status,
         lastSyncAt: account?.last_sync_at ?? null,
-        capabilities: connector?.manifest.capabilities ?? {},
+        nextSyncAt: account?.next_sync_at ?? null,
+        capabilities: evaluateConnectorCapabilities({
+          connector,
+          configured: configured.has(p.id),
+          metadata: account?.provider_metadata,
+          grantedScopes,
+        }),
         connection: this.toConnectionDto(account),
       };
     });
@@ -123,19 +168,18 @@ export class PlatformsService {
 
   async getPlatform(platformId: string, userId: string) {
     this.ensureConnectors();
-    const db = getDb();
     const pool = getPool();
     const scope = await ensurePersonalScope(userId);
-    const rows = await db.select().from(platforms).where(eq(platforms.id, platformId)).limit(1);
-    const platform = rows[0];
-    if (!platform) throw new NotFoundException("Platform not found.");
+    const platform = await this.resolvePlatform(platformId);
 
     const accounts = await pool.query<ConnectionRow>(
       "SELECT * FROM social_connections WHERE scope_id = $1 AND platform_id = $2",
-      [scope.scopeId, platformId],
+      [scope.scopeId, platform.id],
     );
     const account = accounts.rows[0];
     const status = account?.status ?? "DISCONNECTED";
+    const configured = await this.hasProviderAppConfig(platform.id);
+    const grantedScopes = stringArrayFromMetadata(account?.provider_metadata, "grantedScopes");
 
     return {
       id: platform.id,
@@ -145,7 +189,13 @@ export class PlatformsService {
       connected: this.isLiveConnected(status),
       status,
       lastSyncAt: account?.last_sync_at ?? null,
-      capabilities: connectorRegistry.getDefinition(platform.slug)?.manifest.capabilities ?? {},
+      nextSyncAt: account?.next_sync_at ?? null,
+      capabilities: evaluateConnectorCapabilities({
+        connector: connectorRegistry.getDefinition(platform.slug),
+        configured,
+        metadata: account?.provider_metadata,
+        grantedScopes,
+      }),
       connection: this.toConnectionDto(account),
     };
   }
@@ -153,7 +203,6 @@ export class PlatformsService {
   async connectPlatform(platformId: string, userId: string, credentials: ConnectorCredentials) {
     this.ensureConnectors();
     const db = getDb();
-    const pool = getPool();
     const scope = await ensurePersonalScope(userId);
     const platformRows = await db
       .select()
@@ -167,6 +216,11 @@ export class PlatformsService {
     const connector = connectorRegistry.create(platform.slug);
     if (!connector) {
       throw new BadRequestException("No connector implementation is registered for this platform.");
+    }
+    if (hasOAuthAdapter(connector)) {
+      throw new BadRequestException(
+        "This platform uses OAuth. Start an OAuth authorization instead.",
+      );
     }
 
     const auth = await connector.authenticate(credentials);
@@ -189,126 +243,210 @@ export class PlatformsService {
       );
     }
 
-    const connectionResult = await pool.query<ConnectionRow>(
-      "SELECT * FROM social_connections WHERE scope_id = $1 AND platform_id = $2",
-      [scope.scopeId, platformId],
-    );
-    const existing = connectionResult.rows[0];
-    const connectionId = existing?.id ?? randomUUID();
-    const credentialsEncrypted = encryptSecret(
-      JSON.stringify(credentials),
-      undefined,
-      socialCredentialAssociatedData({
-        connectionId,
-        scopeId: scope.scopeId,
-        platformSlug: platform.slug,
-      }),
-    );
-
-    const client = await pool.connect();
-    try {
-      await client.query("BEGIN");
-      const accountResult = await client.query<{ id: string }>(
-        `
-          INSERT INTO social_external_accounts (
-            platform_id, external_id, current_handle, display_name,
-            profile_image_url, bio, location, website, follower_count,
-            following_count, visibility, metadata
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-          ON CONFLICT (platform_id, external_id) DO UPDATE SET
-            current_handle = EXCLUDED.current_handle,
-            display_name = EXCLUDED.display_name,
-            profile_image_url = EXCLUDED.profile_image_url,
-            bio = EXCLUDED.bio,
-            location = EXCLUDED.location,
-            website = EXCLUDED.website,
-            follower_count = EXCLUDED.follower_count,
-            following_count = EXCLUDED.following_count,
-            last_observed_at = now(),
-            updated_at = now()
-          RETURNING id
-        `,
-        [
-          platformId,
-          profile.externalId,
-          profile.handle,
-          profile.displayName ?? null,
-          profile.profileImageUrl ?? null,
-          profile.bio ?? null,
-          profile.location ?? null,
-          profile.website ?? null,
-          profile.followerCount ?? null,
-          profile.followingCount ?? null,
-          profile.visibility ?? "UNKNOWN",
-          profile.metadata ?? {},
-        ],
-      );
-      const externalAccountId = accountResult.rows[0]?.id;
-      if (!externalAccountId) throw new Error("Failed to persist canonical social account");
-
-      await client.query(
-        `
-          INSERT INTO social_account_handles (external_account_id, handle)
-          VALUES ($1, $2)
-          ON CONFLICT (external_account_id, handle)
-          DO UPDATE SET last_seen_at = now()
-        `,
-        [externalAccountId, profile.handle],
-      );
-
-      await client.query(
-        `
-          INSERT INTO social_connections (
-            id, scope_id, platform_id, external_account_id, status,
-            credentials_encrypted, verified_external_id, verified_handle, provider_metadata
-          )
-          VALUES ($1, $2, $3, $4, 'CONNECTED', $5, $6, $7, $8)
-          ON CONFLICT (scope_id, platform_id) DO UPDATE SET
-            external_account_id = EXCLUDED.external_account_id,
-            status = 'CONNECTED',
-            credentials_encrypted = EXCLUDED.credentials_encrypted,
-            credential_version = social_connections.credential_version + 1,
-            verified_external_id = EXCLUDED.verified_external_id,
-            verified_handle = EXCLUDED.verified_handle,
-            provider_metadata = EXCLUDED.provider_metadata,
-            disconnected_at = NULL,
-            updated_at = now()
-        `,
-        [
-          connectionId,
-          scope.scopeId,
-          platformId,
-          externalAccountId,
-          credentialsEncrypted,
-          profile.externalId,
-          profile.handle,
-          profile.metadata ?? {},
-        ],
-      );
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK");
-      throw err;
-    } finally {
-      client.release();
-      await connector.disconnect();
-    }
+    const persistResult = await this.persistConnectedConnection({
+      scopeId: scope.scopeId,
+      platform,
+      profile,
+      credentials,
+      providerMetadata: profile.metadata ?? {},
+    });
+    await connector.disconnect();
 
     await this.audit.record({
       actorUserId: userId,
-      action: existing ? "social.connection.credentials_replaced" : "social.connection.created",
+      action: persistResult.existing
+        ? "social.connection.credentials_replaced"
+        : "social.connection.created",
       entityType: "social_connection",
-      entityId: connectionId,
+      entityId: persistResult.connectionId,
       metadata: { platformId, scopeId: scope.scopeId },
     });
 
     return {
       status: "CONNECTED",
-      message: existing ? "Platform reconnected." : "Platform connected.",
-      connectionId,
+      message: persistResult.existing ? "Platform reconnected." : "Platform connected.",
+      connectionId: persistResult.connectionId,
       externalAccountId: profile.externalId,
       handle: profile.handle,
+    };
+  }
+
+  async startOAuth(
+    platformId: string,
+    userId: string,
+    input: {
+      scopeType?: "PERSONAL" | "ORGANIZATION";
+      organizationId?: string;
+      redirectTo?: string;
+      requestedScopes?: string[];
+    },
+  ) {
+    this.ensureConnectors();
+    const platform = await this.resolvePlatform(platformId);
+    if (!platform.enabled) throw new BadRequestException("This platform is disabled.");
+    const connector = connectorRegistry.create(platform.slug);
+    if (!connector || !hasOAuthAdapter(connector)) {
+      throw new BadRequestException("This platform does not support OAuth authorization.");
+    }
+    const scope = await this.resolveRequestedScope(userId, input);
+    const providerConfig = await this.loadProviderAppConfig(platform);
+    const state = randomBytes(32).toString("base64url");
+    const stateDigest = digest(state);
+    const pkceVerifier = randomBytes(64).toString("base64url");
+    const codeChallenge = base64UrlSha256(pkceVerifier);
+    const requestedScopes = this.normalizeScopes(
+      input.requestedScopes,
+      connector.getManifest().oauth?.defaultScopes ?? [],
+    );
+    const redirectTo = safeLocalRedirect(input.redirectTo ?? "/platforms");
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    await getPool().query(
+      `
+        INSERT INTO oauth_authorization_transactions (
+          platform_id, scope_id, actor_user_id, state_digest, pkce_verifier,
+          requested_scopes, redirect_to, expires_at, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb)
+      `,
+      [
+        platform.id,
+        scope.scopeId,
+        userId,
+        stateDigest,
+        pkceVerifier,
+        JSON.stringify(requestedScopes),
+        redirectTo,
+        expiresAt,
+        JSON.stringify({ scopeType: scope.scopeType, organizationId: scope.organizationId }),
+      ],
+    );
+
+    const authorizationUrl = connector
+      .getOAuthAdapter()
+      .buildAuthorizationUrl({
+        providerConfig,
+        state,
+        codeChallenge,
+        requestedScopes,
+      })
+      .toString();
+
+    await this.audit.record({
+      actorUserId: userId,
+      action: "social.oauth.started",
+      entityType: "platform",
+      entityId: platform.id,
+      metadata: { platformId: platform.id, platformSlug: platform.slug, scopeId: scope.scopeId },
+    });
+
+    return { authorizationUrl, expiresAt };
+  }
+
+  async handleOAuthCallback(
+    platformId: string,
+    userId: string,
+    input: { state?: string; code?: string; error?: string; errorDescription?: string },
+  ) {
+    this.ensureConnectors();
+    const platform = await this.resolvePlatform(platformId);
+    const connector = connectorRegistry.create(platform.slug);
+    if (!connector || !hasOAuthAdapter(connector)) {
+      throw new BadRequestException("This platform does not support OAuth authorization.");
+    }
+    if (!input.state) throw new BadRequestException("OAuth state is required.");
+    const transaction = await this.consumeOAuthTransaction({
+      state: input.state,
+      userId,
+      platformId: platform.id,
+    });
+    if (input.error) {
+      await this.audit.record({
+        actorUserId: userId,
+        action: "social.oauth.failed",
+        entityType: "platform",
+        entityId: platform.id,
+        metadata: {
+          platformId: platform.id,
+          platformSlug: platform.slug,
+          scopeId: transaction.scopeId,
+          providerError: input.error,
+        },
+      });
+      throw new BadRequestException("Provider authorization was denied or failed.");
+    }
+    if (!input.code) throw new BadRequestException("OAuth authorization code is required.");
+    const providerConfig = await this.loadProviderAppConfig(platform);
+    const tokenResult = await connector.getOAuthAdapter().exchangeAuthorizationCode({
+      providerConfig,
+      code: input.code,
+      codeVerifier: transaction.pkceVerifier,
+      redirectUri: providerConfig.redirectUri,
+    });
+    const credentials: ConnectorCredentials = {
+      accessToken: tokenResult.accessToken,
+      scopes: tokenResult.grantedScopes.length
+        ? tokenResult.grantedScopes
+        : transaction.requestedScopes,
+      metadata: {},
+    };
+    if (tokenResult.refreshToken) credentials.refreshToken = tokenResult.refreshToken;
+    if (tokenResult.expiresAt) credentials.expiresAt = tokenResult.expiresAt;
+    if (tokenResult.tokenType) credentials.metadata!.tokenType = tokenResult.tokenType;
+    if (typeof providerConfig.metadata?.environment === "string") {
+      credentials.metadata!.providerConfigEnvironment = providerConfig.metadata.environment;
+    }
+    const profile = await connector.getOAuthAdapter().verifyIdentity(credentials, {
+      scopeId: transaction.scopeId,
+      connectionId: "oauth-verification",
+      credentials,
+    });
+    credentials.metadata = {
+      ...credentials.metadata,
+      providerUserId: profile.externalId,
+    };
+    const capabilityInput: CapabilityEvaluationInput = { configured: true };
+    if (credentials.scopes) capabilityInput.grantedScopes = credentials.scopes;
+    const access = objectFromMetadata(providerConfig.metadata, "access");
+    if (access) capabilityInput.access = access;
+    const capabilities = connector.evaluateCapabilities?.(capabilityInput) ?? {};
+    const persistResult = await this.persistConnectedConnection({
+      scopeId: transaction.scopeId,
+      platform,
+      profile,
+      credentials,
+      providerMetadata: {
+        displayName: profile.displayName,
+        providerUserId: profile.externalId,
+        grantedScopes: credentials.scopes ?? [],
+        grantedCapabilities: capabilities,
+        access: objectFromMetadata(providerConfig.metadata, "access") ?? {},
+      },
+    });
+    const sync = await createSocialConnectionSyncRequest({
+      connectionId: persistResult.connectionId,
+      requestedByUserId: userId,
+      reason: "MANUAL",
+      idempotencyKey: `oauth-connected:${persistResult.connectionId}:${Date.now()}`,
+    });
+    await this.audit.record({
+      actorUserId: userId,
+      action: persistResult.existing ? "social.oauth.reauthorized" : "social.oauth.successful",
+      entityType: "social_connection",
+      entityId: persistResult.connectionId,
+      metadata: {
+        platformId: platform.id,
+        platformSlug: platform.slug,
+        scopeId: transaction.scopeId,
+        jobId: sync.jobId,
+      },
+    });
+    return {
+      status: "CONNECTED",
+      connectionId: persistResult.connectionId,
+      handle: profile.handle,
+      redirectTo: transaction.redirectTo,
+      sync,
     };
   }
 
@@ -345,6 +483,285 @@ export class PlatformsService {
       metadata: { platformId, scopeId: scope.scopeId },
     });
     return { status: "DISCONNECTED", message: "Platform disconnected." };
+  }
+
+  private async persistConnectedConnection(input: {
+    scopeId: string;
+    platform: PlatformRow;
+    profile: NormalizedProfile;
+    credentials: ConnectorCredentials;
+    providerMetadata: Record<string, unknown>;
+  }): Promise<{ connectionId: string; existing: boolean }> {
+    const pool = getPool();
+    const connectionResult = await pool.query<ConnectionRow>(
+      "SELECT * FROM social_connections WHERE scope_id = $1 AND platform_id = $2",
+      [input.scopeId, input.platform.id],
+    );
+    const existing = connectionResult.rows[0];
+    const connectionId = existing?.id ?? randomUUID();
+    const credentialsEncrypted = encryptSecret(
+      JSON.stringify(input.credentials),
+      undefined,
+      socialCredentialAssociatedData({
+        connectionId,
+        scopeId: input.scopeId,
+        platformSlug: input.platform.slug,
+      }),
+    );
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const accountResult = await client.query<{ id: string }>(
+        `
+          INSERT INTO social_external_accounts (
+            platform_id, external_id, current_handle, display_name,
+            profile_image_url, bio, location, website, follower_count,
+            following_count, visibility, metadata
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+          ON CONFLICT (platform_id, external_id) DO UPDATE SET
+            current_handle = EXCLUDED.current_handle,
+            display_name = EXCLUDED.display_name,
+            profile_image_url = EXCLUDED.profile_image_url,
+            bio = EXCLUDED.bio,
+            location = EXCLUDED.location,
+            website = EXCLUDED.website,
+            follower_count = EXCLUDED.follower_count,
+            following_count = EXCLUDED.following_count,
+            last_observed_at = now(),
+            updated_at = now()
+          RETURNING id
+        `,
+        [
+          input.platform.id,
+          input.profile.externalId,
+          input.profile.handle,
+          input.profile.displayName ?? null,
+          input.profile.profileImageUrl ?? null,
+          input.profile.bio ?? null,
+          input.profile.location ?? null,
+          input.profile.website ?? null,
+          input.profile.followerCount ?? null,
+          input.profile.followingCount ?? null,
+          input.profile.visibility ?? "UNKNOWN",
+          JSON.stringify(input.profile.metadata ?? {}),
+        ],
+      );
+      const externalAccountId = accountResult.rows[0]?.id;
+      if (!externalAccountId) throw new Error("Failed to persist canonical social account");
+
+      await client.query(
+        `
+          INSERT INTO social_account_handles (external_account_id, handle)
+          VALUES ($1, $2)
+          ON CONFLICT (external_account_id, handle)
+          DO UPDATE SET last_seen_at = now()
+        `,
+        [externalAccountId, input.profile.handle],
+      );
+
+      await client.query(
+        `
+          INSERT INTO social_connections (
+            id, scope_id, platform_id, external_account_id, status,
+            credentials_encrypted, verified_external_id, verified_handle, provider_metadata
+          )
+          VALUES ($1, $2, $3, $4, 'CONNECTED', $5, $6, $7, $8::jsonb)
+          ON CONFLICT (scope_id, platform_id) DO UPDATE SET
+            external_account_id = EXCLUDED.external_account_id,
+            status = 'CONNECTED',
+            credentials_encrypted = EXCLUDED.credentials_encrypted,
+            credential_version = social_connections.credential_version + 1,
+            verified_external_id = EXCLUDED.verified_external_id,
+            verified_handle = EXCLUDED.verified_handle,
+            provider_metadata = EXCLUDED.provider_metadata,
+            sync_error = NULL,
+            disconnected_at = NULL,
+            updated_at = now()
+        `,
+        [
+          connectionId,
+          input.scopeId,
+          input.platform.id,
+          externalAccountId,
+          credentialsEncrypted,
+          input.profile.externalId,
+          input.profile.handle,
+          JSON.stringify(input.providerMetadata),
+        ],
+      );
+      await client.query("COMMIT");
+      return { connectionId, existing: !!existing };
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  private async resolveRequestedScope(
+    userId: string,
+    input: { scopeType?: "PERSONAL" | "ORGANIZATION"; organizationId?: string },
+  ) {
+    if (input.scopeType === "ORGANIZATION") {
+      if (!input.organizationId) {
+        throw new BadRequestException("organizationId is required for organization scope.");
+      }
+      const scopeId = await ensureOrganizationScope(input.organizationId);
+      const authorized = await authorizeScope(userId, scopeId, "MANAGE_SOCIAL_CONNECTIONS");
+      if (!authorized) throw new ForbiddenException("Organization connection scope denied.");
+      return authorized;
+    }
+    return ensurePersonalScope(userId);
+  }
+
+  private async resolvePlatform(slugOrId: string): Promise<PlatformRow> {
+    const result = await getPool().query<{
+      id: string;
+      slug: string;
+      display_name: string;
+      enabled: boolean;
+    }>(
+      "SELECT id, slug, display_name, enabled FROM platforms WHERE id::text = $1 OR slug = $1 LIMIT 1",
+      [slugOrId],
+    );
+    const row = result.rows[0];
+    if (!row) throw new NotFoundException("Platform not found.");
+    return { id: row.id, slug: row.slug, displayName: row.display_name, enabled: row.enabled };
+  }
+
+  private async configuredPlatformIds(): Promise<Set<string>> {
+    const result = await getPool().query<{ platform_id: string }>(
+      "SELECT platform_id FROM provider_app_configurations WHERE enabled = true",
+    );
+    return new Set(result.rows.map((row) => row.platform_id));
+  }
+
+  private async hasProviderAppConfig(platformId: string): Promise<boolean> {
+    const result = await getPool().query(
+      "SELECT 1 FROM provider_app_configurations WHERE platform_id = $1 AND enabled = true LIMIT 1",
+      [platformId],
+    );
+    return result.rowCount === 1;
+  }
+
+  private async loadProviderAppConfig(platform: PlatformRow): Promise<ProviderApplicationConfig> {
+    const environment = process.env.NODE_ENV || "development";
+    const result = await getPool().query<ProviderAppConfigRow>(
+      `
+        SELECT pac.id, pac.platform_id, p.slug AS platform_slug, pac.environment,
+               pac.client_id, pac.client_secret_encrypted, pac.redirect_uri,
+               pac.enabled, pac.metadata
+        FROM provider_app_configurations pac
+        JOIN platforms p ON p.id = pac.platform_id
+        WHERE pac.platform_id = $1 AND pac.environment = $2
+        LIMIT 1
+      `,
+      [platform.id, environment],
+    );
+    const row = result.rows[0];
+    if (!row || !row.enabled) {
+      throw new BadRequestException("Provider application configuration is required.");
+    }
+    const clientSecret = row.client_secret_encrypted
+      ? decryptSecret(
+          row.client_secret_encrypted,
+          undefined,
+          providerAppSecretAssociatedData({
+            providerConfigId: row.id,
+            platformSlug: row.platform_slug,
+            secretName: "clientSecret",
+          }),
+        )
+      : undefined;
+    const config: ProviderApplicationConfig = {
+      platformId: row.platform_slug,
+      clientId: row.client_id,
+      redirectUri: row.redirect_uri,
+      enabled: row.enabled,
+      metadata: { ...(row.metadata ?? {}), environment: row.environment },
+    };
+    if (clientSecret) config.clientSecret = clientSecret;
+    return config;
+  }
+
+  private normalizeScopes(requested: string[] | undefined, defaults: string[]): string[] {
+    const allowed = new Set(defaults);
+    const source = requested && requested.length ? requested : defaults;
+    const normalized = source.filter((scope) => allowed.has(scope));
+    if (!normalized.includes("tweet.read")) normalized.push("tweet.read");
+    if (!normalized.includes("users.read")) normalized.push("users.read");
+    return [...new Set(normalized)];
+  }
+
+  private async consumeOAuthTransaction(input: {
+    state: string;
+    userId: string;
+    platformId: string;
+  }): Promise<{
+    id: string;
+    scopeId: string;
+    pkceVerifier: string;
+    requestedScopes: string[];
+    redirectTo: string;
+  }> {
+    const client = await getPool().connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<{
+        id: string;
+        platform_id: string;
+        scope_id: string;
+        actor_user_id: string;
+        pkce_verifier: string;
+        requested_scopes: unknown;
+        redirect_to: string;
+        expires_at: Date;
+        used_at: Date | null;
+      }>(
+        `
+          SELECT id, platform_id, scope_id, actor_user_id, pkce_verifier,
+                 requested_scopes, redirect_to, expires_at, used_at
+          FROM oauth_authorization_transactions
+          WHERE state_digest = $1
+          LIMIT 1
+          FOR UPDATE
+        `,
+        [digest(input.state)],
+      );
+      const row = result.rows[0];
+      if (!row) throw new BadRequestException("OAuth state is invalid.");
+      if (row.used_at) throw new BadRequestException("OAuth state was already used.");
+      if (row.expires_at.getTime() <= Date.now()) {
+        throw new BadRequestException("OAuth state has expired.");
+      }
+      if (row.actor_user_id !== input.userId || row.platform_id !== input.platformId) {
+        throw new BadRequestException("OAuth state does not match this authorization attempt.");
+      }
+      const scope = await authorizeScope(input.userId, row.scope_id, "MANAGE_SOCIAL_CONNECTIONS");
+      if (!scope) throw new ForbiddenException("Connection scope denied.");
+      await client.query(
+        "UPDATE oauth_authorization_transactions SET used_at = now() WHERE id = $1 AND used_at IS NULL",
+        [row.id],
+      );
+      await client.query("COMMIT");
+      return {
+        id: row.id,
+        scopeId: row.scope_id,
+        pkceVerifier: row.pkce_verifier,
+        requestedScopes: Array.isArray(row.requested_scopes)
+          ? row.requested_scopes.filter((value): value is string => typeof value === "string")
+          : [],
+        redirectTo: row.redirect_to,
+      };
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   async requestConnectionSync(connectionId: string, userId: string, idempotencyKey?: string) {
@@ -428,4 +845,99 @@ export class PlatformsService {
       jobStatus: request.status,
     };
   }
+}
+
+function hasOAuthAdapter(connector: unknown): connector is OAuthCapableConnector {
+  return (
+    !!connector &&
+    typeof connector === "object" &&
+    typeof (connector as { getOAuthAdapter?: unknown }).getOAuthAdapter === "function"
+  );
+}
+
+function digest(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("base64url");
+}
+
+function base64UrlSha256(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("base64url");
+}
+
+function safeLocalRedirect(raw: string): string {
+  let decoded = raw;
+  for (let i = 0; i < 3; i += 1) {
+    let next: string;
+    try {
+      next = decodeURIComponent(decoded);
+    } catch {
+      throw new BadRequestException("OAuth redirect target must be application-local.");
+    }
+    if (next === decoded) break;
+    decoded = next;
+  }
+  if (
+    !decoded.startsWith("/") ||
+    decoded.startsWith("//") ||
+    decoded.includes("\\\\") ||
+    decoded.includes("://")
+  ) {
+    throw new BadRequestException("OAuth redirect target must be application-local.");
+  }
+  return decoded;
+}
+
+function stringArrayFromMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+  key: string,
+): string[] {
+  const value = metadata?.[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function objectFromMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+  key: string,
+): Record<string, unknown> | undefined {
+  const value = metadata?.[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function stringFromMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+  key: string,
+): string | null {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value : null;
+}
+
+function evaluateConnectorCapabilities(input: {
+  connector:
+    | { manifest: { capabilities: Partial<Record<string, string>> }; create: () => unknown }
+    | undefined;
+  configured: boolean;
+  metadata: Record<string, unknown> | null | undefined;
+  grantedScopes: string[];
+}) {
+  if (!input.connector) return {};
+  const instance = input.connector.create();
+  if (
+    instance &&
+    typeof instance === "object" &&
+    typeof (instance as { evaluateCapabilities?: unknown }).evaluateCapabilities === "function"
+  ) {
+    const access = objectFromMetadata(input.metadata, "access");
+    const evaluation: CapabilityEvaluationInput = {
+      configured: input.configured,
+      grantedScopes: input.grantedScopes,
+    };
+    if (access) evaluation.access = access;
+    return (
+      instance as { evaluateCapabilities(input: CapabilityEvaluationInput): unknown }
+    ).evaluateCapabilities(evaluation);
+  }
+  return input.connector.manifest.capabilities;
 }

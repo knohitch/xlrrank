@@ -12,6 +12,14 @@ export { NORMALIZATION_VERSION } from "./normalized.js";
 export type {
   SocialConnector,
   ConnectorCredentials,
+  CapabilityEvaluationInput,
+  ProviderApplicationConfig,
+  OAuthAuthorizationRequest,
+  OAuthTokenExchangeRequest,
+  OAuthTokenRefreshRequest,
+  OAuthTokenResult,
+  OAuthProviderAdapter,
+  OAuthCapableConnector,
   AuthResult,
   ContentQuery,
   AccountMetrics,
@@ -48,7 +56,12 @@ export type { SocialPayloadLimits } from "./validation.js";
 export { redactProviderMetadata } from "./security/redaction.js";
 export { ReferenceHttpConnector } from "./testing/reference-connector.js";
 
-export { XConnector } from "./platforms/x-connector.js";
+export {
+  XConnector,
+  buildRecentSearchQuery,
+  evaluateXCapabilities,
+  getXCapabilityMatrix,
+} from "./platforms/x-connector.js";
 export { InstagramConnector } from "./platforms/instagram-connector.js";
 export { FacebookConnector } from "./platforms/facebook-connector.js";
 export { LinkedInConnector } from "./platforms/linkedin-connector.js";

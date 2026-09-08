@@ -54,6 +54,7 @@ export interface SocialConnectionForSync {
   platformEnabled: boolean;
   status: string;
   credentialsEncrypted: string | null;
+  credentialVersion: number;
   syncCursor: string | null;
   syncEnabled: boolean;
   scheduleCadenceSeconds: number | null;
@@ -463,6 +464,7 @@ async function loadConnectionForSyncClient(
     platform_enabled: boolean;
     status: string;
     credentials_encrypted: string | null;
+    credential_version: number;
     sync_cursor: string | null;
     sync_enabled: boolean;
     schedule_cadence_seconds: number | null;
@@ -478,6 +480,7 @@ async function loadConnectionForSyncClient(
              p.enabled AS platform_enabled,
              sc.status,
              sc.credentials_encrypted,
+             sc.credential_version,
              sc.sync_cursor,
              sc.sync_enabled,
              sc.schedule_cadence_seconds
@@ -501,6 +504,7 @@ async function loadConnectionForSyncClient(
     platformEnabled: row.platform_enabled,
     status: row.status,
     credentialsEncrypted: row.credentials_encrypted,
+    credentialVersion: row.credential_version,
     syncCursor: row.sync_cursor,
     syncEnabled: row.sync_enabled,
     scheduleCadenceSeconds: row.schedule_cadence_seconds,

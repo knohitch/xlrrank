@@ -4,7 +4,7 @@
 
 **NOT PRODUCTION READY**
 
-Foundation security has been hardened. All known dependency vulnerabilities are resolved. Docker images build successfully. The verification pipeline is trustworthy. Worker/reference-provider social ingestion is implemented for Sprint 05 evidence. Live third-party social connectors, AI providers, intelligence engines, billing, extension production integration, and full deployment remain unverified.
+Foundation security has been hardened. All known dependency vulnerabilities are resolved. Docker images build successfully. The verification pipeline is trustworthy. Worker/reference-provider social ingestion is implemented for Sprint 05 evidence. Sprint 06 adds a production X OAuth/API connector with fixture-backed contract and remote CI gates. Live X provider verification remains externally blocked because no real X developer app credentials/access were supplied. Other third-party social connectors, AI providers, intelligence engines, billing, extension production integration, and full deployment remain unverified.
 
 ---
 
@@ -84,8 +84,8 @@ Sprint 05 replaces the fail-closed social-ingestion worker stub with a durable w
 
 ### Evidence Matrix
 
-| Requirement           | Implementation                                                 | Redis                                | PostgreSQL                                          | Real Worker                                                | Status        |
-| --------------------- | -------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------- | ---------------------------------------------------------- | ------------- |
+| Requirement           | Implementation                                                 | Redis                                | PostgreSQL                                          | Real Worker                                                | Status   |
+| --------------------- | -------------------------------------------------------------- | ------------------------------------ | --------------------------------------------------- | ---------------------------------------------------------- | -------- |
 | Durable sync request  | API/service creates durable job + outbox                       | Not required for request             | `jobs`, `job_outbox` transaction                    | Worker consumes after dispatch                             | VERIFIED |
 | Outbox                | Dispatcher publishes pending rows                              | BullMQ receives deterministic job ID | `job_outbox` status/locks                           | Runtime dispatcher loop                                    | VERIFIED |
 | Dispatch idempotency  | Deterministic BullMQ job IDs and unique active job constraints | Duplicate add is harmless            | Unique job/outbox constraints                       | Duplicate request E2E                                      | VERIFIED |
@@ -226,57 +226,57 @@ Local browser E2E execution was not completed because Docker is not installed on
 
 ## 4. Product Subsystem Matrix
 
-| Subsystem                    | Status                           | Notes                                                                                          |
-| ---------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Authentication               | VERIFIED                         | Real browser/API E2E suite passed in CI                                                        |
-| Sessions                     | VERIFIED                         | HMAC-signed tokens, httpOnly cookies, revocation, expiry; E2E passed in CI                     |
-| Email verification           | VERIFIED                         | SMTP sink E2E passed in CI                                                                     |
-| Password reset               | VERIFIED                         | SMTP sink E2E with session revocation passed in CI                                             |
-| RBAC                         | VERIFIED                         | 4 roles, 9 permissions, role hierarchy tested                                                  |
-| User portal                  | VERIFIED                         | Settings wires profile, password, sessions, account deletion; E2E passed in CI                 |
-| Admin portal                 | VERIFIED                         | User search/filter/status/roles wired; lockout protections tested in CI                        |
-| Support system               | VERIFIED                         | Ticket portal, internal note filtering, and RBAC tested by Playwright suite in CI              |
-| Notifications                | SCAFFOLD ONLY                    | Service + controller exist, no notification triggers                                           |
-| X connector                  | INTERFACE ONLY                   | Factory-registered adapter with CONFIGURATION_REQUIRED capabilities                            |
-| Instagram connector          | INTERFACE ONLY                   | Same pattern                                                                                   |
-| Facebook connector           | INTERFACE ONLY                   | Same pattern                                                                                   |
-| LinkedIn connector           | INTERFACE ONLY                   | Same pattern                                                                                   |
-| Reddit connector             | INTERFACE ONLY                   | Same pattern                                                                                   |
-| Ingestion                    | VERIFIED PARTIAL                 | Reference-provider social sync executes through PostgreSQL, Redis, BullMQ, real worker         |
-| Workers                      | VERIFIED PARTIAL                 | Social ingestion processor implemented; intelligence/future queues remain fail-closed          |
-| Normalized social model      | VERIFIED                         | Types defined, DB schema complete                                                              |
-| Identity resolution          | SCAFFOLD ONLY                    | Algorithm exists, not tested with real data                                                    |
-| Social DNA                   | SCAFFOLD ONLY                    | Generator exists, not tested end-to-end                                                        |
-| Discovery                    | SCAFFOLD ONLY                    | Scoring algorithm exists, not tested with real data                                            |
-| Relationships                | SCAFFOLD ONLY                    | Strength/momentum calculation exists                                                           |
-| Radar/opportunities          | SCAFFOLD ONLY                    | Detection algorithm exists                                                                     |
-| Trends                       | SCAFFOLD ONLY                    | Detection algorithm exists                                                                     |
-| Content intelligence         | SCAFFOLD ONLY                    | Analysis algorithm exists                                                                      |
-| Network intelligence         | SCAFFOLD ONLY                    | Cross-platform merge exists                                                                    |
-| Search                       | SCAFFOLD ONLY                    | Inverted index + search exists                                                                 |
-| AI provider framework        | PARTIAL                          | Real HTTP implementations for OpenAI-compatible, Anthropic; 8 provider adapters                |
-| Provider credential storage  | PARTIAL                          | DB table exists, encryption implemented                                                        |
-| Model discovery              | PARTIAL                          | Registry + prober with real HTTP calls                                                         |
-| Capability validation        | PARTIAL                          | Prober tests text gen, structured output, streaming                                            |
-| Model registry persistence   | SCAFFOLD ONLY                    | In-memory only                                                                                 |
-| AI routing                   | PARTIAL                          | Router with 4 modes, candidate ranking, fallback                                               |
-| Language guard               | SCAFFOLD ONLY                    | Detection + repair exist, not tested with real LLM output                                      |
-| AI cost controls             | SCAFFOLD ONLY                    | Tracking service exists                                                                        |
-| Feature flags                | SCAFFOLD ONLY                    | Service exists with scope-aware flags                                                          |
-| Plans/entitlements           | SCAFFOLD ONLY                    | 4 plans defined in code                                                                        |
-| Billing                      | SCAFFOLD ONLY                    | Service exists, no real billing integration                                                    |
-| Reports                      | SCAFFOLD ONLY                    | Service exists with basic reports                                                              |
-| Browser extension            | PARTIAL                          | Manifest V3, content scripts for 5 platforms, popup                                            |
-| Demo isolation               | SCAFFOLD ONLY                    | Demo seed exists, demo provider exists                                                         |
-| Social persistence           | VERIFIED LOCALLY / CI GATE ADDED | Scope-owned connections, canonical accounts, observations, content, interactions, provenance   |
-| Connector runtime isolation  | VERIFIED LOCALLY / CI GATE ADDED | Registry stores connector factories, not authenticated singleton instances                     |
-| Worker ingestion reliability | VERIFIED                         | Durable job outbox, run lease, retries, DLQ, scheduling, crash recovery via reference provider |
-| Docker/deployment            | VERIFIED                         | Docker Compose valid, API/web/worker images build in CI                                        |
-| Dependency security          | VERIFIED                         | 0 known production vulnerabilities                                                             |
-| Encryption                   | VERIFIED                         | AES-256-GCM, roundtrip tested, legacy rejection tested                                         |
-| RBAC security                | VERIFIED                         | Permission hierarchy tested, role enforcement tested                                           |
-| CSRF                         | VERIFIED                         | Double-submit cookie pattern enforced                                                          |
-| Observability                | PARTIAL                          | Pino logging with redaction, basic metrics                                                     |
+| Subsystem                    | Status                           | Notes                                                                                                                                                |
+| ---------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Authentication               | VERIFIED                         | Real browser/API E2E suite passed in CI                                                                                                              |
+| Sessions                     | VERIFIED                         | HMAC-signed tokens, httpOnly cookies, revocation, expiry; E2E passed in CI                                                                           |
+| Email verification           | VERIFIED                         | SMTP sink E2E passed in CI                                                                                                                           |
+| Password reset               | VERIFIED                         | SMTP sink E2E with session revocation passed in CI                                                                                                   |
+| RBAC                         | VERIFIED                         | 4 roles, 9 permissions, role hierarchy tested                                                                                                        |
+| User portal                  | VERIFIED                         | Settings wires profile, password, sessions, account deletion; E2E passed in CI                                                                       |
+| Admin portal                 | VERIFIED                         | User search/filter/status/roles wired; lockout protections tested in CI                                                                              |
+| Support system               | VERIFIED                         | Ticket portal, internal note filtering, and RBAC tested by Playwright suite in CI                                                                    |
+| Notifications                | SCAFFOLD ONLY                    | Service + controller exist, no notification triggers                                                                                                 |
+| X connector                  | CONTRACT VERIFIED / LIVE BLOCKED | OAuth 2.0 PKCE adapter, API v2 transport, normalization, rate-limit/error handling, and worker fixture gates; live provider credentials not supplied |
+| Instagram connector          | INTERFACE ONLY                   | Same pattern                                                                                                                                         |
+| Facebook connector           | INTERFACE ONLY                   | Same pattern                                                                                                                                         |
+| LinkedIn connector           | INTERFACE ONLY                   | Same pattern                                                                                                                                         |
+| Reddit connector             | INTERFACE ONLY                   | Same pattern                                                                                                                                         |
+| Ingestion                    | VERIFIED PARTIAL                 | Reference-provider social sync executes through PostgreSQL, Redis, BullMQ, real worker                                                               |
+| Workers                      | VERIFIED PARTIAL                 | Social ingestion processor implemented; intelligence/future queues remain fail-closed                                                                |
+| Normalized social model      | VERIFIED                         | Types defined, DB schema complete                                                                                                                    |
+| Identity resolution          | SCAFFOLD ONLY                    | Algorithm exists, not tested with real data                                                                                                          |
+| Social DNA                   | SCAFFOLD ONLY                    | Generator exists, not tested end-to-end                                                                                                              |
+| Discovery                    | SCAFFOLD ONLY                    | Scoring algorithm exists, not tested with real data                                                                                                  |
+| Relationships                | SCAFFOLD ONLY                    | Strength/momentum calculation exists                                                                                                                 |
+| Radar/opportunities          | SCAFFOLD ONLY                    | Detection algorithm exists                                                                                                                           |
+| Trends                       | SCAFFOLD ONLY                    | Detection algorithm exists                                                                                                                           |
+| Content intelligence         | SCAFFOLD ONLY                    | Analysis algorithm exists                                                                                                                            |
+| Network intelligence         | SCAFFOLD ONLY                    | Cross-platform merge exists                                                                                                                          |
+| Search                       | SCAFFOLD ONLY                    | Inverted index + search exists                                                                                                                       |
+| AI provider framework        | PARTIAL                          | Real HTTP implementations for OpenAI-compatible, Anthropic; 8 provider adapters                                                                      |
+| Provider credential storage  | PARTIAL                          | DB table exists, encryption implemented                                                                                                              |
+| Model discovery              | PARTIAL                          | Registry + prober with real HTTP calls                                                                                                               |
+| Capability validation        | PARTIAL                          | Prober tests text gen, structured output, streaming                                                                                                  |
+| Model registry persistence   | SCAFFOLD ONLY                    | In-memory only                                                                                                                                       |
+| AI routing                   | PARTIAL                          | Router with 4 modes, candidate ranking, fallback                                                                                                     |
+| Language guard               | SCAFFOLD ONLY                    | Detection + repair exist, not tested with real LLM output                                                                                            |
+| AI cost controls             | SCAFFOLD ONLY                    | Tracking service exists                                                                                                                              |
+| Feature flags                | SCAFFOLD ONLY                    | Service exists with scope-aware flags                                                                                                                |
+| Plans/entitlements           | SCAFFOLD ONLY                    | 4 plans defined in code                                                                                                                              |
+| Billing                      | SCAFFOLD ONLY                    | Service exists, no real billing integration                                                                                                          |
+| Reports                      | SCAFFOLD ONLY                    | Service exists with basic reports                                                                                                                    |
+| Browser extension            | PARTIAL                          | Manifest V3, content scripts for 5 platforms, popup                                                                                                  |
+| Demo isolation               | SCAFFOLD ONLY                    | Demo seed exists, demo provider exists                                                                                                               |
+| Social persistence           | VERIFIED LOCALLY / CI GATE ADDED | Scope-owned connections, canonical accounts, observations, content, interactions, provenance                                                         |
+| Connector runtime isolation  | VERIFIED LOCALLY / CI GATE ADDED | Registry stores connector factories, not authenticated singleton instances                                                                           |
+| Worker ingestion reliability | VERIFIED                         | Durable job outbox, run lease, retries, DLQ, scheduling, crash recovery via reference provider                                                       |
+| Docker/deployment            | VERIFIED                         | Docker Compose valid, API/web/worker images build in CI                                                                                              |
+| Dependency security          | VERIFIED                         | 0 known production vulnerabilities                                                                                                                   |
+| Encryption                   | VERIFIED                         | AES-256-GCM, roundtrip tested, legacy rejection tested                                                                                               |
+| RBAC security                | VERIFIED                         | Permission hierarchy tested, role enforcement tested                                                                                                 |
+| CSRF                         | VERIFIED                         | Double-submit cookie pattern enforced                                                                                                                |
+| Observability                | PARTIAL                          | Pino logging with redaction, basic metrics                                                                                                           |
 
 ---
 
@@ -322,8 +322,9 @@ No active HIGH defects are confirmed in the Sprint 01-05 foundation gates. Produ
 
 ## 7. Missing Verification
 
-- Social connector authentication flows (no test credentials)
-- Social connector production integration
+- Live X provider OAuth/read/search/worker verification with real X developer app credentials/access
+- Meta/LinkedIn/Reddit social connector authentication flows
+- Social connector production integration beyond X contract fixtures
 - Live third-party social ingestion through production provider APIs
 - AI provider actual API calls (no test API keys in CI)
 - AI runtime/provider configuration
@@ -342,20 +343,20 @@ No active HIGH defects are confirmed in the Sprint 01-05 foundation gates. Produ
 
 ## 8. External Integration Blockers
 
-| Integration      | Status                    | Reason                                                                                    |
-| ---------------- | ------------------------- | ----------------------------------------------------------------------------------------- |
-| X (Twitter)      | NOT PRODUCTION VERIFIED   | No test credentials, live API not implemented                                             |
-| Instagram        | NOT PRODUCTION VERIFIED   | No test credentials, requires Facebook app review                                         |
-| Facebook         | NOT PRODUCTION VERIFIED   | No test credentials, requires app review                                                  |
-| LinkedIn         | NOT PRODUCTION VERIFIED   | No test credentials, requires app review                                                  |
-| Reddit           | NOT PRODUCTION VERIFIED   | No test credentials                                                                       |
-| OpenAI           | IMPLEMENTED, NOT VERIFIED | Real HTTP implementation, no test API key                                                 |
-| Anthropic        | IMPLEMENTED, NOT VERIFIED | Real HTTP implementation, no test API key                                                 |
-| DeepSeek         | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                                                                 |
-| xAI/Grok         | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                                                                 |
-| Xiaomi MiMo      | IMPLEMENTED, NOT VERIFIED | OpenAI-compatible adapter                                                                 |
-| Stripe (billing) | NOT IMPLEMENTED           | No integration code                                                                       |
-| SMTP (email)     | IMPLEMENTED, CI VERIFIED  | Mailpit SMTP sink exercised in Application E2E job; production SMTP delivery not verified |
+| Integration      | Status                                    | Reason                                                                                                                |
+| ---------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| X (Twitter)      | CONTRACT VERIFIED / LIVE BLOCKED_EXTERNAL | Production OAuth/API implementation exists; no real X developer app credentials/access supplied for live verification |
+| Instagram        | NOT PRODUCTION VERIFIED                   | No test credentials, requires Facebook app review                                                                     |
+| Facebook         | NOT PRODUCTION VERIFIED                   | No test credentials, requires app review                                                                              |
+| LinkedIn         | NOT PRODUCTION VERIFIED                   | No test credentials, requires app review                                                                              |
+| Reddit           | NOT PRODUCTION VERIFIED                   | No test credentials                                                                                                   |
+| OpenAI           | IMPLEMENTED, NOT VERIFIED                 | Real HTTP implementation, no test API key                                                                             |
+| Anthropic        | IMPLEMENTED, NOT VERIFIED                 | Real HTTP implementation, no test API key                                                                             |
+| DeepSeek         | IMPLEMENTED, NOT VERIFIED                 | OpenAI-compatible adapter                                                                                             |
+| xAI/Grok         | IMPLEMENTED, NOT VERIFIED                 | OpenAI-compatible adapter                                                                                             |
+| Xiaomi MiMo      | IMPLEMENTED, NOT VERIFIED                 | OpenAI-compatible adapter                                                                                             |
+| Stripe (billing) | NOT IMPLEMENTED                           | No integration code                                                                                                   |
+| SMTP (email)     | IMPLEMENTED, CI VERIFIED                  | Mailpit SMTP sink exercised in Application E2E job; production SMTP delivery not verified                             |
 
 ---
 

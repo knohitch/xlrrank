@@ -25,7 +25,12 @@ import {
   QUEUE_NAMES,
   parseSocialConnectionSyncPayload,
 } from "@xlrrank/queue";
-import { decryptSecret, socialCredentialAssociatedData } from "@xlrrank/shared";
+import {
+  decryptSecret,
+  encryptSecret,
+  providerAppSecretAssociatedData,
+  socialCredentialAssociatedData,
+} from "@xlrrank/shared";
 import {
   connectorRegistry,
   FacebookConnector,
@@ -39,6 +44,8 @@ import {
   RateLimitError,
   TemporaryProviderError,
   type ConnectorCredentials,
+  type OAuthCapableConnector,
+  type ProviderApplicationConfig,
   type RetryClassification,
 } from "@xlrrank/social-core";
 import type { ContentQuery } from "@xlrrank/social-core";
@@ -162,10 +169,172 @@ function parseCredentials(
   return JSON.parse(plaintext) as ConnectorCredentials;
 }
 
-function bindNormalizedPlatformId<T extends NormalizedProfile | NormalizedContent | NormalizedInteraction>(
-  item: T,
-  platformId: string,
-): T {
+function isOAuthCapable(connector: unknown): connector is OAuthCapableConnector {
+  return (
+    !!connector &&
+    typeof connector === "object" &&
+    typeof (connector as { getOAuthAdapter?: unknown }).getOAuthAdapter === "function"
+  );
+}
+
+function tokenNeedsRefresh(credentials: ConnectorCredentials): boolean {
+  if (!credentials.expiresAt) return false;
+  const expiresAt = Date.parse(credentials.expiresAt);
+  if (!Number.isFinite(expiresAt)) return false;
+  return expiresAt <= Date.now() + 60_000;
+}
+
+async function loadProviderConfigForWorker(
+  platformSlug: string,
+): Promise<ProviderApplicationConfig> {
+  const result = await getPool().query<{
+    id: string;
+    platform_slug: string;
+    environment: string;
+    client_id: string;
+    client_secret_encrypted: string | null;
+    redirect_uri: string;
+    enabled: boolean;
+    metadata: Record<string, unknown> | null;
+  }>(
+    `
+      SELECT pac.id, p.slug AS platform_slug, pac.environment, pac.client_id,
+             pac.client_secret_encrypted, pac.redirect_uri, pac.enabled, pac.metadata
+      FROM provider_app_configurations pac
+      JOIN platforms p ON p.id = pac.platform_id
+      WHERE p.slug = $1 AND pac.environment = $2 AND pac.enabled = true
+      LIMIT 1
+    `,
+    [platformSlug, process.env.NODE_ENV || "development"],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new ConnectorError(
+      "Provider application configuration is required for OAuth refresh",
+      platformSlug,
+      "CONFIGURATION",
+      false,
+      "NON_RETRYABLE",
+    );
+  }
+  const config: ProviderApplicationConfig = {
+    platformId: row.platform_slug,
+    clientId: row.client_id,
+    redirectUri: row.redirect_uri,
+    enabled: row.enabled,
+    metadata: { ...(row.metadata ?? {}), environment: row.environment },
+  };
+  if (row.client_secret_encrypted) {
+    config.clientSecret = decryptSecret(
+      row.client_secret_encrypted,
+      undefined,
+      providerAppSecretAssociatedData({
+        providerConfigId: row.id,
+        platformSlug: row.platform_slug,
+        secretName: "clientSecret",
+      }),
+    );
+  }
+  return config;
+}
+
+async function refreshCredentialsIfNeeded(input: {
+  connection: NonNullable<Awaited<ReturnType<typeof loadConnectionForSync>>>;
+  connector: NonNullable<ReturnType<typeof connectorRegistry.create>>;
+  credentials: ConnectorCredentials;
+  scope: ScopeContext;
+  signal?: AbortSignal;
+}): Promise<ConnectorCredentials> {
+  if (!tokenNeedsRefresh(input.credentials)) return input.credentials;
+  if (!input.credentials.refreshToken) {
+    throw new ConnectorError(
+      "OAuth access token expired without a refresh token",
+      input.connection.platformSlug,
+      "AUTHENTICATION",
+      false,
+      "REAUTH_REQUIRED",
+    );
+  }
+  if (!isOAuthCapable(input.connector)) {
+    return input.credentials;
+  }
+  const providerConfig = await loadProviderConfigForWorker(input.connection.platformSlug);
+  const refreshed = await input.connector.getOAuthAdapter().refreshAccessToken(
+    {
+      providerConfig,
+      refreshToken: input.credentials.refreshToken,
+    },
+    input.signal,
+  );
+  const nextCredentials: ConnectorCredentials = {
+    ...input.credentials,
+    accessToken: refreshed.accessToken,
+    refreshToken: refreshed.refreshToken ?? input.credentials.refreshToken,
+    metadata: {
+      ...(input.credentials.metadata ?? {}),
+      tokenType: refreshed.tokenType ?? input.credentials.metadata?.tokenType,
+    },
+  };
+  const scopes = refreshed.grantedScopes.length
+    ? refreshed.grantedScopes
+    : input.credentials.scopes;
+  if (scopes) nextCredentials.scopes = scopes;
+  if (refreshed.expiresAt) nextCredentials.expiresAt = refreshed.expiresAt;
+  const verifyContext = {
+    scopeId: input.scope.scopeId,
+    connectionId: input.connection.id,
+    credentials: nextCredentials,
+  };
+  if (input.signal) {
+    await input.connector.getOAuthAdapter().verifyIdentity(nextCredentials, {
+      ...verifyContext,
+      signal: input.signal,
+    });
+  } else {
+    await input.connector.getOAuthAdapter().verifyIdentity(nextCredentials, verifyContext);
+  }
+  const ciphertext = encryptSecret(
+    JSON.stringify(nextCredentials),
+    undefined,
+    socialCredentialAssociatedData({
+      connectionId: input.connection.id,
+      scopeId: input.connection.scopeId,
+      platformSlug: input.connection.platformSlug,
+    }),
+  );
+  const update = await getPool().query(
+    `
+      UPDATE social_connections
+      SET credentials_encrypted = $2,
+          credential_version = credential_version + 1,
+          provider_metadata = COALESCE(provider_metadata, '{}'::jsonb) || $4::jsonb,
+          updated_at = now()
+      WHERE id = $1
+        AND credential_version = $3
+        AND status IN ('CONNECTED', 'DEGRADED')
+    `,
+    [
+      input.connection.id,
+      ciphertext,
+      input.connection.credentialVersion,
+      JSON.stringify({
+        grantedScopes: nextCredentials.scopes ?? [],
+        tokenRefreshedAt: new Date().toISOString(),
+      }),
+    ],
+  );
+  if (update.rowCount !== 1) {
+    throw new TemporaryProviderError(
+      input.connection.platformSlug,
+      "OAuth credentials changed during refresh",
+    );
+  }
+  return nextCredentials;
+}
+
+function bindNormalizedPlatformId<
+  T extends NormalizedProfile | NormalizedContent | NormalizedInteraction,
+>(item: T, platformId: string): T {
   return { ...item, platformId };
 }
 
@@ -282,8 +451,17 @@ export async function processSocialConnectionSync(job: Job): Promise<void> {
       );
     }
 
-    const credentials = parseCredentials(connection);
+    const initialCredentials = parseCredentials(connection);
     const scope = scopeContext(connection);
+    const credentials = await withProviderTimeout((signal) =>
+      refreshCredentialsIfNeeded({
+        connection,
+        connector,
+        credentials: initialCredentials,
+        scope,
+        signal,
+      }),
+    );
     lastDurableCursor = connection.syncCursor;
     runId =
       runId ??
@@ -329,7 +507,15 @@ export async function processSocialConnectionSync(job: Job): Promise<void> {
         runId,
         ownerToken,
       });
-      const credentialsForPage = parseCredentials(current);
+      const credentialsForPage = await withProviderTimeout((signal) =>
+        refreshCredentialsIfNeeded({
+          connection: current,
+          connector,
+          credentials: parseCredentials(current),
+          scope,
+          signal,
+        }),
+      );
       const context = {
         scopeId: scope.scopeId,
         connectionId: connection.id,
