@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
@@ -472,13 +472,50 @@ async function createMetaConnection(slug, assetId) {
     `
       INSERT INTO social_connections (
         id, scope_id, platform_id, status, credentials_encrypted,
-        verified_external_id, verified_handle
+        verified_external_id, verified_handle, provider_metadata
       )
-      VALUES ($1, $2, $3, 'CONNECTED', $4, $5, $6)
+      VALUES ($1, $2, $3, 'CONNECTED', $4, $5, $6, $7::jsonb)
     `,
-    [connectionId, scope.scopeId, platform.rows[0].id, encrypted, assetId, assetId],
+    [
+      connectionId,
+      scope.scopeId,
+      platform.rows[0].id,
+      encrypted,
+      assetId,
+      assetId,
+      JSON.stringify({ providerAssetId: assetId, assetType: slug === "facebook" ? "FACEBOOK_PAGE" : "INSTAGRAM_PROFESSIONAL_ACCOUNT" }),
+    ],
   );
   return { userId: user.rows[0].id, platformId: platform.rows[0].id, scope, connectionId };
+}
+
+async function createMetaProviderConfig(platformId, slug = "facebook") {
+  const providerConfigId = randomUUID();
+  const encrypted = shared.encryptSecret(
+    "meta-app-secret",
+    undefined,
+    shared.providerAppSecretAssociatedData({
+      providerConfigId,
+      platformSlug: slug,
+      secretName: "clientSecret",
+    }),
+  );
+  await pool.query(
+    `
+      INSERT INTO provider_app_configurations (
+        id, platform_id, environment, client_id, client_secret_encrypted,
+        redirect_uri, enabled, metadata
+      )
+      VALUES ($1, $2, 'test', 'meta-app-id', $3,
+        'https://app.example.test/platforms/meta/oauth/callback', true,
+        '{"webhookVerifyToken":"verify-token"}'::jsonb)
+      ON CONFLICT (platform_id, environment) DO UPDATE SET
+        client_id = EXCLUDED.client_id,
+        client_secret_encrypted = EXCLUDED.client_secret_encrypted,
+        enabled = true
+    `,
+    [providerConfigId, platformId, encrypted],
+  );
 }
 
 function workerEnv(extra = {}) {
@@ -1112,6 +1149,65 @@ test(
       assert.ok(fixture.requests.some((request) => request.path === "/v26.0/page-1/posts"));
       assert.ok(fixture.requests.some((request) => request.path === "/v26.0/ig-1/media"));
       assert.ok(fixture.requests.every((request) => request.params.appsecret_proof));
+    } finally {
+      if (worker) await stopWorker(worker);
+      await fixture.stop();
+    }
+  },
+);
+
+test(
+  "Meta webhook worker e2e: receipt outbox resolves connected scopes and triggers sync",
+  { skip },
+  async () => {
+    await reset();
+    const fixture = createMetaFixtureServer();
+    const baseUrl = await fixture.start();
+    let worker;
+    try {
+      const facebookA = await createMetaConnection("facebook", "page-1");
+      const facebookB = await createMetaConnection("facebook", "page-1");
+      await createMetaProviderConfig(facebookA.platformId, "facebook");
+      const { PlatformsService } = await import("../../api/dist/platforms/platforms.service.js");
+      const service = new PlatformsService({ record: async () => undefined });
+      const payload = {
+        object: "page",
+        entry: [{ id: "page-1", time: 1788998400, changes: [{ field: "feed", value: { post_id: "fb-post-1" } }] }],
+      };
+      const signature = `sha256=${createHmac("sha256", "meta-app-secret")
+        .update(JSON.stringify(payload), "utf8")
+        .digest("hex")}`;
+      const received = await service.receiveMetaWebhook("facebook", signature, payload);
+      assert.equal(received.duplicate, false);
+      assert.equal(JSON.stringify(received.job).includes("meta-app-secret"), false);
+      assert.equal(JSON.stringify(received.job).includes("meta-access"), false);
+
+      worker = await startWorker({ META_GRAPH_BASE_URL: baseUrl });
+      await waitFor(async () => {
+        const result = await pool.query(
+          "SELECT status FROM webhook_receipts WHERE id = $1",
+          [received.receiptId],
+        );
+        return result.rows[0]?.status === "PROCESSED";
+      }, 30_000);
+      await waitFor(async () => {
+        const result = await pool.query(
+          `
+            SELECT count(*)::int AS count
+            FROM social_content_observations sco
+            JOIN social_connections sc ON sc.id = sco.connection_id
+            WHERE sc.id = ANY($1::uuid[])
+          `,
+          [[facebookA.connectionId, facebookB.connectionId]],
+        );
+        return result.rows[0]?.count === 2;
+      }, 30_000);
+      const receipt = (
+        await pool.query("SELECT metadata FROM webhook_receipts WHERE id = $1", [
+          received.receiptId,
+        ])
+      ).rows[0];
+      assert.equal(receipt.metadata.resolvedConnectionCount, 2);
     } finally {
       if (worker) await stopWorker(worker);
       await fixture.stop();

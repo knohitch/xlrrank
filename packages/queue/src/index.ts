@@ -14,11 +14,13 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 
 export const JOB_TYPES = {
   socialConnectionSync: "social.connection.sync",
+  socialWebhookProcess: "social.webhook.process",
 } as const;
 
 export type JobType = (typeof JOB_TYPES)[keyof typeof JOB_TYPES];
 
 export const SOCIAL_SYNC_PAYLOAD_VERSION = 1 as const;
+export const SOCIAL_WEBHOOK_PROCESS_PAYLOAD_VERSION = 1 as const;
 
 export const SOCIAL_SYNC_REASONS = ["MANUAL", "SCHEDULED", "RETRY"] as const;
 export type SocialSyncReason = (typeof SOCIAL_SYNC_REASONS)[number];
@@ -31,6 +33,14 @@ export interface SocialConnectionSyncPayloadV1 {
 }
 
 export type SocialConnectionSyncPayload = SocialConnectionSyncPayloadV1;
+
+export interface SocialWebhookProcessPayloadV1 {
+  version: typeof SOCIAL_WEBHOOK_PROCESS_PAYLOAD_VERSION;
+  jobRequestId: string;
+  receiptId: string;
+}
+
+export type SocialWebhookProcessPayload = SocialWebhookProcessPayloadV1;
 
 export const JOB_STATUSES = [
   "PENDING_DISPATCH",
@@ -149,8 +159,34 @@ export function parseSocialConnectionSyncPayload(payload: unknown): SocialConnec
   };
 }
 
+export function parseSocialWebhookProcessPayload(payload: unknown): SocialWebhookProcessPayload {
+  assertNoCredentialsInPayload(payload);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new InvalidJobPayloadError("Social webhook payload must be an object");
+  }
+  const item = payload as Record<string, unknown>;
+  if (item.version !== SOCIAL_WEBHOOK_PROCESS_PAYLOAD_VERSION) {
+    throw new InvalidJobPayloadError("Unsupported social webhook payload version");
+  }
+  if (typeof item.jobRequestId !== "string" || !UUID_RE.test(item.jobRequestId)) {
+    throw new InvalidJobPayloadError("Social webhook payload jobRequestId must be a UUID");
+  }
+  if (typeof item.receiptId !== "string" || !UUID_RE.test(item.receiptId)) {
+    throw new InvalidJobPayloadError("Social webhook payload receiptId must be a UUID");
+  }
+  return {
+    version: SOCIAL_WEBHOOK_PROCESS_PAYLOAD_VERSION,
+    jobRequestId: item.jobRequestId,
+    receiptId: item.receiptId,
+  };
+}
+
 export function socialSyncBullMqJobId(jobRequestId: string): string {
   return `${JOB_TYPES.socialConnectionSync.replaceAll(".", "-")}-${jobRequestId}`;
+}
+
+export function socialWebhookBullMqJobId(jobRequestId: string): string {
+  return `${JOB_TYPES.socialWebhookProcess.replaceAll(".", "-")}-${jobRequestId}`;
 }
 
 export function defaultSocialSyncJobOptions(): JobsOptions {

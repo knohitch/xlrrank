@@ -22,9 +22,12 @@ import {
   JOB_TYPES,
   QUEUE_NAMES,
   parseSocialConnectionSyncPayload,
+  parseSocialWebhookProcessPayload,
   socialSyncBullMqJobId,
+  socialWebhookBullMqJobId,
 } from "@xlrrank/queue";
 import { processSocialConnectionSync, socialSyncJobOptions } from "./social-sync-processor.js";
+import { processSocialWebhook } from "./social-webhook-processor.js";
 
 const logger = createChildLogger("worker.runtime");
 const metrics = getMetrics();
@@ -59,9 +62,15 @@ export async function dispatchOutboxOnce(dispatcherId: string): Promise<number> 
   let dispatched = 0;
   for (const entry of entries) {
     try {
-      const payload = parseSocialConnectionSyncPayload(entry.payload);
+      const payload =
+        entry.jobType === JOB_TYPES.socialWebhookProcess
+          ? parseSocialWebhookProcessPayload(entry.payload)
+          : parseSocialConnectionSyncPayload(entry.payload);
       const queue = getQueue(QUEUE_NAMES.ingestion);
-      const bullmqJobId = socialSyncBullMqJobId(entry.jobId);
+      const bullmqJobId =
+        entry.jobType === JOB_TYPES.socialWebhookProcess
+          ? socialWebhookBullMqJobId(entry.jobId)
+          : socialSyncBullMqJobId(entry.jobId);
       await queue.add(entry.jobType, payload, {
         ...socialSyncJobOptions(),
         jobId: bullmqJobId,
@@ -135,6 +144,9 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       async (job) => {
         if (job.name === JOB_TYPES.socialConnectionSync) {
           return processSocialConnectionSync(job);
+        }
+        if (job.name === JOB_TYPES.socialWebhookProcess) {
+          return processSocialWebhook(job);
         }
         logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented ingestion job");
         throw new UnimplementedJobProcessorError(QUEUE_NAMES.ingestion, job.name);

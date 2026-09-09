@@ -17,7 +17,7 @@ import {
 import type { Request, Response } from "express";
 import { SessionAuthGuard } from "../common/guards/session-auth.guard.js";
 import { CurrentUser } from "../common/decorators/current-user.decorator.js";
-import { Public } from "../common/decorators/roles.decorator.js";
+import { CsrfExempt, Public } from "../common/decorators/roles.decorator.js";
 import type { AuthContext } from "../common/types/auth-context.js";
 import { PlatformsService } from "./platforms.service.js";
 
@@ -99,6 +99,7 @@ export class PlatformsController {
   }
 
   @Public()
+  @CsrfExempt()
   @Post(":id/meta/webhook")
   @HttpCode(HttpStatus.OK)
   async receiveMetaWebhook(
@@ -108,6 +109,23 @@ export class PlatformsController {
     @Req() req: Request & { rawBody?: Buffer },
   ) {
     return this.platformsService.receiveMetaWebhook(id, signature, body ?? {}, req.rawBody);
+  }
+
+  @Get("authorizations/:authorizationId/assets")
+  async listAuthorizationAssets(
+    @Param("authorizationId") authorizationId: string,
+    @CurrentUser() auth: AuthContext,
+  ) {
+    return this.platformsService.listAuthorizationAssets(authorizationId, auth.userId);
+  }
+
+  @Post("authorizations/:authorizationId/assets/:assetId/connect")
+  async connectAuthorizationAsset(
+    @Param("authorizationId") authorizationId: string,
+    @Param("assetId") assetId: string,
+    @CurrentUser() auth: AuthContext,
+  ) {
+    return this.platformsService.connectAuthorizationAsset(authorizationId, assetId, auth.userId);
   }
 
   @Delete(":id/disconnect")

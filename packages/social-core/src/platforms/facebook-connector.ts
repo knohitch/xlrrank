@@ -40,13 +40,16 @@ const FACEBOOK_SCOPES = [
   "pages_read_engagement",
   "pages_read_user_content",
   "read_insights",
+  "instagram_basic",
+  "instagram_manage_insights",
+  "instagram_manage_comments",
 ];
 
 const FACEBOOK_CAPABILITY_MATRIX: Record<ConnectorCapability, { scopes: string[]; state: AvailabilityState }> = {
   profiles: { scopes: ["pages_show_list"], state: "CONFIGURATION_REQUIRED" },
   content: { scopes: ["pages_read_engagement"], state: "CONFIGURATION_REQUIRED" },
   comments: { scopes: ["pages_read_user_content"], state: "CONFIGURATION_REQUIRED" },
-  metrics: { scopes: ["read_insights"], state: "CONFIGURATION_REQUIRED" },
+  metrics: { scopes: ["pages_read_engagement"], state: "CONFIGURATION_REQUIRED" },
   search: { scopes: [], state: "UNAVAILABLE" },
   followers: { scopes: [], state: "UNAVAILABLE" },
   following: { scopes: [], state: "UNAVAILABLE" },
@@ -177,22 +180,13 @@ export class FacebookConnector extends BaseSocialConnector {
   }
 
   override async getComments(contentId: string, _options: ContentQuery = {}, context?: ConnectorOperationContext) {
-    this.assertAvailable("comments", context);
     if (!contentId) return [];
-    const response = await this.client.get<MetaEdge<FacebookComment>>(
-      `/${encodeURIComponent(contentId)}/comments`,
-      token(this.requireAuth(context)),
-      new URLSearchParams({ fields: "id,message,created_time,from", limit: "50" }),
-      this.requestOptions(context),
-    );
-    const items = (response.body.data ?? []).map((comment) => normalizeFacebookComment(contentId, comment, context));
-    for (const item of items) validateNormalizedInteraction(item);
-    return items;
+    return (await this.fetchCommentPage(contentId, _options, context)).items;
   }
 
   override async getInteractionsPage(options: ContentQuery, context?: ConnectorOperationContext): Promise<PageResult<NormalizedInteraction>> {
     if (!options.accountId) return { items: [], cursor: { value: null, hasMore: false } };
-    return { items: await this.getComments(options.accountId, options, context), cursor: { value: null, hasMore: false } };
+    return this.fetchCommentPage(options.accountId, options, context);
   }
 
   override async getMetrics(accountId: string, context?: ConnectorOperationContext): Promise<AccountMetrics> {
@@ -200,7 +194,7 @@ export class FacebookConnector extends BaseSocialConnector {
     return {
       followerCount: profile?.followerCount ?? 0,
       followingCount: 0,
-      contentCount: numberValue(profile?.metadata.fanCount) ?? 0,
+      contentCount: numberValue(profile?.metadata.contentCount) ?? 0,
       collectedAt: new Date().toISOString(),
     };
   }
@@ -212,16 +206,40 @@ export class FacebookConnector extends BaseSocialConnector {
       new URLSearchParams({ fields: "id,name,username,category,access_token,tasks,instagram_business_account{id,username,name}" }),
       this.requestOptions(context, credentials),
     );
-    return (response.body.data ?? []).map((page) => ({
-      platformId: "facebook",
-      assetType: "FACEBOOK_PAGE",
-      assetId: mustString(page.id, "page.id"),
-      name: stringValue(page.name) ?? mustString(page.id, "page.id"),
-      handle: stringValue(page.username),
-      tokenKind: "PAGE",
-      accessToken: stringValue(page.access_token),
-      metadata: { category: page.category, tasks: page.tasks, instagramBusinessAccount: page.instagram_business_account },
-    }));
+    return (response.body.data ?? []).flatMap((page) => {
+      const pageId = mustString(page.id, "page.id");
+      const accessToken = stringValue(page.access_token);
+      const assets: MetaAsset[] = [
+        {
+          platformId: "facebook",
+          assetType: "FACEBOOK_PAGE",
+          assetId: pageId,
+          name: stringValue(page.name) ?? pageId,
+          handle: stringValue(page.username),
+          tokenKind: "PAGE",
+          accessToken,
+          metadata: { category: page.category, tasks: page.tasks, instagramBusinessAccount: page.instagram_business_account },
+        },
+      ];
+      const instagram = page.instagram_business_account as
+        | { id?: unknown; username?: unknown; name?: unknown; account_type?: unknown }
+        | undefined;
+      const instagramId = stringValue(instagram?.id);
+      if (instagramId) {
+        assets.push({
+          platformId: "instagram",
+          assetType: "INSTAGRAM_PROFESSIONAL_ACCOUNT",
+          assetId: instagramId,
+          parentAssetId: pageId,
+          name: stringValue(instagram?.name) ?? stringValue(instagram?.username) ?? instagramId,
+          handle: stringValue(instagram?.username),
+          tokenKind: "PAGE",
+          accessToken,
+          metadata: { parentPageId: pageId, parentPageName: page.name, accountType: instagram?.account_type },
+        });
+      }
+      return assets;
+    });
   }
 
   private async getAuthenticatedProfileOrThrow(credentials: ConnectorCredentials, context?: ConnectorOperationContext): Promise<NormalizedProfile> {
@@ -280,6 +298,30 @@ export class FacebookConnector extends BaseSocialConnector {
 
   private requestOptions(context?: ConnectorOperationContext, credentials = context?.credentials) {
     return { appSecret: stringValue(credentials?.metadata?.appSecret), signal: context?.signal };
+  }
+
+  private async fetchCommentPage(
+    contentId: string,
+    options: ContentQuery,
+    context?: ConnectorOperationContext,
+  ): Promise<PageResult<NormalizedInteraction>> {
+    this.assertAvailable("comments", context);
+    const query = new URLSearchParams({
+      fields: "id,message,created_time,from",
+      limit: String(Math.min(Math.max(options.limit ?? 50, 1), 100)),
+    });
+    const cursor = decodeMetaCursor(options.cursor)?.after;
+    if (typeof cursor === "string") query.set("after", cursor);
+    const response = await this.client.get<MetaEdge<FacebookComment>>(
+      `/${encodeURIComponent(contentId)}/comments`,
+      token(this.requireAuth(context)),
+      query,
+      this.requestOptions(context),
+    );
+    const items = (response.body.data ?? []).map((comment) => normalizeFacebookComment(contentId, comment, context));
+    for (const item of items) validateNormalizedInteraction(item);
+    const after = stringValue(response.body.paging?.cursors?.after);
+    return { items, cursor: { value: after ? encodeMetaCursor({ after }) : null, hasMore: !!after }, rateLimit: response.rateLimit };
   }
 }
 

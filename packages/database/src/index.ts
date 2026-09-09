@@ -33,6 +33,7 @@ export {
   claimPendingOutboxEntries,
   createDeadLetter,
   createSocialConnectionSyncRequest,
+  createSocialWebhookProcessRequest,
   enableSocialSyncSchedule,
   EXECUTABLE_SOCIAL_CONNECTION_STATES,
   getAuthorizedSocialSyncJobStatus,

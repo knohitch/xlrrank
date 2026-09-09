@@ -11,6 +11,7 @@ import {
   authorizeConnection,
   authorizeScope,
   createSocialConnectionSyncRequest,
+  createSocialWebhookProcessRequest,
   ensureOrganizationScope,
   ensurePersonalScope,
   getAuthorizedSocialSyncJobStatus,
@@ -38,6 +39,8 @@ import { AuditService } from "../audit/audit.service.js";
 import {
   decryptSecret,
   encryptSecret,
+  providerAuthorizationAssetAssociatedData,
+  providerAuthorizationAssociatedData,
   providerAppSecretAssociatedData,
   socialCredentialAssociatedData,
 } from "../common/encryption.js";
@@ -298,6 +301,7 @@ export class PlatformsService {
     const requestedScopes = this.normalizeScopes(
       input.requestedScopes,
       connector.getManifest().oauth?.defaultScopes ?? [],
+      platform.slug,
     );
     const redirectTo = safeLocalRedirect(input.redirectTo ?? "/platforms");
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
@@ -397,6 +401,9 @@ export class PlatformsService {
     if (typeof providerConfig.metadata?.environment === "string") {
       credentials.metadata!.providerConfigEnvironment = providerConfig.metadata.environment;
     }
+    if (typeof providerConfig.metadata?.authMode === "string") {
+      credentials.metadata!.authMode = providerConfig.metadata.authMode;
+    }
     const profile = await connector.getOAuthAdapter().verifyIdentity(credentials, {
       scopeId: transaction.scopeId,
       connectionId: "oauth-verification",
@@ -411,6 +418,40 @@ export class PlatformsService {
     const access = objectFromMetadata(providerConfig.metadata, "access");
     if (access) capabilityInput.access = access;
     const capabilities = connector.evaluateCapabilities?.(capabilityInput) ?? {};
+    if (hasMetaAssetLister(connector)) {
+      const snapshot = await this.persistMetaAuthorizationSnapshot({
+        scopeId: transaction.scopeId,
+        platform,
+        actorUserId: userId,
+        providerUserId: profile.externalId,
+        credentials,
+        providerConfig,
+        assets: await connector.listAssets(credentials, {
+          scopeId: transaction.scopeId,
+          connectionId: "meta-asset-discovery",
+          credentials,
+        }),
+      });
+      await this.audit.record({
+        actorUserId: userId,
+        action: "social.oauth.asset_authorization_ready",
+        entityType: "provider_authorization",
+        entityId: snapshot.authorizationId,
+        metadata: {
+          platformId: platform.id,
+          platformSlug: platform.slug,
+          scopeId: transaction.scopeId,
+          assetCount: snapshot.assets.length,
+        },
+      });
+      return {
+        status: "ASSET_SELECTION_REQUIRED",
+        authorizationId: snapshot.authorizationId,
+        assets: snapshot.assets,
+        handle: profile.handle,
+        redirectTo: `${transaction.redirectTo}${transaction.redirectTo.includes("?") ? "&" : "?"}authorizationId=${snapshot.authorizationId}`,
+      };
+    }
     const persistResult = await this.persistConnectedConnection({
       scopeId: transaction.scopeId,
       platform,
@@ -424,22 +465,6 @@ export class PlatformsService {
         access: objectFromMetadata(providerConfig.metadata, "access") ?? {},
       },
     });
-    if (hasMetaAssetLister(connector)) {
-      await this.persistMetaAuthorizationSnapshot({
-        scopeId: transaction.scopeId,
-        platform,
-        actorUserId: userId,
-        connectionId: persistResult.connectionId,
-        providerUserId: profile.externalId,
-        credentials,
-        providerConfig,
-        assets: await connector.listAssets(credentials, {
-          scopeId: transaction.scopeId,
-          connectionId: persistResult.connectionId,
-          credentials,
-        }),
-      });
-    }
     const sync = await createSocialConnectionSyncRequest({
       connectionId: persistResult.connectionId,
       requestedByUserId: userId,
@@ -522,7 +547,168 @@ export class PlatformsService {
         JSON.stringify({ platformSlug: platform.slug, signatureHeader: "x-hub-signature-256" }),
       ],
     );
-    return { status: "received", receiptId: result.rows[0]?.id, duplicate: !result.rows[0]?.inserted };
+    const receiptId = result.rows[0]?.id;
+    const inserted = result.rows[0]?.inserted === true;
+    const job = receiptId && inserted ? await createSocialWebhookProcessRequest({ receiptId }) : null;
+    return { status: "received", receiptId, duplicate: !inserted, job };
+  }
+
+  async listAuthorizationAssets(authorizationId: string, userId: string) {
+    if (!isUuid(authorizationId)) throw new NotFoundException("Provider authorization not found.");
+    const auth = await this.loadAuthorizedProviderAuthorization(authorizationId, userId);
+    const result = await getPool().query<{
+      id: string;
+      platform_id: string;
+      platform_slug: string;
+      asset_type: string;
+      provider_asset_id: string;
+      parent_provider_asset_id: string | null;
+      name: string | null;
+      handle: string | null;
+      token_kind: string;
+      metadata: Record<string, unknown> | null;
+    }>(
+      `
+        SELECT paa.id, paa.platform_id, p.slug AS platform_slug, paa.asset_type,
+               paa.provider_asset_id, paa.parent_provider_asset_id, paa.name,
+               paa.handle, paa.token_kind, paa.metadata
+        FROM provider_authorization_assets paa
+        JOIN platforms p ON p.id = paa.platform_id
+        WHERE paa.provider_authorization_id = $1
+        ORDER BY p.slug, paa.name NULLS LAST, paa.provider_asset_id
+      `,
+      [auth.id],
+    );
+    return {
+      authorizationId: auth.id,
+      providerFamily: auth.provider_family,
+      scopeId: auth.scope_id,
+      assets: result.rows.map((row) => ({
+        id: row.id,
+        platformId: row.platform_id,
+        platformSlug: row.platform_slug,
+        assetType: row.asset_type,
+        providerAssetId: row.provider_asset_id,
+        parentProviderAssetId: row.parent_provider_asset_id,
+        name: row.name,
+        handle: row.handle,
+        tokenKind: row.token_kind,
+        metadata: row.metadata ?? {},
+      })),
+    };
+  }
+
+  async connectAuthorizationAsset(authorizationId: string, assetId: string, userId: string) {
+    if (!isUuid(authorizationId) || !isUuid(assetId)) {
+      throw new NotFoundException("Authorization asset not found.");
+    }
+    this.ensureConnectors();
+    const auth = await this.loadAuthorizedProviderAuthorization(authorizationId, userId);
+    const result = await getPool().query<{
+      id: string;
+      platform_id: string;
+      platform_slug: string;
+      asset_type: string;
+      provider_asset_id: string;
+      parent_provider_asset_id: string | null;
+      name: string | null;
+      handle: string | null;
+      token_kind: string;
+      credentials_encrypted: string | null;
+      metadata: Record<string, unknown> | null;
+    }>(
+      `
+        SELECT paa.id, paa.platform_id, p.slug AS platform_slug, paa.asset_type,
+               paa.provider_asset_id, paa.parent_provider_asset_id, paa.name,
+               paa.handle, paa.token_kind, paa.credentials_encrypted, paa.metadata
+        FROM provider_authorization_assets paa
+        JOIN platforms p ON p.id = paa.platform_id
+        WHERE paa.provider_authorization_id = $1 AND paa.id = $2
+        LIMIT 1
+      `,
+      [auth.id, assetId],
+    );
+    const asset = result.rows[0];
+    if (!asset) throw new NotFoundException("Authorization asset not found.");
+    const connector = connectorRegistry.create(asset.platform_slug);
+    if (!connector) throw new BadRequestException("No connector implementation is registered for this asset platform.");
+    if (!asset.credentials_encrypted) throw new BadRequestException("Authorization asset has no usable credential.");
+    const credentials = JSON.parse(
+      decryptSecret(
+        asset.credentials_encrypted,
+        undefined,
+        providerAuthorizationAssetAssociatedData({
+          authorizationAssetId: asset.id,
+          authorizationId: auth.id,
+          scopeId: auth.scope_id,
+          platformSlug: asset.platform_slug,
+          providerAssetId: asset.provider_asset_id,
+        }),
+      ),
+    ) as ConnectorCredentials;
+    credentials.metadata = {
+      ...(credentials.metadata ?? {}),
+      assetId: asset.provider_asset_id,
+      providerAuthorizationId: auth.id,
+      providerAuthorizationAssetId: asset.id,
+      tokenKind: asset.token_kind,
+    };
+    const platform = {
+      id: asset.platform_id,
+      slug: asset.platform_slug,
+      displayName: asset.platform_slug,
+      enabled: true,
+    };
+    const profile = await connector.getProfile(asset.provider_asset_id, {
+      scopeId: auth.scope_id,
+      connectionId: "authorization-asset-selection",
+      credentials,
+    });
+    if (!profile) throw new BadRequestException("Provider asset profile could not be verified.");
+    const capabilities = connector.evaluateCapabilities?.({
+      configured: true,
+      grantedScopes: credentials.scopes ?? [],
+    }) ?? {};
+    const persistResult = await this.persistConnectedConnection({
+      scopeId: auth.scope_id,
+      platform,
+      profile,
+      credentials,
+      providerMetadata: {
+        displayName: profile.displayName,
+        providerUserId: auth.provider_user_id,
+        providerAuthorizationId: auth.id,
+        providerAuthorizationAssetId: asset.id,
+        providerAssetId: asset.provider_asset_id,
+        parentProviderAssetId: asset.parent_provider_asset_id,
+        assetType: asset.asset_type,
+        grantedScopes: credentials.scopes ?? [],
+        grantedCapabilities: capabilities,
+      },
+    });
+    await this.audit.record({
+      actorUserId: userId,
+      action: persistResult.existing
+        ? "social.authorization_asset.connection_reused"
+        : "social.authorization_asset.connected",
+      entityType: "social_connection",
+      entityId: persistResult.connectionId,
+      metadata: {
+        providerAuthorizationId: auth.id,
+        providerAuthorizationAssetId: asset.id,
+        scopeId: auth.scope_id,
+        platformId: asset.platform_id,
+      },
+    });
+    return {
+      status: "CONNECTED",
+      duplicate: persistResult.existing,
+      connectionId: persistResult.connectionId,
+      platformId: asset.platform_id,
+      platformSlug: asset.platform_slug,
+      externalAccountId: profile.externalId,
+      handle: profile.handle,
+    };
   }
 
   async disconnectPlatform(platformId: string, userId: string) {
@@ -569,8 +755,8 @@ export class PlatformsService {
   }): Promise<{ connectionId: string; existing: boolean }> {
     const pool = getPool();
     const connectionResult = await pool.query<ConnectionRow>(
-      "SELECT * FROM social_connections WHERE scope_id = $1 AND platform_id = $2",
-      [input.scopeId, input.platform.id],
+      "SELECT * FROM social_connections WHERE scope_id = $1 AND platform_id = $2 AND verified_external_id = $3",
+      [input.scopeId, input.platform.id, input.profile.externalId],
     );
     const existing = connectionResult.rows[0];
     const connectionId = existing?.id ?? randomUUID();
@@ -643,7 +829,7 @@ export class PlatformsService {
             credentials_encrypted, verified_external_id, verified_handle, provider_metadata
           )
           VALUES ($1, $2, $3, $4, 'CONNECTED', $5, $6, $7, $8::jsonb)
-          ON CONFLICT (scope_id, platform_id) DO UPDATE SET
+          ON CONFLICT (scope_id, platform_id, verified_external_id) DO UPDATE SET
             external_account_id = EXCLUDED.external_account_id,
             status = 'CONNECTED',
             credentials_encrypted = EXCLUDED.credentials_encrypted,
@@ -680,21 +866,29 @@ export class PlatformsService {
     scopeId: string;
     platform: PlatformRow;
     actorUserId: string;
-    connectionId: string;
     providerUserId: string;
     credentials: ConnectorCredentials;
     providerConfig: ProviderApplicationConfig;
     assets: MetaAsset[];
-  }): Promise<void> {
+  }): Promise<{ authorizationId: string; assets: Array<Record<string, unknown>> }> {
     const pool = getPool();
-    const grantId = randomUUID();
+    const existingGrant = await pool.query<{ id: string }>(
+      `
+        SELECT id
+        FROM provider_authorizations
+        WHERE scope_id = $1 AND provider_family = 'meta' AND provider_user_id = $2
+        LIMIT 1
+      `,
+      [input.scopeId, input.providerUserId],
+    );
+    const grantId = existingGrant.rows[0]?.id ?? randomUUID();
     const encryptedGrant = encryptSecret(
       JSON.stringify(input.credentials),
       undefined,
-      socialCredentialAssociatedData({
-        connectionId: input.connectionId,
+      providerAuthorizationAssociatedData({
+        authorizationId: grantId,
         scopeId: input.scopeId,
-        platformSlug: input.platform.slug,
+        providerFamily: "meta",
       }),
     );
     const grant = await pool.query<{ id: string }>(
@@ -730,11 +924,22 @@ export class PlatformsService {
       ],
     );
     const providerAuthorizationId = grant.rows[0]?.id;
-    if (!providerAuthorizationId) return;
+    if (!providerAuthorizationId) throw new Error("Failed to persist Meta provider authorization");
     const platformIds = await this.platformIdsBySlug(["facebook", "instagram"]);
+    const persistedAssets: Array<Record<string, unknown>> = [];
     for (const asset of input.assets) {
       const assetPlatformId = platformIds.get(asset.platformId);
       if (!assetPlatformId) continue;
+      const existingAsset = await pool.query<{ id: string }>(
+        `
+          SELECT id
+          FROM provider_authorization_assets
+          WHERE provider_authorization_id = $1 AND platform_id = $2 AND provider_asset_id = $3
+          LIMIT 1
+        `,
+        [providerAuthorizationId, assetPlatformId, asset.assetId],
+      );
+      const assetRecordId = existingAsset.rows[0]?.id ?? randomUUID();
       const assetCredentialsEncrypted = asset.accessToken
         ? encryptSecret(
             JSON.stringify({
@@ -747,21 +952,23 @@ export class PlatformsService {
               },
             }),
             undefined,
-            socialCredentialAssociatedData({
-              connectionId: input.connectionId,
+            providerAuthorizationAssetAssociatedData({
+              authorizationAssetId: assetRecordId,
+              authorizationId: providerAuthorizationId,
               scopeId: input.scopeId,
               platformSlug: asset.platformId,
+              providerAssetId: asset.assetId,
             }),
           )
         : null;
-      await pool.query(
+      const assetResult = await pool.query<{ id: string }>(
         `
           INSERT INTO provider_authorization_assets (
-            provider_authorization_id, platform_id, asset_type, provider_asset_id,
+            id, provider_authorization_id, platform_id, asset_type, provider_asset_id,
             parent_provider_asset_id, name, handle, token_kind,
             credentials_encrypted, metadata
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
           ON CONFLICT (provider_authorization_id, platform_id, provider_asset_id) DO UPDATE SET
             name = EXCLUDED.name,
             handle = EXCLUDED.handle,
@@ -769,8 +976,10 @@ export class PlatformsService {
             credentials_encrypted = EXCLUDED.credentials_encrypted,
             metadata = EXCLUDED.metadata,
             updated_at = now()
+          RETURNING id
         `,
         [
+          assetRecordId,
           providerAuthorizationId,
           assetPlatformId,
           asset.assetType,
@@ -783,7 +992,19 @@ export class PlatformsService {
           JSON.stringify(asset.metadata ?? {}),
         ],
       );
+      const id = assetResult.rows[0]?.id ?? assetRecordId;
+      persistedAssets.push({
+        id,
+        platformId: assetPlatformId,
+        platformSlug: asset.platformId,
+        assetType: asset.assetType,
+        providerAssetId: asset.assetId,
+        parentProviderAssetId: asset.parentAssetId ?? null,
+        name: asset.name,
+        handle: asset.handle ?? null,
+      });
     }
+    return { authorizationId: providerAuthorizationId, assets: persistedAssets };
   }
 
   private async platformIdsBySlug(slugs: string[]): Promise<Map<string, string>> {
@@ -792,6 +1013,32 @@ export class PlatformsService {
       [slugs],
     );
     return new Map(result.rows.map((row) => [row.slug, row.id]));
+  }
+
+  private async loadAuthorizedProviderAuthorization(authorizationId: string, userId: string) {
+    if (!isUuid(authorizationId)) throw new NotFoundException("Provider authorization not found.");
+    const result = await getPool().query<{
+      id: string;
+      provider_family: string;
+      scope_id: string;
+      provider_user_id: string;
+      status: string;
+    }>(
+      `
+        SELECT id, provider_family, scope_id, provider_user_id, status
+        FROM provider_authorizations
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [authorizationId],
+    );
+    const auth = result.rows[0];
+    if (!auth || auth.status !== "ACTIVE") {
+      throw new NotFoundException("Provider authorization not found.");
+    }
+    const authorized = await authorizeScope(userId, auth.scope_id, "MANAGE_SOCIAL_CONNECTIONS");
+    if (!authorized) throw new ForbiddenException("Provider authorization scope denied.");
+    return auth;
   }
 
   private async resolveRequestedScope(
@@ -880,12 +1127,18 @@ export class PlatformsService {
     return config;
   }
 
-  private normalizeScopes(requested: string[] | undefined, defaults: string[]): string[] {
+  private normalizeScopes(
+    requested: string[] | undefined,
+    defaults: string[],
+    platformSlug: string,
+  ): string[] {
     const allowed = new Set(defaults);
     const source = requested && requested.length ? requested : defaults;
     const normalized = source.filter((scope) => allowed.has(scope));
-    if (!normalized.includes("tweet.read")) normalized.push("tweet.read");
-    if (!normalized.includes("users.read")) normalized.push("users.read");
+    if (platformSlug === "x") {
+      if (!normalized.includes("tweet.read")) normalized.push("tweet.read");
+      if (!normalized.includes("users.read")) normalized.push("users.read");
+    }
     return [...new Set(normalized)];
   }
 
@@ -1162,6 +1415,12 @@ function metaWebhookDedupeKey(
   });
   const material = parts.length ? parts.join("|") : canonicalPayload;
   return `${platformSlug}:${createHash("sha256").update(material, "utf8").digest("base64url")}`;
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    value,
+  );
 }
 
 function stringFromMetadata(

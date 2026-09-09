@@ -118,7 +118,11 @@ export const socialConnections = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex("social_connections_scope_platform_unique").on(t.scopeId, t.platformId),
+    uniqueIndex("social_connections_scope_platform_external_unique").on(
+      t.scopeId,
+      t.platformId,
+      t.verifiedExternalId,
+    ),
     index("social_connections_scope_idx").on(t.scopeId),
     index("social_connections_platform_idx").on(t.platformId),
     index("social_connections_external_account_idx").on(t.externalAccountId),

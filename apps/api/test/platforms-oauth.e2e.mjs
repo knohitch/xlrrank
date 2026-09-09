@@ -30,6 +30,7 @@ async function reset() {
   tokenCalls = 0;
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input));
+    if (url.hostname === "graph.facebook.com") return metaJson(url);
     if (url.hostname !== "api.x.com") throw new Error(`Unexpected outbound fetch: ${url}`);
     if (url.pathname === "/2/oauth2/token") {
       tokenCalls += 1;
@@ -60,6 +61,66 @@ async function reset() {
   await pool.query(
     "TRUNCATE webhook_receipts, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
   );
+}
+
+function metaJson(url) {
+  if (url.pathname === "/v26.0/oauth/access_token") {
+    return json({
+      token_type: "bearer",
+      access_token: "meta-user-token",
+      expires_in: 5184000,
+      scope:
+        "public_profile,pages_show_list,pages_read_engagement,pages_read_user_content,read_insights,instagram_basic,instagram_manage_insights,instagram_manage_comments",
+    });
+  }
+  if (url.searchParams.get("access_token") !== "meta-user-token" && !url.searchParams.get("access_token")?.startsWith("meta-page-token")) {
+    return json({ error: { type: "OAuthException", code: 190, message: "bad token" } }, 401);
+  }
+  if (url.pathname === "/v26.0/me") {
+    return json({ id: "meta-user-1", name: "Meta User" });
+  }
+  if (url.pathname === "/v26.0/me/accounts") {
+    return json({
+      data: [
+        {
+          id: "page-a",
+          name: "Page A",
+          username: "page_a",
+          access_token: "meta-page-token-a",
+          instagram_business_account: {
+            id: "ig-a",
+            username: "ig_a",
+            name: "Instagram A",
+            account_type: "BUSINESS",
+          },
+        },
+        {
+          id: "page-b",
+          name: "Page B",
+          username: "page_b",
+          access_token: "meta-page-token-b",
+        },
+      ],
+    });
+  }
+  if (url.pathname === "/v26.0/page-a") {
+    return json({ id: "page-a", name: "Page A", username: "page_a", followers_count: 10, fan_count: 9 });
+  }
+  if (url.pathname === "/v26.0/page-b") {
+    return json({ id: "page-b", name: "Page B", username: "page_b", followers_count: 20, fan_count: 19 });
+  }
+  if (url.pathname === "/v26.0/ig-a") {
+    return json({
+      id: "ig-a",
+      username: "ig_a",
+      name: "Instagram A",
+      followers_count: 30,
+      follows_count: 5,
+      media_count: 7,
+      account_type: "BUSINESS",
+    });
+  }
+  return json({ error: { message: `not found: ${url.pathname}` } }, 404);
 }
 
 function json(body, status = 200) {
@@ -140,6 +201,19 @@ async function metaProviderConfig(platformId, slug = "facebook") {
     `,
     [configId, platformId, encrypted],
   );
+}
+
+async function organizationWithManager(userId, name) {
+  const org = await pool.query("INSERT INTO organizations (name) VALUES ($1) RETURNING id", [name]);
+  const member = await pool.query(
+    "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'member') RETURNING id",
+    [org.rows[0].id, userId],
+  );
+  await pool.query(
+    "INSERT INTO organization_member_permissions (member_id, capability) VALUES ($1, 'MANAGE_SOCIAL_CONNECTIONS')",
+    [member.rows[0].id],
+  );
+  return org.rows[0].id;
 }
 
 function stateFrom(result) {
@@ -300,4 +374,162 @@ test("Meta webhook E2E: challenge, signature verification, and dedupe", { skip }
   assert.equal(second.duplicate, true);
   const count = await pool.query("SELECT count(*)::int AS count FROM webhook_receipts");
   assert.equal(count.rows[0].count, 1);
+});
+
+test("Meta OAuth E2E: shared grant, multi-asset selection, AAD, and IDOR", { skip }, async () => {
+  await reset();
+  const [userA, userB] = await Promise.all([user("meta-a@example.test"), user("meta-b@example.test")]);
+  const facebookPlatformId = await metaPlatform("facebook");
+  const instagramPlatformId = await metaPlatform("instagram");
+  await metaProviderConfig(facebookPlatformId, "facebook");
+
+  const start = await service.startOAuth("facebook", userA, { redirectTo: "/platforms/meta" });
+  const callback = await service.handleOAuthCallback("facebook", userA, {
+    state: stateFrom(start),
+    code: "meta-ok",
+  });
+  assert.equal(callback.status, "ASSET_SELECTION_REQUIRED");
+  assert.equal(callback.assets.length, 3);
+  assert.equal(
+    Number((await pool.query("SELECT count(*) FROM provider_authorizations")).rows[0].count),
+    1,
+  );
+  assert.equal(
+    Number((await pool.query("SELECT count(*) FROM provider_authorization_assets")).rows[0].count),
+    3,
+  );
+  assert.equal(
+    Number((await pool.query("SELECT count(*) FROM social_connections")).rows[0].count),
+    0,
+  );
+
+  const listed = await service.listAuthorizationAssets(callback.authorizationId, userA);
+  assert.equal(JSON.stringify(listed).includes("meta-page-token"), false);
+  const pageA = listed.assets.find((asset) => asset.providerAssetId === "page-a");
+  const pageB = listed.assets.find((asset) => asset.providerAssetId === "page-b");
+  const igA = listed.assets.find((asset) => asset.providerAssetId === "ig-a");
+  assert.ok(pageA);
+  assert.ok(pageB);
+  assert.ok(igA);
+
+  await assert.rejects(
+    () => service.listAuthorizationAssets(callback.authorizationId, userB),
+    /denied/,
+  );
+  await assert.rejects(
+    () => service.connectAuthorizationAsset(callback.authorizationId, pageA.id, userB),
+    /denied/,
+  );
+  await assert.rejects(
+    () => service.connectAuthorizationAsset(callback.authorizationId, "page-a", userA),
+    /not found/i,
+  );
+
+  const connectedA = await service.connectAuthorizationAsset(callback.authorizationId, pageA.id, userA);
+  const duplicateA = await service.connectAuthorizationAsset(callback.authorizationId, pageA.id, userA);
+  const connectedB = await service.connectAuthorizationAsset(callback.authorizationId, pageB.id, userA);
+  const connectedIg = await service.connectAuthorizationAsset(callback.authorizationId, igA.id, userA);
+  assert.equal(connectedA.duplicate, false);
+  assert.equal(duplicateA.duplicate, true);
+  assert.equal(connectedB.platformId, facebookPlatformId);
+  assert.equal(connectedIg.platformId, instagramPlatformId);
+
+  const connections = await pool.query(
+    "SELECT platform_id, verified_external_id, credentials_encrypted FROM social_connections ORDER BY verified_external_id",
+  );
+  assert.deepEqual(
+    connections.rows.map((row) => row.verified_external_id),
+    ["ig-a", "page-a", "page-b"],
+  );
+  assert.equal(JSON.stringify(connections.rows).includes("meta-page-token"), false);
+
+  const grant = (
+    await pool.query(
+      "SELECT id, scope_id, credentials_encrypted FROM provider_authorizations WHERE id = $1",
+      [callback.authorizationId],
+    )
+  ).rows[0];
+  const grantPlain = shared.decryptSecret(
+    grant.credentials_encrypted,
+    undefined,
+    shared.providerAuthorizationAssociatedData({
+      authorizationId: grant.id,
+      scopeId: grant.scope_id,
+      providerFamily: "meta",
+    }),
+  );
+  assert.equal(JSON.parse(grantPlain).accessToken, "meta-user-token");
+  assert.throws(() =>
+    shared.decryptSecret(
+      grant.credentials_encrypted,
+      undefined,
+      shared.providerAuthorizationAssociatedData({
+        authorizationId: randomUUID(),
+        scopeId: grant.scope_id,
+        providerFamily: "meta",
+      }),
+    ),
+  );
+
+  const assetRow = (
+    await pool.query(
+      `
+        SELECT paa.id, paa.provider_authorization_id, pa.scope_id, p.slug,
+               paa.provider_asset_id, paa.credentials_encrypted
+        FROM provider_authorization_assets paa
+        JOIN provider_authorizations pa ON pa.id = paa.provider_authorization_id
+        JOIN platforms p ON p.id = paa.platform_id
+        WHERE paa.id = $1
+      `,
+      [pageA.id],
+    )
+  ).rows[0];
+  const assetPlain = shared.decryptSecret(
+    assetRow.credentials_encrypted,
+    undefined,
+    shared.providerAuthorizationAssetAssociatedData({
+      authorizationAssetId: assetRow.id,
+      authorizationId: assetRow.provider_authorization_id,
+      scopeId: assetRow.scope_id,
+      platformSlug: assetRow.slug,
+      providerAssetId: assetRow.provider_asset_id,
+    }),
+  );
+  assert.equal(JSON.parse(assetPlain).accessToken, "meta-page-token-a");
+  assert.throws(() =>
+    shared.decryptSecret(
+      assetRow.credentials_encrypted,
+      undefined,
+      shared.providerAuthorizationAssetAssociatedData({
+        authorizationAssetId: assetRow.id,
+        authorizationId: assetRow.provider_authorization_id,
+        scopeId: assetRow.scope_id,
+        platformSlug: assetRow.slug,
+        providerAssetId: "page-b",
+      }),
+    ),
+  );
+
+  const orgA = await organizationWithManager(userA, "Meta Org A");
+  const orgB = await organizationWithManager(userB, "Meta Org B");
+  const orgStart = await service.startOAuth("facebook", userA, {
+    scopeType: "ORGANIZATION",
+    organizationId: orgA,
+  });
+  const orgCallback = await service.handleOAuthCallback("facebook", userA, {
+    state: stateFrom(orgStart),
+    code: "org-meta-ok",
+  });
+  await assert.rejects(
+    () =>
+      service.startOAuth("facebook", userA, {
+        scopeType: "ORGANIZATION",
+        organizationId: orgB,
+      }),
+    /denied/,
+  );
+  await assert.rejects(
+    () => service.listAuthorizationAssets(orgCallback.authorizationId, userB),
+    /denied/,
+  );
 });

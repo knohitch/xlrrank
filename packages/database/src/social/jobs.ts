@@ -6,9 +6,11 @@ import {
   JOB_STATUSES,
   JOB_TYPES,
   QUEUE_NAMES,
+  SOCIAL_WEBHOOK_PROCESS_PAYLOAD_VERSION,
   SOCIAL_SYNC_PAYLOAD_VERSION,
   type JobStatus,
   type SocialConnectionSyncPayload,
+  type SocialWebhookProcessPayload,
   type SocialSyncReason,
 } from "@xlrrank/queue";
 import { redactSensitive } from "@xlrrank/shared";
@@ -40,7 +42,7 @@ export interface ClaimedOutboxEntry {
   jobId: string;
   queueName: string;
   jobType: string;
-  payload: SocialConnectionSyncPayload;
+  payload: unknown;
 }
 
 export interface SocialConnectionForSync {
@@ -255,6 +257,89 @@ export async function createSocialConnectionSyncRequest(input: {
         };
       }
     }
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function createSocialWebhookProcessRequest(input: {
+  receiptId: string;
+}): Promise<{ jobId: string; status: JobStatus; receiptId: string; accepted: boolean; duplicate: boolean }> {
+  const env = getEnv();
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const receipt = await client.query<{ id: string; status: string }>(
+      "SELECT id, status FROM webhook_receipts WHERE id = $1 FOR UPDATE",
+      [input.receiptId],
+    );
+    if (!receipt.rows[0]) throw new Error("Webhook receipt not found");
+    const active = await client.query<{ id: string; status: JobStatus }>(
+      `
+        SELECT id, status
+        FROM jobs
+        WHERE type = $1
+          AND idempotency_key = $2
+          AND status IN (${activeStatusList()})
+        ORDER BY created_at ASC
+        LIMIT 1
+      `,
+      [JOB_TYPES.socialWebhookProcess, `webhook:${input.receiptId}`],
+    );
+    if (active.rows[0]) {
+      await client.query("COMMIT");
+      return {
+        jobId: active.rows[0].id,
+        status: active.rows[0].status,
+        receiptId: input.receiptId,
+        accepted: false,
+        duplicate: true,
+      };
+    }
+    const jobId = randomUUID();
+    const payload: SocialWebhookProcessPayload = {
+      version: SOCIAL_WEBHOOK_PROCESS_PAYLOAD_VERSION,
+      jobRequestId: jobId,
+      receiptId: input.receiptId,
+    };
+    await client.query(
+      `
+        INSERT INTO jobs (
+          id, type, queue_name, status, payload, payload_version,
+          idempotency_key, max_attempts
+        )
+        VALUES ($1, $2, $3, 'PENDING_DISPATCH', $4::jsonb, $5, $6, $7)
+      `,
+      [
+        jobId,
+        JOB_TYPES.socialWebhookProcess,
+        QUEUE_NAMES.ingestion,
+        JSON.stringify(payload),
+        SOCIAL_WEBHOOK_PROCESS_PAYLOAD_VERSION,
+        `webhook:${input.receiptId}`,
+        env.SOCIAL_SYNC_MAX_ATTEMPTS,
+      ],
+    );
+    await client.query(
+      "INSERT INTO job_outbox (job_id, queue_name, job_type, payload) VALUES ($1, $2, $3, $4::jsonb)",
+      [jobId, QUEUE_NAMES.ingestion, JOB_TYPES.socialWebhookProcess, JSON.stringify(payload)],
+    );
+    await client.query(
+      "UPDATE webhook_receipts SET status = 'PENDING_DISPATCH' WHERE id = $1",
+      [input.receiptId],
+    );
+    await client.query("COMMIT");
+    return {
+      jobId,
+      status: "PENDING_DISPATCH",
+      receiptId: input.receiptId,
+      accepted: true,
+      duplicate: false,
+    };
+  } catch (err) {
+    await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();

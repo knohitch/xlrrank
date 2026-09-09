@@ -129,3 +129,21 @@ export function providerAppSecretAssociatedData(input: {
 }): string {
   return `provider-app:${input.providerConfigId}:${input.platformSlug}:${input.secretName}:v1`;
 }
+
+export function providerAuthorizationAssociatedData(input: {
+  authorizationId: string;
+  scopeId: string;
+  providerFamily: string;
+}): string {
+  return `provider-authorization:${input.authorizationId}:${input.scopeId}:${input.providerFamily}:credentials:v1`;
+}
+
+export function providerAuthorizationAssetAssociatedData(input: {
+  authorizationAssetId: string;
+  authorizationId: string;
+  scopeId: string;
+  platformSlug: string;
+  providerAssetId: string;
+}): string {
+  return `provider-authorization-asset:${input.authorizationAssetId}:${input.authorizationId}:${input.scopeId}:${input.platformSlug}:${input.providerAssetId}:credentials:v1`;
+}
