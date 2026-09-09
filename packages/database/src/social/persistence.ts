@@ -249,6 +249,7 @@ async function upsertExternalAccount(
     | "followerCount"
     | "followingCount"
     | "visibility"
+    | "providerDataCategory"
     | "metadata"
   >,
 ): Promise<string> {
@@ -256,9 +257,9 @@ async function upsertExternalAccount(
     `
       INSERT INTO social_external_accounts (
         platform_id, external_id, current_handle, display_name, profile_image_url,
-        bio, location, website, follower_count, following_count, visibility, metadata
+        bio, location, website, follower_count, following_count, visibility, provider_data_category, metadata
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (platform_id, external_id) DO UPDATE SET
         current_handle = EXCLUDED.current_handle,
         display_name = COALESCE(EXCLUDED.display_name, social_external_accounts.display_name),
@@ -269,6 +270,7 @@ async function upsertExternalAccount(
         follower_count = COALESCE(EXCLUDED.follower_count, social_external_accounts.follower_count),
         following_count = COALESCE(EXCLUDED.following_count, social_external_accounts.following_count),
         visibility = EXCLUDED.visibility,
+        provider_data_category = COALESCE(EXCLUDED.provider_data_category, social_external_accounts.provider_data_category),
         metadata = EXCLUDED.metadata,
         last_observed_at = now(),
         updated_at = now()
@@ -286,6 +288,7 @@ async function upsertExternalAccount(
       profile.followerCount ?? null,
       profile.followingCount ?? null,
       profile.visibility,
+      classifyProfileProviderDataCategory(profile),
       JSON.stringify(profile.metadata ?? {}),
     ],
   );
@@ -313,13 +316,14 @@ async function upsertAccountObservation(
     `
       INSERT INTO social_account_observations (
         scope_id, connection_id, external_account_id, visibility, observed_at,
-        provider_created_at, normalization_version, adapter_version, ingestion_run_id, metadata
+        provider_created_at, provider_data_category, normalization_version, adapter_version, ingestion_run_id, metadata
       )
-      VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9)
+      VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9, $10)
       ON CONFLICT (scope_id, external_account_id) DO UPDATE SET
         connection_id = EXCLUDED.connection_id,
         visibility = EXCLUDED.visibility,
         observed_at = now(),
+        provider_data_category = EXCLUDED.provider_data_category,
         normalization_version = EXCLUDED.normalization_version,
         adapter_version = EXCLUDED.adapter_version,
         ingestion_run_id = EXCLUDED.ingestion_run_id,
@@ -331,6 +335,7 @@ async function upsertAccountObservation(
       accountId,
       profile.visibility,
       profile.providerCreatedAt ?? null,
+      classifyProfileProviderDataCategory(profile),
       input.normalizationVersion,
       input.adapterVersion,
       input.ingestionRunId,
@@ -355,15 +360,16 @@ async function upsertContentItem(
       `
         INSERT INTO social_content_items (
           scope_id, platform_id, author_external_account_id, external_id, body,
-          content_type, language, visibility, provider_created_at, metadata
+          content_type, language, visibility, provider_created_at, provider_data_category, metadata
         )
-        VALUES (NULL, $1, $2, $3, $4, $5, $6, 'PUBLIC', $7, $8)
+        VALUES (NULL, $1, $2, $3, $4, $5, $6, 'PUBLIC', $7, $8, $9)
         ON CONFLICT (platform_id, external_id) WHERE scope_id IS NULL AND visibility = 'PUBLIC'
         DO UPDATE SET
           body = EXCLUDED.body,
           content_type = EXCLUDED.content_type,
           language = EXCLUDED.language,
           provider_created_at = EXCLUDED.provider_created_at,
+          provider_data_category = EXCLUDED.provider_data_category,
           metadata = EXCLUDED.metadata,
           updated_at = now()
         RETURNING id
@@ -376,6 +382,7 @@ async function upsertContentItem(
         item.contentType ?? null,
         item.language ?? null,
         item.externalCreatedAt ?? null,
+        classifyContentProviderDataCategory(item),
         JSON.stringify(item.metadata ?? {}),
       ],
     );
@@ -387,15 +394,16 @@ async function upsertContentItem(
     `
       INSERT INTO social_content_items (
         scope_id, platform_id, author_external_account_id, external_id, body,
-        content_type, language, visibility, provider_created_at, metadata
+        content_type, language, visibility, provider_created_at, provider_data_category, metadata
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       ON CONFLICT (scope_id, platform_id, external_id) WHERE scope_id IS NOT NULL
       DO UPDATE SET
         body = EXCLUDED.body,
         content_type = EXCLUDED.content_type,
         language = EXCLUDED.language,
         provider_created_at = EXCLUDED.provider_created_at,
+        provider_data_category = EXCLUDED.provider_data_category,
         metadata = EXCLUDED.metadata,
         updated_at = now()
       RETURNING id
@@ -410,6 +418,7 @@ async function upsertContentItem(
       item.language ?? null,
       item.visibility,
       item.externalCreatedAt ?? null,
+      classifyContentProviderDataCategory(item),
       JSON.stringify(item.metadata ?? {}),
     ],
   );
@@ -428,13 +437,14 @@ async function upsertContentObservation(
     `
       INSERT INTO social_content_observations (
         scope_id, connection_id, content_item_id, visibility, observed_at,
-        provider_created_at, normalization_version, adapter_version, ingestion_run_id, metadata
+        provider_created_at, provider_data_category, normalization_version, adapter_version, ingestion_run_id, metadata
       )
-      VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9)
+      VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9, $10)
       ON CONFLICT (scope_id, content_item_id) DO UPDATE SET
         connection_id = EXCLUDED.connection_id,
         visibility = EXCLUDED.visibility,
         observed_at = now(),
+        provider_data_category = EXCLUDED.provider_data_category,
         normalization_version = EXCLUDED.normalization_version,
         adapter_version = EXCLUDED.adapter_version,
         ingestion_run_id = EXCLUDED.ingestion_run_id,
@@ -446,6 +456,7 @@ async function upsertContentObservation(
       contentId,
       item.visibility,
       item.externalCreatedAt ?? null,
+      classifyContentProviderDataCategory(item),
       input.normalizationVersion,
       input.adapterVersion,
       input.ingestionRunId,
@@ -466,9 +477,9 @@ async function upsertContentMetrics(
     `
       INSERT INTO social_content_metrics (
         scope_id, connection_id, content_item_id, ingestion_run_id, snapshot_key,
-        likes, comments, shares, impressions, engagement_rate, provider_metadata
+        likes, comments, shares, impressions, engagement_rate, provider_data_category, provider_metadata
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       ON CONFLICT (scope_id, content_item_id, snapshot_key) DO NOTHING
     `,
     [
@@ -482,6 +493,7 @@ async function upsertContentMetrics(
       metrics.shares ?? 0,
       metrics.impressions ?? 0,
       metrics.engagementRate ?? null,
+      "organization_admin_reporting",
       JSON.stringify(item.metadata ?? {}),
     ],
   );
@@ -502,9 +514,9 @@ async function upsertInteraction(
         INSERT INTO social_interactions (
           scope_id, platform_id, external_id, from_external_account_id,
           to_content_item_id, to_external_account_id, type, body, visibility,
-          occurred_at, metadata
+          occurred_at, provider_data_category, metadata
         )
-        VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, 'PUBLIC', $8, $9)
+        VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, 'PUBLIC', $8, $9, $10)
         ON CONFLICT (platform_id, external_id) WHERE scope_id IS NULL AND visibility = 'PUBLIC'
         DO UPDATE SET
           to_content_item_id = EXCLUDED.to_content_item_id,
@@ -512,6 +524,7 @@ async function upsertInteraction(
           type = EXCLUDED.type,
           body = EXCLUDED.body,
           occurred_at = EXCLUDED.occurred_at,
+          provider_data_category = EXCLUDED.provider_data_category,
           metadata = EXCLUDED.metadata,
           updated_at = now()
         RETURNING id
@@ -525,6 +538,7 @@ async function upsertInteraction(
         interaction.type,
         interaction.body ?? null,
         interaction.occurredAt,
+        classifyInteractionProviderDataCategory(interaction),
         JSON.stringify(interaction.metadata ?? {}),
       ],
     );
@@ -537,9 +551,9 @@ async function upsertInteraction(
       INSERT INTO social_interactions (
         scope_id, platform_id, external_id, from_external_account_id,
         to_content_item_id, to_external_account_id, type, body, visibility,
-        occurred_at, metadata
+        occurred_at, provider_data_category, metadata
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       ON CONFLICT (scope_id, platform_id, external_id) WHERE scope_id IS NOT NULL
       DO UPDATE SET
         to_content_item_id = EXCLUDED.to_content_item_id,
@@ -547,6 +561,7 @@ async function upsertInteraction(
         type = EXCLUDED.type,
         body = EXCLUDED.body,
         occurred_at = EXCLUDED.occurred_at,
+        provider_data_category = EXCLUDED.provider_data_category,
         metadata = EXCLUDED.metadata,
         updated_at = now()
       RETURNING id
@@ -562,6 +577,7 @@ async function upsertInteraction(
       interaction.body ?? null,
       interaction.visibility,
       interaction.occurredAt,
+      classifyInteractionProviderDataCategory(interaction),
       JSON.stringify(interaction.metadata ?? {}),
     ],
   );
@@ -580,13 +596,14 @@ async function upsertInteractionObservation(
     `
       INSERT INTO social_interaction_observations (
         scope_id, connection_id, interaction_id, visibility, observed_at,
-        normalization_version, adapter_version, ingestion_run_id, metadata
+        provider_data_category, normalization_version, adapter_version, ingestion_run_id, metadata
       )
-      VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8)
+      VALUES ($1, $2, $3, $4, now(), $5, $6, $7, $8, $9)
       ON CONFLICT (scope_id, interaction_id) DO UPDATE SET
         connection_id = EXCLUDED.connection_id,
         visibility = EXCLUDED.visibility,
         observed_at = now(),
+        provider_data_category = EXCLUDED.provider_data_category,
         normalization_version = EXCLUDED.normalization_version,
         adapter_version = EXCLUDED.adapter_version,
         ingestion_run_id = EXCLUDED.ingestion_run_id,
@@ -597,10 +614,34 @@ async function upsertInteractionObservation(
       input.connectionId,
       interactionId,
       interaction.visibility,
+      classifyInteractionProviderDataCategory(interaction),
       input.normalizationVersion,
       input.adapterVersion,
       input.ingestionRunId,
       JSON.stringify(interaction.metadata ?? {}),
     ],
   );
+}
+
+function providerCategoryFromMetadata(metadata: Record<string, unknown> | undefined): string | null {
+  const category = metadata?.providerDataCategory;
+  return typeof category === "string" && category.length > 0 ? category : null;
+}
+
+function classifyProfileProviderDataCategory(
+  profile: Pick<NormalizedProfile, "providerDataCategory" | "metadata">,
+): string | null {
+  return profile.providerDataCategory ?? providerCategoryFromMetadata(profile.metadata);
+}
+
+function classifyContentProviderDataCategory(
+  content: Pick<NormalizedContent, "providerDataCategory" | "metadata">,
+): string | null {
+  return content.providerDataCategory ?? providerCategoryFromMetadata(content.metadata);
+}
+
+function classifyInteractionProviderDataCategory(
+  interaction: Pick<NormalizedInteraction, "providerDataCategory" | "metadata">,
+): string | null {
+  return interaction.providerDataCategory ?? providerCategoryFromMetadata(interaction.metadata);
 }

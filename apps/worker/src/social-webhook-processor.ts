@@ -95,17 +95,28 @@ function providerAssetIdsFromMetaPayload(payload: Record<string, unknown>): stri
 
 function providerAssetIdsFromLinkedInPayload(payload: Record<string, unknown>): string[] {
   const ids = new Set<string>();
+  const addUrn = (value: unknown) => {
+    if (typeof value !== "string" || value.length === 0) return;
+    ids.add(value);
+    ids.add(value.replace(/^urn:li:organization:/, ""));
+  };
+  const notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
+  for (const notification of notifications) {
+    if (!notification || typeof notification !== "object") continue;
+    const record = notification as Record<string, unknown>;
+    addUrn(record.organizationalEntity);
+    addUrn(record.organization);
+    addUrn(record.entityUrn);
+    addUrn(record.assetId);
+  }
   if (typeof payload.organization === "string") {
-    ids.add(payload.organization);
-    ids.add(payload.organization.replace(/^urn:li:organization:/, ""));
+    addUrn(payload.organization);
   }
   if (typeof payload.entityUrn === "string") {
-    ids.add(payload.entityUrn);
-    ids.add(payload.entityUrn.replace(/^urn:li:organization:/, ""));
+    addUrn(payload.entityUrn);
   }
   if (typeof payload.organizationalEntity === "string") {
-    ids.add(payload.organizationalEntity);
-    ids.add(payload.organizationalEntity.replace(/^urn:li:organization:/, ""));
+    addUrn(payload.organizationalEntity);
   }
   if (typeof payload.assetId === "string") {
     ids.add(payload.assetId);

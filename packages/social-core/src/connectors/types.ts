@@ -120,10 +120,11 @@ export interface ContentQuery {
 }
 
 export interface AccountMetrics {
-  followerCount: number;
-  followingCount: number;
-  contentCount: number;
+  followerCount?: number | undefined;
+  followingCount?: number | undefined;
+  contentCount?: number | undefined;
   engagementRate?: number;
+  providerMetrics?: Record<string, unknown> | undefined;
   collectedAt: string;
 }
 

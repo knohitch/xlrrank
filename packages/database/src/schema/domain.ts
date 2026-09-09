@@ -51,6 +51,7 @@ export const socialExternalAccounts = pgTable(
     followerCount: integer("follower_count"),
     followingCount: integer("following_count"),
     visibility: text("visibility").notNull().default("UNKNOWN"),
+    providerDataCategory: text("provider_data_category"),
     metadata: jsonb("metadata"),
     firstObservedAt: timestamp("first_observed_at", { withTimezone: true }).notNull().defaultNow(),
     lastObservedAt: timestamp("last_observed_at", { withTimezone: true }).notNull().defaultNow(),
@@ -147,6 +148,7 @@ export const socialAccountObservations = pgTable(
     visibility: text("visibility").notNull().default("UNKNOWN"),
     observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
     providerCreatedAt: timestamp("provider_created_at", { withTimezone: true }),
+    providerDataCategory: text("provider_data_category"),
     normalizationVersion: text("normalization_version").notNull(),
     adapterVersion: text("adapter_version").notNull(),
     ingestionRunId: uuid("ingestion_run_id"),
@@ -179,6 +181,7 @@ export const socialContentItems = pgTable(
     language: text("language"),
     visibility: text("visibility").notNull().default("UNKNOWN"),
     providerCreatedAt: timestamp("provider_created_at", { withTimezone: true }),
+    providerDataCategory: text("provider_data_category"),
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -207,6 +210,7 @@ export const socialContentObservations = pgTable(
     visibility: text("visibility").notNull().default("UNKNOWN"),
     observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
     providerCreatedAt: timestamp("provider_created_at", { withTimezone: true }),
+    providerDataCategory: text("provider_data_category"),
     normalizationVersion: text("normalization_version").notNull(),
     adapterVersion: text("adapter_version").notNull(),
     ingestionRunId: uuid("ingestion_run_id"),
@@ -242,6 +246,7 @@ export const socialInteractions = pgTable(
     body: text("body"),
     visibility: text("visibility").notNull().default("UNKNOWN"),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    providerDataCategory: text("provider_data_category"),
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -269,6 +274,7 @@ export const socialInteractionObservations = pgTable(
       .references(() => socialInteractions.id, { onDelete: "cascade" }),
     visibility: text("visibility").notNull().default("UNKNOWN"),
     observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+    providerDataCategory: text("provider_data_category"),
     normalizationVersion: text("normalization_version").notNull(),
     adapterVersion: text("adapter_version").notNull(),
     ingestionRunId: uuid("ingestion_run_id"),
@@ -305,6 +311,7 @@ export const socialContentMetrics = pgTable(
     impressions: integer("impressions").notNull().default(0),
     engagementRate: doublePrecision("engagement_rate"),
     collectedAt: timestamp("collected_at", { withTimezone: true }).notNull().defaultNow(),
+    providerDataCategory: text("provider_data_category"),
     providerMetadata: jsonb("provider_metadata"),
   },
   (t) => [
@@ -916,6 +923,55 @@ export const providerAuthorizationAssets = pgTable(
   ],
 );
 
+export const providerEventSubscriptions = pgTable(
+  "provider_event_subscriptions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerFamily: text("provider_family").notNull(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    platformId: uuid("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "restrict" }),
+    providerAuthorizationId: uuid("provider_authorization_id")
+      .notNull()
+      .references(() => providerAuthorizations.id, { onDelete: "cascade" }),
+    providerAuthorizationAssetId: uuid("provider_authorization_asset_id")
+      .notNull()
+      .references(() => providerAuthorizationAssets.id, { onDelete: "cascade" }),
+    socialConnectionId: uuid("social_connection_id")
+      .notNull()
+      .references(() => socialConnections.id, { onDelete: "cascade" }),
+    providerUserId: text("provider_user_id").notNull(),
+    providerAssetId: text("provider_asset_id").notNull(),
+    developerApplicationUrn: text("developer_application_urn").notNull(),
+    memberUrn: text("member_urn").notNull(),
+    entityUrn: text("entity_urn").notNull(),
+    eventType: text("event_type").notNull(),
+    webhookUrl: text("webhook_url").notNull(),
+    providerStatus: text("provider_status").notNull(),
+    lastProviderSyncAt: timestamp("last_provider_sync_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    deactivatedAt: timestamp("deactivated_at", { withTimezone: true }),
+    lastError: jsonb("last_error"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("provider_event_subscription_unique").on(
+      t.providerFamily,
+      t.providerAuthorizationId,
+      t.providerAuthorizationAssetId,
+      t.eventType,
+    ),
+    index("provider_event_subscription_connection_idx").on(t.socialConnectionId),
+    index("provider_event_subscription_asset_idx").on(t.providerAuthorizationAssetId),
+    index("provider_event_subscription_status_idx").on(t.providerStatus),
+  ],
+);
+
 export const webhookReceipts = pgTable(
   "webhook_receipts",
   {
@@ -927,6 +983,7 @@ export const webhookReceipts = pgTable(
     signatureValid: boolean("signature_valid").notNull().default(false),
     status: text("status").notNull().default("RECEIVED"),
     payload: jsonb("payload").notNull(),
+    providerDataCategory: text("provider_data_category"),
     metadata: jsonb("metadata"),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
     processedAt: timestamp("processed_at", { withTimezone: true }),
@@ -1208,7 +1265,8 @@ export const providerDataRetentionPolicies = pgTable(
     providerFamily: text("provider_family").notNull(),
     dataCategory: text("data_category").notNull(),
     retentionClass: text("retention_class").notNull(),
-    maxRetentionSeconds: integer("max_retention_seconds").notNull(),
+    retentionMode: text("retention_mode").notNull().default("FIXED_MAX_AGE"),
+    maxRetentionSeconds: integer("max_retention_seconds"),
     description: text("description"),
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

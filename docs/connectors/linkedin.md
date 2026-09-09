@@ -18,7 +18,9 @@ Sprint 08 establishes the official, production-grade LinkedIn integration in XLR
   - Posts API: `https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api`
   - Social Actions API: `https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/social-actions-api`
   - Network Sizes & Follower Stats: `https://learn.microsoft.com/en-us/linkedin/marketing/community-management/organizations/follower-statistics`
-  - Webhooks & Notifications: `https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/organization-social-action-notifications`
+  - Organization Social Action Notifications: `https://learn.microsoft.com/en-us/linkedin/marketing/community-management/organizations/organization-social-action-notifications`
+  - Webhook Validation: `https://learn.microsoft.com/linkedin/shared/api-guide/webhook-validation`
+  - Data Storage Requirements: `https://learn.microsoft.com/linkedin/marketing/data-storage-requirements`
 
 ---
 
@@ -51,17 +53,15 @@ In compliance with Architectural Laws #6 and #7, the connector strictly distingu
 | **Organization Profile** | `GET /rest/organizations/{id}` | Member role (`ADMINISTRATOR`, `ANALYST`, etc.) | Standard Rest.li limits | **LOCAL VERIFIED** |
 | **Organization Posts** | `GET /rest/posts?author=urn:li:organization:{id}&q=author` | `r_organization_social` or `r_organization_admin` | Opaque cursor (`start`, `count`) | **LOCAL VERIFIED** |
 | **Comments & Interactions** | `GET /rest/socialActions/{activityUrn}/comments` | `r_organization_social` | Opaque cursor (`start`, `count`) | **LOCAL VERIFIED** |
-| **Organization Network Size** | `GET /rest/networkSizes/urn:li:organization:{id}` | Organization administrator or analyst role | Direct endpoint | **LOCAL VERIFIED** |
-| **Follower Statistics** | `GET /rest/organizationalEntityFollowerStatistics` | Organization role | Rest.li URN query | **LOCAL VERIFIED** |
-| **Share Statistics** | `GET /rest/organizationalEntityShareStatistics` | Organization role | Rest.li URN query | **LOCAL VERIFIED** |
+| **Organization Network Size** | `GET /rest/networkSizes/urn:li:organization:{id}` | Product access + organization role | Direct endpoint | **LOCAL VERIFIED** |
+| **Follower Statistics** | `GET /rest/organizationalEntityFollowerStatistics` | Product access + administrator role | Rest.li URN query | **ACCESS_REQUIRED unless enabled** |
+| **Share Statistics** | `GET /rest/organizationalEntityShareStatistics` | Product access + administrator role | Rest.li URN query | **LOCAL VERIFIED when enabled** |
 | **Member Social Feed** | `GET /rest/memberShares` | `r_member_social_feed` (Partner Approval Required) | Opaque cursor | **APP_REVIEW_REQUIRED** |
 | **Follower Identity Lists** | *None* | LinkedIn does not expose open follower lists | Not available in API | **UNAVAILABLE** |
 | **Following Identity Lists** | *None* | Organizations cannot follow other members | Not available in API | **UNAVAILABLE** |
 | **General Social Search** | *None* | No unrestricted public search API | Not available in API | **UNAVAILABLE** |
 
-Dynamic capability evaluation (`evaluateLinkedInCapabilities`) checks both the granted scopes and the user's assigned organization roles:
-- An `ANALYST` role receives metrics capabilities but is denied content publishing.
-- An `ADMINISTRATOR` or `CONTENT_ADMINISTRATOR` receives both content and metric observation rights.
+Dynamic capability evaluation (`evaluateLinkedInCapabilities`) checks implementation support, trusted operator/provider app access state, granted scopes, and the user's organization role. Product access flags are deployment metadata and are not end-user toggles. Follower identity lists are always `UNAVAILABLE`; total follower count is an aggregate metric from `networkSizes`, and demographic audience insights are only available when follower-statistics access is actually implemented and approved.
 
 ---
 
@@ -72,26 +72,51 @@ Dynamic capability evaluation (`evaluateLinkedInCapabilities`) checks both the g
    - Computes `HMAC-SHA256(challengeCode, clientSecret)` and returns `{ challengeCode, challengeResponse }`.
 2. **Notification Delivery & Verification**:
    - `POST /platforms/:id/linkedin/webhook` (marked `@Public()` and `@CsrfExempt()`).
-   - Validates `X-LI-Signature` header (supporting raw hex, `sha256=`, and `hmacsha256=` prefixes) using timing-safe comparison.
+   - Requires the exact raw request body bytes. Missing raw body fails closed before any receipt, outbox, or business write.
+   - Validates `X-LI-Signature` using the official string-to-sign: UTF-8 `hmacsha256=` prefix prepended to the exact raw JSON body, then HMAC-SHA256 with the LinkedIn app client secret.
+   - The header value must be the lowercase hex digest only. `sha256=<digest>` and `hmacsha256=<digest>` header formats are rejected.
 3. **Durable Receipt & Outbox Pipeline**:
-   - Persists receipt in `webhook_receipts` with `provider_family = 'linkedin'` and deduplication key.
+   - Persists a minimized receipt in `webhook_receipts` with `provider_family = 'linkedin'`, `provider_data_category = 'webhook_operational_receipt'`, and a deduplication key.
    - Enqueues `social.webhook.process` job into outbox and BullMQ.
    - Worker extracts organization URN from notification payload, matches active social connections by `providerAssetId`, enqueues sync requests, and marks receipt `PROCESSED`.
+
+4. **Organization Social Action Event Subscriptions**:
+   - Local support uses the LinkedIn Event Subscription API:
+     `PUT /rest/eventSubscriptions/(developerApplication:{developerApplicationUrn},user:{memberUrn},entity:{organizationUrn},eventType:ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS)`.
+   - Creation requires `rw_organization_admin`, authenticated member identity, `ADMINISTRATOR` organization access, trusted notification product/access metadata, developer application URN, organization URN, event type, and webhook URL.
+   - Subscriptions are stored in `provider_event_subscriptions` and linked to the provider authorization, authorization asset, social connection, scope, member, organization, developer application, event type, and provider status.
+   - Disconnect deactivates only the relevant local subscription. Loss of grant, role, or product access marks the subscription and connection degraded/inactive without revoking independent LinkedIn grants or retrying in a hot loop.
+   - Live webhook registration and notification product access remain external LinkedIn developer-portal operations:
+     `LINKEDIN WEBHOOK REGISTRATION: BLOCKED_EXTERNAL`,
+     `LINKEDIN NOTIFICATION LIVE ACCESS: BLOCKED_EXTERNAL`.
 
 ---
 
 ## Data Storage and Retention Policies
 
-LinkedIn Marketing API terms mandate strict data retention limits:
-- **Member Data**: Maximum 24 hours (`TRANSIENT_24H`).
-- **Organization Profile & Content**: Maximum 56 days (8 weeks, `ORGANIZATION_CONTENT_56D`).
-- **Analytics & Statistics**: Maximum 30 days (`ANALYTICS_30D`).
-- **Webhook Receipts**: Maximum 7 days (`WEBHOOK_RECEIPT_7D`).
+LinkedIn Marketing API terms require retention by precise data category. The shortest applicable LinkedIn category wins when records overlap:
+
+| Data Category | Local Category | Duration Source |
+|---|---|---|
+| Authenticated member Person ID / URN | `authenticated_member_id` | No provider duration restriction |
+| Authenticated member profile | `authenticated_member_profile` | No provider duration restriction; consent, deletion, and revocation obligations still apply |
+| Other member Person ID / URN | `other_member_id` | No provider duration restriction |
+| Other member profile | `other_member_profile` | 24-hour cache only |
+| Member social activity | `member_social_activity` | 48 hours |
+| Organization social activity | `organization_social_activity` | Six weeks |
+| Organization social activity for an authenticated organization asset | `organization_social_activity_authenticated_org` | Six months |
+| Organization profile for an authenticated organization asset | `organization_profile` | Eight weeks |
+| Limited non-authenticated organization profile fields | `organization_profile_limited` | 30 days |
+| Organization Pages admin/reporting data | `organization_admin_reporting` | One year |
+| Minimal webhook receipt metadata | `webhook_operational_receipt` | `XLRRANK_OPERATIONAL_RETENTION`, not LinkedIn-mandated retention |
 
 ### Implementation:
-- Forward migration `0007_linkedin_retention_policies.sql` created table `provider_data_retention_policies` seeded with LinkedIn rules.
+- Forward migration `0008_linkedin_retention_subscriptions_truthfulness.sql` corrects the Sprint 08 retention model without editing historical migration `0007`.
+- `retention_mode` and nullable `max_retention_seconds` represent categories with no provider duration restriction without arbitrary large numbers.
 - Helper `purgeExpiredProviderData` enforces retention cutoffs safely:
-  - Distinguishes organization content from member content via `provider_metadata->>'assetType'`.
+  - Classifies profiles, content, interactions, metrics, and webhook receipts per provider datum using generic `provider_data_category` fields.
+  - Treats member comments on organization posts as member social activity, not organization content.
+  - Purges comments/replies/reactions via interaction observations and deletes orphaned canonical interaction records only when no lawful observation remains.
   - Cleans expired observations per scope.
   - Deletes orphaned canonical content items **only if** no other lawful scope retains an observation.
 

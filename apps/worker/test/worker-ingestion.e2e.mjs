@@ -34,7 +34,7 @@ async function reset() {
   await setup();
   process.env.QUEUE_PREFIX = `xlrrank-worker-e2e-${process.pid}-${Date.now()}-${Math.random()}`;
   await pool.query(
-    "TRUNCATE webhook_receipts, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
+    "TRUNCATE webhook_receipts, provider_event_subscriptions, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
   );
 }
 
@@ -502,7 +502,7 @@ function createLinkedInWorkerFixtureServer() {
     if (url.pathname === "/rest/organizationalEntityFollowerStatistics") {
       res.end(
         JSON.stringify({
-          elements: [{ totalFollowerCounts: 450 }],
+          elements: [{ followerCountsByIndustry: [] }],
         }),
       );
       return;
@@ -1842,7 +1842,7 @@ test(
       };
       const rawBody = JSON.stringify(payload);
       const signature = createHmac("sha256", "synthetic-linkedin-client-secret")
-        .update(rawBody, "utf8")
+        .update(`hmacsha256=${rawBody}`, "utf8")
         .digest("hex");
 
       const received = await service.receiveLinkedInWebhook(
@@ -1891,103 +1891,147 @@ test(
 );
 
 test(
-  "Data retention: purgeExpiredProviderData purges aged LinkedIn data without affecting other scopes",
+  "Data retention: record-level LinkedIn categories purge member comments and preserve lawful org content",
   { skip },
   async () => {
     await reset();
     const policies = await database.loadProviderRetentionPolicies("linkedin");
-    assert.ok(policies.length >= 4, "Expected at least 4 default LinkedIn retention policies");
-    const orgContentPolicy = policies.find((p) => p.dataCategory === "organization_content");
-    assert.ok(orgContentPolicy);
-    assert.equal(orgContentPolicy.maxRetentionSeconds, 4838400); // 56 days
+    assert.ok(policies.length >= 10, "Expected corrected LinkedIn retention policy categories");
+    assert.equal(policies.find((p) => p.dataCategory === "authenticated_member_profile").maxRetentionSeconds, null);
+    assert.equal(policies.find((p) => p.dataCategory === "other_member_profile").maxRetentionSeconds, 86400);
+    assert.equal(policies.find((p) => p.dataCategory === "member_social_activity").maxRetentionSeconds, 172800);
+    assert.equal(
+      policies.find((p) => p.dataCategory === "organization_social_activity_authenticated_org").maxRetentionSeconds,
+      15552000,
+    );
+    assert.equal(policies.find((p) => p.dataCategory === "organization_admin_reporting").maxRetentionSeconds, 31536000);
 
-    // Create two connections in different scopes
     const connA = await createLinkedInConnection("12345");
     const connB = await createLinkedInConnection("12345");
 
-    // Insert author in social_external_accounts
     const extAccountId = randomUUID();
     await pool.query(
       `
-        INSERT INTO social_external_accounts (id, platform_id, external_id, current_handle, display_name)
-        VALUES ($1, $2, '12345', 'acme-corp', 'Acme Corp')
+        INSERT INTO social_external_accounts (
+          id, platform_id, external_id, current_handle, display_name, provider_data_category
+        )
+        VALUES ($1, $2, '12345', 'acme-corp', 'Acme Corp', 'organization_profile')
       `,
       [extAccountId, connA.platformId],
     );
+    const memberAccountId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_external_accounts (
+          id, platform_id, external_id, current_handle, display_name, provider_data_category
+        )
+        VALUES ($1, $2, 'person-x', 'person-x', NULL, 'other_member_id')
+      `,
+      [memberAccountId, connA.platformId],
+    );
 
-    // Insert a shared item in social_content_items
     const contentItemId = randomUUID();
     await pool.query(
       `
         INSERT INTO social_content_items (
           id, scope_id, platform_id, author_external_account_id, external_id, body,
-          visibility, provider_created_at
+          visibility, provider_created_at, provider_data_category
         )
         VALUES ($1, NULL, $2, $3, 'li-retained-item-1', 'Retained post body',
-          'PUBLIC', now() - interval '60 days')
+          'PUBLIC', now() - interval '3 days', 'organization_social_activity_authenticated_org')
       `,
       [contentItemId, connA.platformId, extAccountId],
     );
 
-    // In Scope A: Observation is 60 days old (expired beyond 56-day policy)
     const obsAId = randomUUID();
     await pool.query(
       `
         INSERT INTO social_content_observations (
           id, scope_id, connection_id, content_item_id, visibility, observed_at,
-          normalization_version, adapter_version
+          provider_created_at, provider_data_category, normalization_version, adapter_version
         )
-        VALUES ($1, $2, $3, $4, 'PUBLIC', now() - interval '60 days', '1', '1')
+        VALUES ($1, $2, $3, $4, 'PUBLIC', now() - interval '7 months',
+          now() - interval '7 months', 'organization_social_activity_authenticated_org', '1', '1')
       `,
       [obsAId, connA.scope.scopeId, connA.connectionId, contentItemId],
     );
 
-    // In Scope B: Observation is 5 days old (active, within 56-day policy)
     const obsBId = randomUUID();
     await pool.query(
       `
         INSERT INTO social_content_observations (
           id, scope_id, connection_id, content_item_id, visibility, observed_at,
-          normalization_version, adapter_version
+          provider_created_at, provider_data_category, normalization_version, adapter_version
         )
-        VALUES ($1, $2, $3, $4, 'PUBLIC', now() - interval '5 days', '1', '1')
+        VALUES ($1, $2, $3, $4, 'PUBLIC', now() - interval '1 day',
+          now() - interval '1 day', 'organization_social_activity_authenticated_org', '1', '1')
       `,
       [obsBId, connB.scope.scopeId, connB.connectionId, contentItemId],
     );
 
-    // Insert an expired webhook receipt (10 days old, exceeds 7 days policy)
+    const interactionId = randomUUID();
+    const interactionObsId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_interactions (
+          id, scope_id, platform_id, external_id, from_external_account_id,
+          to_content_item_id, type, body, visibility, occurred_at, provider_data_category
+        )
+        VALUES ($1, NULL, $2, 'urn:li:comment:(activity:org-a,person-x-comment)',
+          $3, $4, 'COMMENT', 'Member Person X comment', 'PUBLIC',
+          now() - interval '3 days', 'member_social_activity')
+      `,
+      [interactionId, connA.platformId, memberAccountId, contentItemId],
+    );
+    await pool.query(
+      `
+        INSERT INTO social_interaction_observations (
+          id, scope_id, connection_id, interaction_id, visibility, observed_at,
+          provider_data_category, normalization_version, adapter_version
+        )
+        VALUES ($1, $2, $3, $4, 'PUBLIC', now() - interval '3 days',
+          'member_social_activity', '1', '1')
+      `,
+      [interactionObsId, connA.scope.scopeId, connA.connectionId, interactionId],
+    );
+
     const receiptId = randomUUID();
     await pool.query(
       `
         INSERT INTO webhook_receipts (
           id, provider_family, platform_id, dedupe_key, signature_valid,
-          status, payload, metadata, received_at
+          status, payload, provider_data_category, metadata, received_at
         )
         VALUES ($1, 'linkedin', $2, 'old-hook-dedupe', true,
-          'PROCESSED', '{}'::jsonb, '{}'::jsonb, now() - interval '10 days')
+          'PROCESSED', '{}'::jsonb, 'webhook_operational_receipt', '{}'::jsonb, now() - interval '10 days')
       `,
       [receiptId, connA.platformId],
     );
 
-    // Execute purge
+    const dryRun = await database.purgeExpiredProviderData({ providerFamily: "linkedin", dryRun: true });
+    assert.equal(dryRun.dryRun, true);
+    assert.ok(dryRun.interactionsPurged >= 1);
+
     const purgeResult = await database.purgeExpiredProviderData({ providerFamily: "linkedin" });
     assert.equal(purgeResult.providerFamily, "linkedin");
     assert.ok(purgeResult.contentObservationsPurged >= 1);
+    assert.ok(purgeResult.interactionsPurged >= 1);
     assert.ok(purgeResult.receiptsPurged >= 1);
 
-    // Scope A's observation is purged
     const checkObsA = await pool.query("SELECT * FROM social_content_observations WHERE id = $1", [obsAId]);
     assert.equal(checkObsA.rows.length, 0);
 
-    // Scope B's observation is preserved
     const checkObsB = await pool.query("SELECT * FROM social_content_observations WHERE id = $1", [obsBId]);
     assert.equal(checkObsB.rows.length, 1);
 
-    // Canonical content item is PRESERVED because Scope B still has active observation
     const checkItem = await pool.query("SELECT * FROM social_content_items WHERE id = $1", [contentItemId]);
     assert.equal(checkItem.rows.length, 1);
 
-    // Expired webhook receipt is purged
+    const checkInteractionObs = await pool.query("SELECT * FROM social_interaction_observations WHERE id = $1", [interactionObsId]);
+    assert.equal(checkInteractionObs.rows.length, 0);
+    const checkInteraction = await pool.query("SELECT * FROM social_interactions WHERE id = $1", [interactionId]);
+    assert.equal(checkInteraction.rows.length, 0);
+
     const checkReceipt = await pool.query("SELECT * FROM webhook_receipts WHERE id = $1", [receiptId]);
     assert.equal(checkReceipt.rows.length, 0);
   },

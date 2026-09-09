@@ -29,6 +29,7 @@ export interface NormalizedProfile {
   followingCount?: number | undefined;
   visibility: SocialVisibility;
   providerCreatedAt?: string | undefined;
+  providerDataCategory?: string | undefined;
   provenance: NormalizationProvenance;
   metadata: Record<string, unknown>;
 }
@@ -52,6 +53,7 @@ export interface NormalizedContent {
         snapshotKey?: string | undefined;
       }
     | undefined;
+  providerDataCategory?: string | undefined;
   provenance: NormalizationProvenance;
   metadata: Record<string, unknown>;
 }
@@ -66,6 +68,7 @@ export interface NormalizedInteraction {
   body?: string | undefined;
   occurredAt: string;
   visibility: SocialVisibility;
+  providerDataCategory?: string | undefined;
   provenance: NormalizationProvenance;
   metadata: Record<string, unknown>;
 }

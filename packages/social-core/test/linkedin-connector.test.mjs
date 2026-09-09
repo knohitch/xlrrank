@@ -146,6 +146,22 @@ async function startLinkedInFixture() {
       return;
     }
 
+    if (url.pathname.startsWith("/eventSubscriptions/") && req.method === "PUT") {
+      assert.ok(decodeURIComponent(url.pathname).includes("developerApplication:urn:li:developerApplication:999"));
+      assert.ok(decodeURIComponent(url.pathname).includes("user:urn:li:person:member-12345"));
+      assert.ok(decodeURIComponent(url.pathname).includes("entity:urn:li:organization:1001"));
+      res.end(
+        JSON.stringify({
+          entity: "urn:li:organization:1001",
+          eventType: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
+          user: "urn:li:person:member-12345",
+          expiresAt: "1790000000000",
+          webhook: "https://app.example.test/platforms/linkedin/webhook",
+        }),
+      );
+      return;
+    }
+
     // 4. Organization lookup
     if (url.pathname.startsWith("/organizations/")) {
       const orgId = url.pathname.replace("/organizations/", "");
@@ -317,6 +333,7 @@ test("LinkedIn Connector Contract: manifest, version, headers, and truthful capa
   assert.equal(manifest.capabilities.search, "UNAVAILABLE");
   assert.equal(manifest.capabilities.messages, "UNAVAILABLE");
   assert.equal(manifest.capabilities.publishing, "UNAVAILABLE");
+  assert.equal(manifest.capabilities.followers, "UNAVAILABLE");
   assert.equal(manifest.capabilities.profiles, "CONFIGURATION_REQUIRED");
   assert.equal(manifest.capabilities.content, "CONFIGURATION_REQUIRED");
   assert.equal(manifest.capabilities.metrics, "CONFIGURATION_REQUIRED");
@@ -336,13 +353,14 @@ test("LinkedIn Capabilities: dynamic evaluation based on scopes and organization
       "r_organization_admin",
       "r_organization_social_feed",
     ],
-    access: { organizationRole: "ADMINISTRATOR" },
+    access: { organizationRole: "ADMINISTRATOR", communityManagement: true, followerStatistics: true },
   });
   assert.equal(adminEval.profiles, "AVAILABLE");
   assert.equal(adminEval.content, "AVAILABLE");
   assert.equal(adminEval.comments, "AVAILABLE");
   assert.equal(adminEval.metrics, "AVAILABLE");
-  assert.equal(adminEval.followers, "AVAILABLE");
+  assert.equal(adminEval.followers, "UNAVAILABLE");
+  assert.equal(adminEval.audience_insights, "AVAILABLE");
   assert.equal(adminEval.following, "UNAVAILABLE");
   assert.equal(adminEval.search, "UNAVAILABLE");
 
@@ -353,11 +371,19 @@ test("LinkedIn Capabilities: dynamic evaluation based on scopes and organization
       "r_organization_social",
       "r_organization_admin",
     ],
-    access: { organizationRole: "ANALYST" },
+    access: { organizationRole: "ANALYST", communityManagement: true, followerStatistics: true },
   });
-  assert.equal(analystEval.metrics, "AVAILABLE");
+  assert.equal(analystEval.metrics, "PERMISSION_REQUIRED");
   assert.equal(analystEval.content, "PERMISSION_REQUIRED");
   assert.equal(analystEval.comments, "PERMISSION_REQUIRED");
+
+  const missingProductEval = evaluateLinkedInCapabilities({
+    configured: true,
+    grantedScopes: ["r_organization_social", "r_organization_admin"],
+    access: { organizationRole: "ADMINISTRATOR" },
+  });
+  assert.equal(missingProductEval.content, "APP_REVIEW_REQUIRED");
+  assert.equal(missingProductEval.metrics, "APP_REVIEW_REQUIRED");
 });
 
 test("LinkedIn OAuth & Member OIDC Identity", async () => {
@@ -439,6 +465,9 @@ test("LinkedIn OAuth & Member OIDC Identity", async () => {
     assert.equal(profile.externalId, "member-12345");
     assert.equal(profile.metadata?.providerIdentityType, "LINKEDIN_MEMBER_OIDC");
     assert.equal(profile.metadata?.emailVerified, true);
+    assert.equal(profile.followerCount, undefined);
+    assert.equal(profile.followingCount, undefined);
+    assert.equal(profile.providerDataCategory, "authenticated_member_profile");
   } finally {
     await fixture.close();
   }
@@ -454,6 +483,7 @@ test("LinkedIn Asset Discovery: discovers administered organizations and Page ro
     assert.equal(assets[0].assetId, "1001");
     assert.equal(assets[0].name, "Acme Corp 1001");
     assert.equal(assets[0].metadata.primaryRole, "ADMINISTRATOR");
+    assert.equal(assets[0].metadata.memberUrn, "urn:li:person:member-12345");
 
     assert.equal(assets[1].assetId, "1002");
     assert.equal(assets[1].metadata.primaryRole, "CONTENT_ADMINISTRATOR");
@@ -486,11 +516,14 @@ test("LinkedIn Ingestion: organization profile, posts pagination, comments pagin
     assert.equal(profile?.displayName, "Acme Corp 1001");
     assert.equal(profile?.handle, "acme-1001");
     assert.equal(profile?.website, "https://acme-1001.com");
+    assert.equal(profile?.followerCount, undefined);
+    assert.equal(profile?.providerDataCategory, "organization_profile");
 
     // 2. Posts Page 1
     const page1 = await connector.getContentPage({ accountId: "1001", limit: 2 }, context);
     assert.equal(page1.items.length, 2);
     assert.equal(page1.items[0].body, "First post on page 1");
+    assert.equal(page1.items[0].providerDataCategory, "organization_social_activity_authenticated_org");
     assert.equal(page1.cursor.hasMore, true);
     assert.ok(page1.cursor.value);
 
@@ -510,6 +543,7 @@ test("LinkedIn Ingestion: organization profile, posts pagination, comments pagin
     );
     assert.equal(commentPage1.items.length, 1);
     assert.equal(commentPage1.items[0].body, "Insightful post!");
+    assert.equal(commentPage1.items[0].providerDataCategory, "member_social_activity");
     assert.equal(commentPage1.cursor.hasMore, true);
 
     const commentPage2 = await connector.getInteractionsPage(
@@ -523,8 +557,9 @@ test("LinkedIn Ingestion: organization profile, posts pagination, comments pagin
     // 4. Metrics
     const metrics = await connector.getMetrics("1001", context);
     assert.equal(metrics.followerCount, 1250);
-    assert.equal(metrics.followingCount, 0); // Law: following is 0 / not exposed
-    assert.equal(metrics.contentCount, 42);
+    assert.equal(metrics.followingCount, undefined);
+    assert.equal(metrics.contentCount, undefined);
+    assert.equal(metrics.providerMetrics.linkedInShareStatistics.shareCount, 42);
   } finally {
     await fixture.close();
   }
@@ -600,7 +635,7 @@ test("LinkedIn Error Classifications: 401, 403 role loss, 403 product review, 42
   }
 });
 
-test("LinkedIn Webhook security: challenge-response, signature verification, and deduplication", () => {
+test("LinkedIn Webhook security: official signature vector, mutations, and deduplication", () => {
   const secret = "test-linkedin-secret";
 
   // 1. Challenge-response verification
@@ -616,14 +651,96 @@ test("LinkedIn Webhook security: challenge-response, signature verification, and
     entityUrn: "urn:li:organization:1001",
     action: "ORGANIZATION_SOCIAL_ACTION",
   });
-  const validSignature = createHmac("sha256", secret).update(payload, "utf8").digest("hex");
+  const validSignature = createHmac("sha256", secret).update(`hmacsha256=${payload}`, "utf8").digest("hex");
+  const wrongRawHmac = createHmac("sha256", secret).update(payload, "utf8").digest("hex");
 
   assert.equal(verifyLinkedInWebhookSignature(payload, validSignature, secret), true);
-  assert.equal(verifyLinkedInWebhookSignature(payload, `hmacsha256=${validSignature}`, secret), true);
+  assert.equal(verifyLinkedInWebhookSignature(payload, wrongRawHmac, secret), false);
+  assert.equal(verifyLinkedInWebhookSignature(payload, `hmacsha256=${validSignature}`, secret), false);
+  assert.equal(verifyLinkedInWebhookSignature(payload, `sha256=${validSignature}`, secret), false);
+  assert.equal(
+    verifyLinkedInWebhookSignature(
+      JSON.stringify({ notificationId: "notif-12345", entityUrn: "urn:li:organization:1001", action: "ORGANIZATION_SOCIAL_ACTION" }, null, 2),
+      validSignature,
+      secret,
+    ),
+    false,
+  );
+  assert.equal(
+    verifyLinkedInWebhookSignature(
+      JSON.stringify({ action: "ORGANIZATION_SOCIAL_ACTION", entityUrn: "urn:li:organization:1001", notificationId: "notif-12345" }),
+      validSignature,
+      secret,
+    ),
+    false,
+  );
   assert.equal(verifyLinkedInWebhookSignature(payload, "bad-signature", secret), false);
   assert.equal(verifyLinkedInWebhookSignature(payload, undefined, secret), false);
 
   // 3. Deduplication key
   const dedupeKey = linkedInWebhookDedupeKey({ notificationId: "notif-12345" });
   assert.equal(dedupeKey, "linkedin:notif-12345");
+});
+
+test("LinkedIn Event Subscription API: creates Rest.li compound-key subscription and enforces role/scope", async () => {
+  const fixture = await startLinkedInFixture();
+  try {
+    const connector = new LinkedInConnector({ baseUrl: fixture.baseUrl });
+    const context = {
+      scopeId: "scope-1",
+      connectionId: "conn-1",
+      credentials: {
+        accessToken: "fixture-token-valid",
+        scopes: ["rw_organization_admin"],
+      },
+    };
+
+    const result = await connector.upsertOrganizationSocialActionSubscription(
+      {
+        developerApplicationUrn: "urn:li:developerApplication:999",
+        memberUrn: "urn:li:person:member-12345",
+        organizationUrn: "urn:li:organization:1001",
+        roles: ["ADMINISTRATOR"],
+        webhookUrl: "https://app.example.test/platforms/linkedin/webhook",
+      },
+      context,
+    );
+    assert.equal(result.providerStatus, "ACTIVE");
+    assert.equal(result.eventType, "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS");
+    assert.equal(
+      fixture.requests.some((request) => request.method === "PUT" && request.path.startsWith("/eventSubscriptions/")),
+      true,
+    );
+
+    await assert.rejects(
+      () =>
+        connector.upsertOrganizationSocialActionSubscription(
+          {
+            developerApplicationUrn: "urn:li:developerApplication:999",
+            memberUrn: "urn:li:person:member-12345",
+            organizationUrn: "urn:li:organization:1001",
+            roles: ["ANALYST"],
+            webhookUrl: "https://app.example.test/platforms/linkedin/webhook",
+          },
+          context,
+        ),
+      /ADMINISTRATOR/,
+    );
+    await assert.rejects(
+      () =>
+        connector.upsertOrganizationSocialActionSubscription(
+          {
+            developerApplicationUrn: "urn:li:developerApplication:999",
+            memberUrn: "urn:li:person:member-12345",
+            organizationUrn: "urn:li:organization:1001",
+            roles: ["ADMINISTRATOR"],
+            webhookUrl: "https://app.example.test/platforms/linkedin/webhook",
+          },
+          { ...context, credentials: { accessToken: "fixture-token-valid", scopes: [] } },
+        ),
+      /rw_organization_admin/,
+    );
+  } finally {
+    await fixture.close();
+  }
 });

@@ -309,7 +309,7 @@ export class PlatformsService {
     const codeChallenge = base64UrlSha256(pkceVerifier);
     const requestedScopes = this.normalizeScopes(
       input.requestedScopes,
-      oauthContract.defaultScopes,
+      providerDefaultScopesForConfig(platform.slug, oauthContract.defaultScopes, providerConfig.metadata),
       platform.slug,
     );
     const redirectTo = safeLocalRedirect(input.redirectTo ?? "/platforms");
@@ -606,29 +606,38 @@ export class PlatformsService {
     if (!secret) {
       throw new BadRequestException("LinkedIn clientSecret is not configured.");
     }
-    const canonical = rawBody ?? JSON.stringify(payload);
-    if (!verifyLinkedInWebhookSignature(canonical, signature, secret)) {
+    if (rawBody === undefined || rawBody === null) {
+      throw new BadRequestException("LinkedIn webhook raw body is required for signature verification.");
+    }
+    if (!verifyLinkedInWebhookSignature(rawBody, signature, secret)) {
       throw new ForbiddenException("LinkedIn webhook signature verification failed.");
     }
-    const payloadJson = JSON.stringify(payload);
-    const dedupeKey = linkedInWebhookDedupeKey(payload, payloadJson);
+    const minimalPayload = minimalLinkedInWebhookPayload(payload);
+    const payloadJson = JSON.stringify(minimalPayload);
+    const rawJson = typeof rawBody === "string" ? rawBody : rawBody.toString("utf8");
+    const dedupeKey = linkedInWebhookDedupeKey(minimalPayload, rawJson);
     const result = await getPool().query<{ id: string; inserted: boolean }>(
       `
         INSERT INTO webhook_receipts (
           provider_family, platform_id, object_id, dedupe_key, signature_valid,
-          status, payload, metadata
+          status, payload, provider_data_category, metadata
         )
-        VALUES ('linkedin', $1, $2, $3, true, 'RECEIVED', $4::jsonb, $5::jsonb)
+        VALUES ('linkedin', $1, $2, $3, true, 'RECEIVED', $4::jsonb, 'webhook_operational_receipt', $5::jsonb)
         ON CONFLICT (provider_family, dedupe_key) DO UPDATE SET
           metadata = webhook_receipts.metadata || jsonb_build_object('duplicateSeenAt', now())
         RETURNING id, (xmax = 0) AS inserted
       `,
       [
         platform.id,
-        typeof payload.notificationId === "string" ? payload.notificationId : null,
+        firstLinkedInNotificationId(minimalPayload),
         dedupeKey,
         payloadJson,
-        JSON.stringify({ platformSlug: platform.slug, signatureHeader: "x-li-signature" }),
+        JSON.stringify({
+          platformSlug: platform.slug,
+          signatureHeader: "x-li-signature",
+          providerDataCategory: "webhook_operational_receipt",
+          retentionBasis: "XLRRANK_OPERATIONAL_RETENTION",
+        }),
       ],
     );
     const receiptId = result.rows[0]?.id;
@@ -736,6 +745,7 @@ export class PlatformsService {
       providerAuthorizationId: auth.id,
       providerAuthorizationAssetId: asset.id,
       tokenKind: asset.token_kind,
+      providerUserId: auth.provider_user_id,
     };
     const platform = {
       id: asset.platform_id,
@@ -749,10 +759,16 @@ export class PlatformsService {
       credentials,
     });
     if (!profile) throw new BadRequestException("Provider asset profile could not be verified.");
+    const roles = stringArrayFromMetadata(asset.metadata, "roles");
+    const access = objectFromMetadata(auth.metadata, "access") ?? {};
     const capabilities = connector.evaluateCapabilities?.({
       configured: true,
       grantedScopes: credentials.scopes ?? [],
       authMode: typeof credentials.metadata?.authMode === "string" ? credentials.metadata.authMode : undefined,
+      access: {
+        ...access,
+        organizationRole: roles[0],
+      },
     }) ?? {};
     const persistResult = await this.persistConnectedConnection({
       scopeId: auth.scope_id,
@@ -767,11 +783,24 @@ export class PlatformsService {
         providerAssetId: asset.provider_asset_id,
         parentProviderAssetId: asset.parent_provider_asset_id,
         assetType: asset.asset_type,
+        access,
+        roles,
         authMode: typeof credentials.metadata?.authMode === "string" ? credentials.metadata.authMode : undefined,
         grantedScopes: credentials.scopes ?? [],
         grantedCapabilities: capabilities,
       },
     });
+    if (asset.platform_slug === "linkedin") {
+      await this.syncLinkedInNotificationSubscription({
+        connector,
+        auth,
+        asset,
+        connectionId: persistResult.connectionId,
+        credentials,
+        access,
+        roles,
+      });
+    }
     await this.audit.record({
       actorUserId: userId,
       action: persistResult.existing
@@ -801,7 +830,7 @@ export class PlatformsService {
     const pool = getPool();
     const scope = await ensurePersonalScope(userId);
     const accounts = await pool.query<ConnectionRow>(
-      "SELECT * FROM social_connections WHERE scope_id = $1 AND platform_id = $2",
+      "SELECT * FROM social_connections WHERE scope_id = $1 AND platform_id = $2 ORDER BY created_at ASC",
       [scope.scopeId, platformId],
     );
 
@@ -821,6 +850,16 @@ export class PlatformsService {
         WHERE id = $1 AND scope_id = $2
       `,
       [account.id, scope.scopeId],
+    );
+    await pool.query(
+      `
+        UPDATE provider_event_subscriptions
+        SET provider_status = 'LOCAL_CONNECTION_DISCONNECTED',
+            deactivated_at = now(),
+            updated_at = now()
+        WHERE social_connection_id = $1
+      `,
+      [account.id],
     );
     await this.audit.record({
       actorUserId: userId,
@@ -978,6 +1017,7 @@ export class PlatformsService {
         providerFamily,
       }),
     );
+    const providerAccess = objectFromMetadata(input.providerConfig.metadata, "access") ?? {};
     const grant = await pool.query<{ id: string }>(
       `
         INSERT INTO provider_authorizations (
@@ -1008,7 +1048,11 @@ export class PlatformsService {
         encryptedGrant,
         JSON.stringify(input.credentials.scopes ?? []),
         input.credentials.expiresAt ? new Date(input.credentials.expiresAt) : null,
-        JSON.stringify({ platformSlug: input.platform.slug, providerAppPlatformId: input.providerConfig.platformId }),
+        JSON.stringify({
+          platformSlug: input.platform.slug,
+          providerAppPlatformId: input.providerConfig.platformId,
+          access: providerAccess,
+        }),
       ],
     );
     const providerAuthorizationId = grant.rows[0]?.id;
@@ -1037,6 +1081,8 @@ export class PlatformsService {
                 assetId: asset.assetId,
                 parentAssetId: asset.parentAssetId,
                 tokenKind: asset.tokenKind,
+                providerUserId: input.providerUserId,
+                access: providerAccess,
                 ...asset.metadata,
               },
             }),
@@ -1078,7 +1124,7 @@ export class PlatformsService {
           asset.handle ?? null,
           asset.tokenKind,
           assetCredentialsEncrypted,
-          JSON.stringify(asset.metadata ?? {}),
+          JSON.stringify({ ...(asset.metadata ?? {}), access: providerAccess }),
         ],
       );
       const id = assetResult.rows[0]?.id ?? assetRecordId;
@@ -1094,6 +1140,205 @@ export class PlatformsService {
       });
     }
     return { authorizationId: providerAuthorizationId, assets: persistedAssets };
+  }
+
+  private async syncLinkedInNotificationSubscription(input: {
+    connector: unknown;
+    auth: {
+      id: string;
+      provider_family: string;
+      scope_id: string;
+      provider_user_id: string;
+      metadata: Record<string, unknown> | null;
+    };
+    asset: {
+      id: string;
+      platform_id: string;
+      platform_slug: string;
+      provider_asset_id: string;
+      metadata: Record<string, unknown> | null;
+    };
+    connectionId: string;
+    credentials: ConnectorCredentials;
+    access: Record<string, unknown>;
+    roles: string[];
+  }): Promise<void> {
+    if (input.access.organizationSocialActionNotifications !== true) return;
+    const method = (input.connector as {
+      upsertOrganizationSocialActionSubscription?: (
+        request: {
+          developerApplicationUrn: string;
+          memberUrn: string;
+          organizationUrn: string;
+          roles: string[];
+          webhookUrl: string;
+          eventType: string;
+        },
+        context: { scopeId: string; connectionId: string; credentials: ConnectorCredentials },
+      ) => Promise<{
+        providerStatus: string;
+        eventType: string;
+        developerApplicationUrn: string;
+        memberUrn: string;
+        organizationUrn: string;
+        webhookUrl: string;
+        expiresAt?: string | undefined;
+        raw: Record<string, unknown>;
+      }>;
+    }).upsertOrganizationSocialActionSubscription;
+    if (typeof method !== "function") return;
+
+    const eventType = "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS";
+    const developerApplicationUrn = linkedInDeveloperApplicationUrn(input.access);
+    const webhookUrl = stringFromMetadata(input.access, "webhookUrl");
+    const organizationUrn =
+      stringFromMetadata(input.asset.metadata, "organizationUrn") ??
+      `urn:li:organization:${input.asset.provider_asset_id}`;
+    const memberUrn =
+      stringFromMetadata(input.asset.metadata, "memberUrn") ??
+      `urn:li:person:${input.auth.provider_user_id}`;
+
+    if (!developerApplicationUrn || !webhookUrl) {
+      await this.upsertProviderEventSubscriptionRecord({
+        ...input,
+        providerStatus: "CONFIGURATION_REQUIRED",
+        eventType,
+        developerApplicationUrn: developerApplicationUrn ?? "urn:li:developerApplication:unknown",
+        memberUrn,
+        organizationUrn,
+        webhookUrl: webhookUrl ?? "",
+        metadata: {
+          liveRegistrationState: "BLOCKED_EXTERNAL",
+          notificationAccessState: "BLOCKED_EXTERNAL",
+        },
+        lastError: { message: "LinkedIn notification webhook URL or developer application URN is not configured" },
+      });
+      return;
+    }
+
+    if (!input.roles.includes("ADMINISTRATOR") || !input.credentials.scopes?.includes("rw_organization_admin")) {
+      await this.upsertProviderEventSubscriptionRecord({
+        ...input,
+        providerStatus: "ACCESS_LOST",
+        eventType,
+        developerApplicationUrn,
+        memberUrn,
+        organizationUrn,
+        webhookUrl,
+        metadata: {
+          requiredScope: "rw_organization_admin",
+          requiredRole: "ADMINISTRATOR",
+        },
+        lastError: { message: "LinkedIn notification subscription requires ADMINISTRATOR role and rw_organization_admin" },
+      });
+      await getPool().query(
+        `
+          UPDATE social_connections
+          SET status = 'DEGRADED',
+              sync_error = $2::jsonb,
+              updated_at = now()
+          WHERE id = $1
+        `,
+        [
+          input.connectionId,
+          JSON.stringify({ code: "LINKEDIN_NOTIFICATION_ACCESS_LOST", eventType }),
+        ],
+      );
+      return;
+    }
+
+    const result = await method.call(
+      input.connector,
+      {
+        developerApplicationUrn,
+        memberUrn,
+        organizationUrn,
+        roles: input.roles,
+        webhookUrl,
+        eventType,
+      },
+      {
+        scopeId: input.auth.scope_id,
+        connectionId: input.connectionId,
+        credentials: input.credentials,
+      },
+    );
+    await this.upsertProviderEventSubscriptionRecord({
+      ...input,
+      providerStatus: result.providerStatus,
+      eventType,
+      developerApplicationUrn,
+      memberUrn,
+      organizationUrn,
+      webhookUrl,
+      expiresAt: result.expiresAt,
+      metadata: {
+        requiredScope: "rw_organization_admin",
+        requiredRole: "ADMINISTRATOR",
+        liveRegistrationState: "BLOCKED_EXTERNAL",
+        notificationAccessState: "BLOCKED_EXTERNAL",
+        provider: result.raw,
+      },
+    });
+  }
+
+  private async upsertProviderEventSubscriptionRecord(input: {
+    auth: { id: string; provider_family: string; scope_id: string; provider_user_id: string };
+    asset: { id: string; platform_id: string; provider_asset_id: string };
+    connectionId: string;
+    providerStatus: string;
+    eventType: string;
+    developerApplicationUrn: string;
+    memberUrn: string;
+    organizationUrn: string;
+    webhookUrl: string;
+    expiresAt?: string | undefined;
+    metadata?: Record<string, unknown> | undefined;
+    lastError?: Record<string, unknown> | undefined;
+  }): Promise<void> {
+    await getPool().query(
+      `
+        INSERT INTO provider_event_subscriptions (
+          provider_family, scope_id, platform_id, provider_authorization_id,
+          provider_authorization_asset_id, social_connection_id, provider_user_id,
+          provider_asset_id, developer_application_urn, member_urn, entity_urn,
+          event_type, webhook_url, provider_status, last_provider_sync_at,
+          expires_at, deactivated_at, last_error, metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+          now(), $15, CASE WHEN $14 = 'ACTIVE' THEN NULL ELSE now() END, $16::jsonb, $17::jsonb)
+        ON CONFLICT (provider_family, provider_authorization_id, provider_authorization_asset_id, event_type)
+        DO UPDATE SET
+          social_connection_id = EXCLUDED.social_connection_id,
+          provider_status = EXCLUDED.provider_status,
+          webhook_url = EXCLUDED.webhook_url,
+          last_provider_sync_at = now(),
+          expires_at = EXCLUDED.expires_at,
+          deactivated_at = EXCLUDED.deactivated_at,
+          last_error = EXCLUDED.last_error,
+          metadata = EXCLUDED.metadata,
+          updated_at = now()
+      `,
+      [
+        input.auth.provider_family,
+        input.auth.scope_id,
+        input.asset.platform_id,
+        input.auth.id,
+        input.asset.id,
+        input.connectionId,
+        input.auth.provider_user_id,
+        input.asset.provider_asset_id,
+        input.developerApplicationUrn,
+        input.memberUrn,
+        input.organizationUrn,
+        input.eventType,
+        input.webhookUrl,
+        input.providerStatus,
+        parseProviderTimestamp(input.expiresAt),
+        input.lastError ? JSON.stringify(input.lastError) : null,
+        JSON.stringify(input.metadata ?? {}),
+      ],
+    );
   }
 
   private async platformIdsBySlug(slugs: string[]): Promise<Map<string, string>> {
@@ -1112,9 +1357,11 @@ export class PlatformsService {
       scope_id: string;
       provider_user_id: string;
       status: string;
+      granted_scopes: unknown;
+      metadata: Record<string, unknown> | null;
     }>(
       `
-        SELECT id, provider_family, scope_id, provider_user_id, status
+        SELECT id, provider_family, scope_id, provider_user_id, status, granted_scopes, metadata
         FROM provider_authorizations
         WHERE id = $1
         LIMIT 1
@@ -1490,6 +1737,85 @@ function verifyMetaWebhookSignature(
     "hex",
   );
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function minimalLinkedInWebhookPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
+  if (notifications.length > 0) {
+    return {
+      type: typeof payload.type === "string" ? payload.type : "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
+      notifications: notifications
+        .filter((item): item is Record<string, unknown> => !!item && typeof item === "object")
+        .map((item) => ({
+          notificationId: item.notificationId,
+          organizationalEntity: item.organizationalEntity,
+          organization: item.organization,
+          action: item.action,
+          sourcePost: item.sourcePost,
+          generatedActivity: item.generatedActivity,
+          lastModifiedAt: item.lastModifiedAt,
+          subscriber: item.subscriber,
+        })),
+    };
+  }
+  return {
+    type: payload.type,
+    notificationId: payload.notificationId,
+    organizationalEntity: payload.organizationalEntity,
+    organization: payload.organization,
+    entityUrn: payload.entityUrn,
+    assetId: payload.assetId,
+    action: payload.action,
+    sourcePost: payload.sourcePost,
+    generatedActivity: payload.generatedActivity,
+    lastModifiedAt: payload.lastModifiedAt,
+    eventTime: payload.eventTime,
+    timestamp: payload.timestamp,
+  };
+}
+
+function firstLinkedInNotificationId(payload: Record<string, unknown>): string | null {
+  if (typeof payload.notificationId !== "undefined" && payload.notificationId !== null) {
+    return String(payload.notificationId);
+  }
+  const notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
+  for (const item of notifications) {
+    if (
+      item &&
+      typeof item === "object" &&
+      typeof (item as { notificationId?: unknown }).notificationId !== "undefined"
+    ) {
+      return String((item as { notificationId: unknown }).notificationId);
+    }
+  }
+  return null;
+}
+
+function linkedInDeveloperApplicationUrn(access: Record<string, unknown>): string | null {
+  const urn = stringFromMetadata(access, "developerApplicationUrn");
+  if (urn) return urn;
+  const id = stringFromMetadata(access, "developerApplicationId");
+  return id ? `urn:li:developerApplication:${id}` : null;
+}
+
+function providerDefaultScopesForConfig(
+  platformSlug: string,
+  defaults: string[],
+  metadata: Record<string, unknown> | null | undefined,
+): string[] {
+  if (platformSlug !== "linkedin") return defaults;
+  const access = objectFromMetadata(metadata, "access") ?? {};
+  const scopes = [...defaults];
+  if (access.organizationSocialActionNotifications === true) scopes.push("rw_organization_admin");
+  if (access.restrictedMemberFeed === true) scopes.push("r_organization_social_feed");
+  return [...new Set(scopes)];
+}
+
+function parseProviderTimestamp(value: string | undefined): Date | null {
+  if (!value) return null;
+  const numeric = Number(value);
+  const date = Number.isFinite(numeric) ? new Date(numeric) : new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
 }
 
 function metaWebhookDedupeKey(

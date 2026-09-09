@@ -5,7 +5,8 @@ export interface ProviderRetentionPolicy {
   providerFamily: string;
   dataCategory: string;
   retentionClass: string;
-  maxRetentionSeconds: number;
+  retentionMode: string;
+  maxRetentionSeconds: number | null;
   description: string | null;
   metadata: Record<string, unknown> | null;
 }
@@ -25,6 +26,7 @@ export interface PurgeRetentionResult {
   contentObservationsPurged: number;
   interactionsPurged: number;
   canonicalItemsPurged: number;
+  metricsPurged: number;
   receiptsPurged: number;
   dryRun: boolean;
 }
@@ -38,13 +40,14 @@ export async function loadProviderRetentionPolicies(
     provider_family: string;
     data_category: string;
     retention_class: string;
-    max_retention_seconds: number;
+    retention_mode: string;
+    max_retention_seconds: number | null;
     description: string | null;
     metadata: Record<string, unknown> | null;
   }>(
     `
       SELECT id, provider_family, data_category, retention_class,
-             max_retention_seconds, description, metadata
+             retention_mode, max_retention_seconds, description, metadata
       FROM provider_data_retention_policies
       WHERE provider_family = $1
       ORDER BY data_category
@@ -57,6 +60,7 @@ export async function loadProviderRetentionPolicies(
     providerFamily: row.provider_family,
     dataCategory: row.data_category,
     retentionClass: row.retention_class,
+    retentionMode: row.retention_mode,
     maxRetentionSeconds: row.max_retention_seconds,
     description: row.description,
     metadata: row.metadata,
@@ -76,6 +80,7 @@ export async function purgeExpiredProviderData(
   let contentObservationsPurged = 0;
   let interactionsPurged = 0;
   let canonicalItemsPurged = 0;
+  let metricsPurged = 0;
   let receiptsPurged = 0;
 
   for (const policy of policies) {
@@ -83,20 +88,16 @@ export async function purgeExpiredProviderData(
       continue;
     }
 
+    if (policy.maxRetentionSeconds === null) {
+      continue;
+    }
+
     const cutoff = new Date(now.getTime() - policy.maxRetentionSeconds * 1000);
+    const scopeParamIndex = "$4";
 
-    if (
-      policy.dataCategory === "organization_content" ||
-      policy.dataCategory === "member_content"
-    ) {
-      const isOrg = policy.dataCategory === "organization_content";
-      const assetTypeCondition = isOrg
-        ? "AND COALESCE(sc.provider_metadata->>'assetType', '') = 'LINKEDIN_ORGANIZATION'"
-        : "AND COALESCE(sc.provider_metadata->>'assetType', '') != 'LINKEDIN_ORGANIZATION'";
-
-      // 1. Purge content observations for connections belonging to this provider family
-      const scopeFilter = options.scopeId ? "AND sco.scope_id = $3" : "";
-      const params: unknown[] = [cutoff, providerFamily];
+    {
+      const scopeFilter = options.scopeId ? `AND sco.scope_id = ${scopeParamIndex}` : "";
+      const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
       if (options.scopeId) params.push(options.scopeId);
 
       if (dryRun) {
@@ -106,9 +107,10 @@ export async function purgeExpiredProviderData(
             FROM social_content_observations sco
             JOIN social_connections sc ON sc.id = sco.connection_id
             JOIN platforms p ON p.id = sc.platform_id
+            JOIN social_content_items sci ON sci.id = sco.content_item_id
             WHERE sco.observed_at < $1
-              AND (p.slug = $2 OR $2 = 'linkedin' AND p.slug = 'linkedin')
-              ${assetTypeCondition}
+              AND p.slug = $2
+              AND COALESCE(sco.provider_data_category, sci.provider_data_category) = $3
               ${scopeFilter}
           `,
           params,
@@ -119,10 +121,12 @@ export async function purgeExpiredProviderData(
           `
             DELETE FROM social_content_observations sco
             USING social_connections sc, platforms p
+                  , social_content_items sci
             WHERE sco.connection_id = sc.id
               AND sc.platform_id = p.id
-              AND (p.slug = $2 OR $2 = 'linkedin' AND p.slug = 'linkedin')
-              ${assetTypeCondition}
+              AND sci.id = sco.content_item_id
+              AND p.slug = $2
+              AND COALESCE(sco.provider_data_category, sci.provider_data_category) = $3
               AND sco.observed_at < $1
               ${scopeFilter}
             RETURNING sco.content_item_id
@@ -150,17 +154,9 @@ export async function purgeExpiredProviderData(
       }
     }
 
-    if (
-      policy.dataCategory === "organization_profile" ||
-      policy.dataCategory === "member_profile"
-    ) {
-      const isOrg = policy.dataCategory === "organization_profile";
-      const assetTypeCondition = isOrg
-        ? "AND COALESCE(sc.provider_metadata->>'assetType', '') = 'LINKEDIN_ORGANIZATION'"
-        : "AND COALESCE(sc.provider_metadata->>'assetType', '') != 'LINKEDIN_ORGANIZATION'";
-
-      const scopeFilter = options.scopeId ? "AND sao.scope_id = $3" : "";
-      const params: unknown[] = [cutoff, providerFamily];
+    {
+      const scopeFilter = options.scopeId ? `AND sao.scope_id = ${scopeParamIndex}` : "";
+      const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
       if (options.scopeId) params.push(options.scopeId);
 
       if (dryRun) {
@@ -170,9 +166,10 @@ export async function purgeExpiredProviderData(
             FROM social_account_observations sao
             JOIN social_connections sc ON sc.id = sao.connection_id
             JOIN platforms p ON p.id = sc.platform_id
+            JOIN social_external_accounts sea ON sea.id = sao.external_account_id
             WHERE sao.observed_at < $1
-              AND (p.slug = $2 OR $2 = 'linkedin' AND p.slug = 'linkedin')
-              ${assetTypeCondition}
+              AND p.slug = $2
+              AND COALESCE(sao.provider_data_category, sea.provider_data_category) = $3
               ${scopeFilter}
           `,
           params,
@@ -183,10 +180,12 @@ export async function purgeExpiredProviderData(
           `
             DELETE FROM social_account_observations sao
             USING social_connections sc, platforms p
+                  , social_external_accounts sea
             WHERE sao.connection_id = sc.id
               AND sc.platform_id = p.id
-              AND (p.slug = $2 OR $2 = 'linkedin' AND p.slug = 'linkedin')
-              ${assetTypeCondition}
+              AND sea.id = sao.external_account_id
+              AND p.slug = $2
+              AND COALESCE(sao.provider_data_category, sea.provider_data_category) = $3
               AND sao.observed_at < $1
               ${scopeFilter}
           `,
@@ -196,16 +195,111 @@ export async function purgeExpiredProviderData(
       }
     }
 
-    if (policy.dataCategory === "webhook_receipt") {
+    {
+      const scopeFilter = options.scopeId ? `AND sio.scope_id = ${scopeParamIndex}` : "";
+      const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
+      if (options.scopeId) params.push(options.scopeId);
+
+      if (dryRun) {
+        const countRes = await pool.query<{ count: string }>(
+          `
+            SELECT count(*) AS count
+            FROM social_interaction_observations sio
+            JOIN social_connections sc ON sc.id = sio.connection_id
+            JOIN platforms p ON p.id = sc.platform_id
+            JOIN social_interactions si ON si.id = sio.interaction_id
+            WHERE si.occurred_at < $1
+              AND p.slug = $2
+              AND COALESCE(sio.provider_data_category, si.provider_data_category) = $3
+              ${scopeFilter}
+          `,
+          params,
+        );
+        interactionsPurged += Number(countRes.rows[0]?.count ?? 0);
+      } else {
+        const delObsRes = await pool.query<{ interaction_id: string }>(
+          `
+            DELETE FROM social_interaction_observations sio
+            USING social_connections sc, platforms p, social_interactions si
+            WHERE sio.connection_id = sc.id
+              AND sc.platform_id = p.id
+              AND si.id = sio.interaction_id
+              AND p.slug = $2
+              AND COALESCE(sio.provider_data_category, si.provider_data_category) = $3
+              AND si.occurred_at < $1
+              ${scopeFilter}
+            RETURNING sio.interaction_id
+          `,
+          params,
+        );
+        interactionsPurged += delObsRes.rowCount ?? 0;
+        const candidateInteractionIds = [...new Set(delObsRes.rows.map((row) => row.interaction_id))];
+        if (candidateInteractionIds.length > 0) {
+          const orphanDel = await pool.query(
+            `
+              DELETE FROM social_interactions si
+              WHERE si.id = ANY($1::uuid[])
+                AND NOT EXISTS (
+                  SELECT 1 FROM social_interaction_observations sio
+                  WHERE sio.interaction_id = si.id
+                )
+            `,
+            [candidateInteractionIds],
+          );
+          canonicalItemsPurged += orphanDel.rowCount ?? 0;
+        }
+      }
+    }
+
+    {
+      const scopeFilter = options.scopeId ? `AND scm.scope_id = ${scopeParamIndex}` : "";
+      const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
+      if (options.scopeId) params.push(options.scopeId);
+
+      if (dryRun) {
+        const countRes = await pool.query<{ count: string }>(
+          `
+            SELECT count(*) AS count
+            FROM social_content_metrics scm
+            JOIN social_connections sc ON sc.id = scm.connection_id
+            JOIN platforms p ON p.id = sc.platform_id
+            WHERE scm.collected_at < $1
+              AND p.slug = $2
+              AND scm.provider_data_category = $3
+              ${scopeFilter}
+          `,
+          params,
+        );
+        metricsPurged += Number(countRes.rows[0]?.count ?? 0);
+      } else {
+        const delMetricsRes = await pool.query(
+          `
+            DELETE FROM social_content_metrics scm
+            USING social_connections sc, platforms p
+            WHERE scm.connection_id = sc.id
+              AND sc.platform_id = p.id
+              AND p.slug = $2
+              AND scm.provider_data_category = $3
+              AND scm.collected_at < $1
+              ${scopeFilter}
+          `,
+          params,
+        );
+        metricsPurged += delMetricsRes.rowCount ?? 0;
+      }
+    }
+
+    if (policy.dataCategory === "webhook_operational_receipt") {
       if (dryRun) {
         const countRes = await pool.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM webhook_receipts
             WHERE provider_family = $1
+              AND provider_data_category = $3
               AND received_at < $2
           `,
-          [providerFamily, cutoff],
+          [providerFamily, cutoff, policy.dataCategory],
         );
         receiptsPurged += Number(countRes.rows[0]?.count ?? 0);
       } else {
@@ -213,9 +307,10 @@ export async function purgeExpiredProviderData(
           `
             DELETE FROM webhook_receipts
             WHERE provider_family = $1
+              AND provider_data_category = $3
               AND received_at < $2
           `,
-          [providerFamily, cutoff],
+          [providerFamily, cutoff, policy.dataCategory],
         );
         receiptsPurged += delReceiptsRes.rowCount ?? 0;
       }
@@ -229,6 +324,7 @@ export async function purgeExpiredProviderData(
     contentObservationsPurged,
     interactionsPurged,
     canonicalItemsPurged,
+    metricsPurged,
     receiptsPurged,
     dryRun,
   };

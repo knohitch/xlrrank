@@ -124,6 +124,51 @@ export class LinkedInApiClient {
     return this.request<T>(url, init);
   }
 
+  async put<T>(
+    path: string,
+    accessToken: string,
+    data: unknown,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<LinkedInResponse<T>> {
+    const url = this.url(path);
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "Linkedin-Version": this.apiVersion,
+      "X-Restli-Protocol-Version": LINKEDIN_RESTLI_PROTOCOL_VERSION,
+    };
+
+    const init: RequestInit = {
+      method: "PUT",
+      headers,
+      body: JSON.stringify(data),
+    };
+    if (options.signal) init.signal = options.signal;
+    return this.request<T>(url, init);
+  }
+
+  async delete<T>(
+    path: string,
+    accessToken: string,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<LinkedInResponse<T>> {
+    const url = this.url(path);
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+      "Linkedin-Version": this.apiVersion,
+      "X-Restli-Protocol-Version": LINKEDIN_RESTLI_PROTOCOL_VERSION,
+    };
+
+    const init: RequestInit = {
+      method: "DELETE",
+      headers,
+    };
+    if (options.signal) init.signal = options.signal;
+    return this.request<T>(url, init);
+  }
+
   async postForm<T>(
     urlStr: string,
     form: URLSearchParams,
@@ -326,19 +371,17 @@ export function verifyLinkedInWebhookSignature(
 ): boolean {
   if (!signatureHeader || !clientSecret) return false;
 
-  let expectedHex = signatureHeader.trim();
-  if (expectedHex.startsWith("hmacsha256=")) {
-    expectedHex = expectedHex.slice("hmacsha256=".length);
-  } else if (expectedHex.startsWith("sha256=")) {
-    expectedHex = expectedHex.slice("sha256=".length);
-  }
+  const providedHex = signatureHeader.trim();
+  if (!/^[a-f0-9]{64}$/.test(providedHex)) return false;
 
-  const computed = createHmac("sha256", clientSecret)
-    .update(typeof rawBody === "string" ? rawBody : rawBody.toString("utf8"))
-    .digest("hex");
+  const hmac = createHmac("sha256", clientSecret);
+  hmac.update("hmacsha256=", "utf8");
+  hmac.update(typeof rawBody === "string" ? Buffer.from(rawBody, "utf8") : rawBody);
+  const computed = hmac.digest("hex");
 
-  if (expectedHex.length !== computed.length) return false;
-  return timingSafeEqual(Buffer.from(computed, "utf8"), Buffer.from(expectedHex, "utf8"));
+  const actual = Buffer.from(providedHex, "hex");
+  const expected = Buffer.from(computed, "hex");
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 /**
@@ -350,6 +393,19 @@ export function linkedInWebhookDedupeKey(
 ): string {
   if (typeof payload.notificationId === "string" && payload.notificationId.length > 0) {
     return `linkedin:${payload.notificationId}`;
+  }
+  const notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
+  const notificationIds = notifications
+    .map((notification) =>
+      notification &&
+      typeof notification === "object" &&
+      typeof (notification as { notificationId?: unknown }).notificationId !== "undefined"
+        ? String((notification as { notificationId: unknown }).notificationId)
+        : "",
+    )
+    .filter(Boolean);
+  if (notificationIds.length > 0) {
+    return `linkedin:${notificationIds.sort().join(":")}`;
   }
   if (typeof payload.id === "string" && payload.id.length > 0) {
     return `linkedin:${payload.id}`;

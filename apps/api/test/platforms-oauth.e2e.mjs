@@ -70,7 +70,7 @@ async function reset() {
     return json({ errors: [{ title: "not found" }] }, 404);
   };
   await pool.query(
-    "TRUNCATE webhook_receipts, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
+    "TRUNCATE webhook_receipts, provider_event_subscriptions, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
   );
 }
 
@@ -259,6 +259,16 @@ function linkedInJson(url, init = {}) {
     });
   }
 
+  if (url.pathname.startsWith("/rest/eventSubscriptions/") && method === "PUT") {
+    return json({
+      entity: "urn:li:organization:12345",
+      eventType: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
+      user: "urn:li:person:li-member-sub-123",
+      expiresAt: "1790000000000",
+      webhook: "https://app.example.test/platforms/linkedin/webhook",
+    });
+  }
+
   return json({ message: `not found: ${url.pathname}` }, 404);
 }
 
@@ -349,7 +359,7 @@ async function linkedinPlatform() {
   return result.rows[0].id;
 }
 
-async function linkedinProviderConfig(platformId) {
+async function linkedinProviderConfig(platformId, metadata = {}) {
   const configId = randomUUID();
   const encrypted = shared.encryptSecret(
     "synthetic-linkedin-client-secret",
@@ -368,9 +378,9 @@ async function linkedinProviderConfig(platformId) {
       )
       VALUES ($1, $2, 'test', 'synthetic-linkedin-client-id', $3,
         'https://app.example.test/platforms/linkedin/oauth/callback', true,
-        '{"access":{"fullArchiveSearch":false}}'::jsonb)
+        $4::jsonb)
     `,
-    [configId, platformId, encrypted],
+    [configId, platformId, encrypted, JSON.stringify({ access: { fullArchiveSearch: false }, ...metadata })],
   );
 }
 
@@ -1008,8 +1018,23 @@ test(
     };
     const rawBody = JSON.stringify(webhookPayload);
     const signature = createHmac("sha256", "synthetic-linkedin-client-secret")
+      .update(`hmacsha256=${rawBody}`)
+      .digest("hex");
+
+    await assert.rejects(
+      () => service.receiveLinkedInWebhook(platformId, signature, webhookPayload),
+      /raw body is required/i,
+    );
+    assert.equal(Number((await pool.query("SELECT count(*) FROM webhook_receipts")).rows[0].count), 0);
+
+    const wrongRawSignature = createHmac("sha256", "synthetic-linkedin-client-secret")
       .update(rawBody)
       .digest("hex");
+    await assert.rejects(
+      () => service.receiveLinkedInWebhook(platformId, wrongRawSignature, webhookPayload, rawBody),
+      /signature verification failed/,
+    );
+    assert.equal(Number((await pool.query("SELECT count(*) FROM webhook_receipts")).rows[0].count), 0);
 
     const webhookResult = await service.receiveLinkedInWebhook(
       platformId,
@@ -1029,6 +1054,9 @@ test(
     assert.equal(receipt.provider_family, "linkedin");
     assert.equal(receipt.signature_valid, true);
     assert.equal(receipt.status, "PENDING_DISPATCH");
+    assert.equal(receipt.provider_data_category, "webhook_operational_receipt");
+    assert.equal(receipt.payload.notificationId, "notif-uuid-001");
+    assert.equal(receipt.payload.resource, undefined);
 
     // 12. Webhook deduplication: send identical payload again
     const duplicateResult = await service.receiveLinkedInWebhook(
@@ -1045,5 +1073,112 @@ test(
       () => service.receiveLinkedInWebhook(platformId, "invalid-sig", webhookPayload, rawBody),
       /signature verification failed/,
     );
+    assert.equal(Number((await pool.query("SELECT count(*) FROM webhook_receipts")).rows[0].count), 1);
+  },
+);
+
+test(
+  "LinkedIn notification subscriptions: product access, role denial, active upsert, and disconnect loss",
+  { skip },
+  async () => {
+    await reset();
+    const userA = await user("linkedin-sub-user-a@example.test");
+    const platformId = await linkedinPlatform();
+    await linkedinProviderConfig(platformId, {
+      access: {
+        communityManagement: true,
+        followerStatistics: true,
+        organizationSocialActionNotifications: true,
+        developerApplicationId: "999",
+        webhookUrl: "https://app.example.test/platforms/linkedin/webhook",
+      },
+    });
+
+    const start = await service.startOAuth("linkedin", userA, {
+      scopeType: "PERSONAL",
+      requestedScopes: ["openid", "profile", "email", "r_organization_social", "r_organization_admin", "rw_organization_admin"],
+    });
+    assert.equal(new URL(start.authorizationUrl).searchParams.get("scope").includes("rw_organization_admin"), true);
+    const callback = await service.handleOAuthCallback("linkedin", userA, {
+      state: stateFrom(start),
+      code: "linkedin-sub-code",
+    });
+    const assetList = await service.listAuthorizationAssets(callback.authorizationId, userA);
+    const adminAsset = assetList.assets.find((asset) => asset.providerAssetId === "12345");
+    const analystAsset = assetList.assets.find((asset) => asset.providerAssetId === "67890");
+    assert.ok(adminAsset);
+    assert.ok(analystAsset);
+
+    const connected = await service.connectAuthorizationAsset(callback.authorizationId, adminAsset.id, userA);
+    const activeSub = (
+      await pool.query(
+        `
+          SELECT provider_authorization_id, provider_authorization_asset_id, social_connection_id,
+                 provider_user_id, provider_asset_id, developer_application_urn, member_urn,
+                 entity_urn, event_type, provider_status, metadata
+          FROM provider_event_subscriptions
+          WHERE social_connection_id = $1
+        `,
+        [connected.connectionId],
+      )
+    ).rows[0];
+    assert.equal(activeSub.provider_authorization_id, callback.authorizationId);
+    assert.equal(activeSub.provider_authorization_asset_id, adminAsset.id);
+    assert.equal(activeSub.provider_user_id, "li-member-sub-123");
+    assert.equal(activeSub.provider_asset_id, "12345");
+    assert.equal(activeSub.developer_application_urn, "urn:li:developerApplication:999");
+    assert.equal(activeSub.member_urn, "urn:li:person:li-member-sub-123");
+    assert.equal(activeSub.entity_urn, "urn:li:organization:12345");
+    assert.equal(activeSub.event_type, "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS");
+    assert.equal(activeSub.provider_status, "ACTIVE");
+    assert.equal(JSON.stringify(activeSub.metadata).includes("synthetic-linkedin-access"), false);
+    assert.equal(linkedInRequests.some((request) => request.method === "PUT" && request.path.startsWith("/rest/eventSubscriptions/")), true);
+
+    const analystConnection = await service.connectAuthorizationAsset(callback.authorizationId, analystAsset.id, userA);
+    const deniedSub = (
+      await pool.query(
+        "SELECT provider_status FROM provider_event_subscriptions WHERE social_connection_id = $1",
+        [analystConnection.connectionId],
+      )
+    ).rows[0];
+    assert.equal(deniedSub.provider_status, "ACCESS_LOST");
+
+    await service.disconnectPlatform(platformId, userA);
+    const disconnectedSub = (
+      await pool.query(
+        "SELECT provider_status FROM provider_event_subscriptions WHERE social_connection_id = $1",
+        [connected.connectionId],
+      )
+    ).rows[0];
+    assert.equal(disconnectedSub.provider_status, "LOCAL_CONNECTION_DISCONNECTED");
+    assert.equal(Number((await pool.query("SELECT count(*) FROM provider_authorizations")).rows[0].count), 1);
+  },
+);
+
+test(
+  "LinkedIn notification subscriptions: missing product access creates no subscription",
+  { skip },
+  async () => {
+    await reset();
+    const userA = await user("linkedin-sub-missing-product@example.test");
+    const platformId = await linkedinPlatform();
+    await linkedinProviderConfig(platformId, {
+      access: {
+        communityManagement: true,
+      },
+    });
+
+    const start = await service.startOAuth("linkedin", userA, {
+      scopeType: "PERSONAL",
+    });
+    assert.equal(new URL(start.authorizationUrl).searchParams.get("scope").includes("rw_organization_admin"), false);
+    const callback = await service.handleOAuthCallback("linkedin", userA, {
+      state: stateFrom(start),
+      code: "linkedin-no-notifications-code",
+    });
+    const assetList = await service.listAuthorizationAssets(callback.authorizationId, userA);
+    const adminAsset = assetList.assets.find((asset) => asset.providerAssetId === "12345");
+    await service.connectAuthorizationAsset(callback.authorizationId, adminAsset.id, userA);
+    assert.equal(Number((await pool.query("SELECT count(*) FROM provider_event_subscriptions")).rows[0].count), 0);
   },
 );

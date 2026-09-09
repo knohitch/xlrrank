@@ -57,6 +57,13 @@
       "when": 1789084800000,
       "tag": "0007_linkedin_retention_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789171200000,
+      "tag": "0008_linkedin_retention_subscriptions_truthfulness",
+      "breakpoints": true
     }
   ]
 }

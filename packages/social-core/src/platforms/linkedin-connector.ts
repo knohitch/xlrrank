@@ -1,6 +1,11 @@
 import type { AvailabilityState, ConnectorCapability, ConnectorManifest } from "@xlrrank/shared";
 import { BaseSocialConnector } from "../connectors/base.js";
-import { AuthenticationError, CapabilityUnavailableError } from "../connectors/errors.js";
+import {
+  AuthenticationError,
+  AuthorizationError,
+  CapabilityUnavailableError,
+  ConnectorConfigurationError,
+} from "../connectors/errors.js";
 import type {
   AccountMetrics,
   AuthResult,
@@ -45,9 +50,7 @@ export const LINKEDIN_DEFAULT_SCOPES = [
   "profile",
   "email",
   "r_organization_social",
-  "rw_organization_admin",
   "r_organization_admin",
-  "r_organization_social_feed",
 ];
 
 export interface LinkedInAsset {
@@ -70,8 +73,8 @@ export const LINKEDIN_CAPABILITY_MATRIX: Record<
   content: { scopes: ["r_organization_social", "r_organization_social_feed"], state: "CONFIGURATION_REQUIRED" },
   comments: { scopes: ["r_organization_social", "r_organization_social_feed"], state: "CONFIGURATION_REQUIRED" },
   metrics: { scopes: ["r_organization_social", "r_organization_admin"], state: "CONFIGURATION_REQUIRED" },
-  followers: { scopes: ["r_organization_social", "r_organization_admin"], state: "CONFIGURATION_REQUIRED" },
-  audience_insights: { scopes: ["r_organization_social", "r_organization_admin"], state: "CONFIGURATION_REQUIRED" },
+  followers: { scopes: [], state: "UNAVAILABLE" },
+  audience_insights: { scopes: ["rw_organization_admin"], state: "APP_REVIEW_REQUIRED" },
   following: { scopes: [], state: "UNAVAILABLE" },
   search: { scopes: [], state: "UNAVAILABLE" },
   messages: { scopes: [], state: "UNAVAILABLE" },
@@ -89,6 +92,7 @@ export function evaluateLinkedInCapabilities(
 
   const granted = new Set(input.grantedScopes ?? []);
   const role = typeof input.access?.organizationRole === "string" ? input.access.organizationRole : undefined;
+  const access = input.access ?? {};
 
   const result: Partial<Record<ConnectorCapability, AvailabilityState>> = {};
 
@@ -99,13 +103,33 @@ export function evaluateLinkedInCapabilities(
       continue;
     }
 
-    // Role check: ANALYST only permits metrics/insights/profiles, not comments/content administration
+    if (
+      (capability === "profiles" ||
+        capability === "content" ||
+        capability === "comments" ||
+        capability === "metrics") &&
+      access.communityManagement !== true
+    ) {
+      result[capability] = "APP_REVIEW_REQUIRED";
+      continue;
+    }
+
+    if (capability === "audience_insights" && access.followerStatistics !== true) {
+      result[capability] = access.communityManagement === true ? "PERMISSION_REQUIRED" : "APP_REVIEW_REQUIRED";
+      continue;
+    }
+
     if (role && (capability === "content" || capability === "comments")) {
       const allowedRoles = ["ADMINISTRATOR", "CONTENT_ADMINISTRATOR", "DIRECT_SPONSORED_CONTENT_POSTER"];
       if (!allowedRoles.includes(role)) {
         result[capability] = "PERMISSION_REQUIRED";
         continue;
       }
+    }
+
+    if ((capability === "metrics" || capability === "audience_insights") && role && role !== "ADMINISTRATOR") {
+      result[capability] = "PERMISSION_REQUIRED";
+      continue;
     }
 
     const hasScopes = config.scopes.length === 0 || config.scopes.some((scope) => granted.has(scope));
@@ -305,15 +329,15 @@ export class LinkedInConnector extends BaseSocialConnector {
           externalId: sub,
           handle: email ?? `member-${sub.slice(0, 8)}`,
           displayName: name,
-          followerCount: 0,
-          followingCount: 0,
           visibility: "SCOPE_PRIVATE",
+          providerDataCategory: "authenticated_member_profile",
           provenance: makeProvenance("linkedin", context),
           metadata: {
             sub,
             email,
             emailVerified: data.email_verified === true,
             providerIdentityType: "LINKEDIN_MEMBER_OIDC",
+            providerDataCategory: "authenticated_member_profile",
             raw: data,
           },
         };
@@ -344,7 +368,7 @@ export class LinkedInConnector extends BaseSocialConnector {
       (acl) => acl && acl.state === "APPROVED" && typeof acl.organization === "string",
     );
 
-    const orgMap = new Map<string, { orgId: string; orgUrn: string; roles: string[] }>();
+    const orgMap = new Map<string, { orgId: string; orgUrn: string; roles: string[]; roleAssignee?: string }>();
     for (const item of approvedAcls) {
       const urn = item.organization;
       const orgId = urn.replace(/^urn:li:organization:/, "");
@@ -352,6 +376,7 @@ export class LinkedInConnector extends BaseSocialConnector {
       if (item.role && !existing.roles.includes(item.role)) {
         existing.roles.push(item.role);
       }
+      if (item.roleAssignee && !existing.roleAssignee) existing.roleAssignee = item.roleAssignee;
       orgMap.set(orgId, existing);
     }
 
@@ -385,6 +410,7 @@ export class LinkedInConnector extends BaseSocialConnector {
           accessToken: token,
           metadata: {
             organizationUrn: entry.orgUrn,
+            memberUrn: entry.roleAssignee,
             numericId: orgId,
             vanityName,
             roles: entry.roles,
@@ -393,8 +419,8 @@ export class LinkedInConnector extends BaseSocialConnector {
             staffCountRange: org.staffCountRange,
           },
         });
-      } catch {
-        // Tolerant of lookup failure on restricted organizations
+      } catch (err) {
+        if (!isNonFatalLinkedInProfileDecorationError(err)) throw err;
         assets.push({
           platformId: "linkedin",
           assetType: "LINKEDIN_ORGANIZATION",
@@ -405,6 +431,7 @@ export class LinkedInConnector extends BaseSocialConnector {
           accessToken: token,
           metadata: {
             organizationUrn: entry.orgUrn,
+            memberUrn: entry.roleAssignee,
             numericId: orgId,
             roles: entry.roles,
             primaryRole: entry.roles[0] ?? "ADMINISTRATOR",
@@ -493,12 +520,13 @@ export class LinkedInConnector extends BaseSocialConnector {
       displayName: name,
       ...(desc ? { bio: desc } : {}),
       ...(website ? { website } : {}),
-      followerCount: 0,
-      followingCount: 0,
       visibility: "SCOPE_PRIVATE",
+      providerDataCategory: "organization_profile",
       provenance: makeProvenance("linkedin", context),
       metadata: {
         organizationUrn: `urn:li:organization:${orgId}`,
+        providerDataCategory: "organization_profile",
+        providerRetentionBasis: "AUTHENTICATED_ORGANIZATION_ASSET",
         vanityName,
         primaryOrganizationType: org.primaryOrganizationType,
         staffCountRange: org.staffCountRange,
@@ -567,9 +595,12 @@ export class LinkedInConnector extends BaseSocialConnector {
         body: commentary,
         externalCreatedAt: createdAt,
         visibility: "SCOPE_PRIVATE",
+        providerDataCategory: "organization_social_activity_authenticated_org",
         provenance: makeProvenance("linkedin", context, createdAt),
         metadata: {
           authorUrn,
+          providerDataCategory: "organization_social_activity_authenticated_org",
+          providerRetentionBasis: "AUTHENTICATED_ORGANIZATION_ASSET",
           lifecycleState: post.lifecycleState,
           visibility: post.visibility,
           lastModifiedAt: post.lastModifiedAt,
@@ -656,9 +687,15 @@ export class LinkedInConnector extends BaseSocialConnector {
         body: text,
         occurredAt,
         visibility: "SCOPE_PRIVATE",
+        providerDataCategory: actorUrn.startsWith("urn:li:person:")
+          ? "member_social_activity"
+          : "organization_social_activity_authenticated_org",
         provenance: makeProvenance("linkedin", context, occurredAt),
         metadata: {
           actorUrn,
+          providerDataCategory: actorUrn.startsWith("urn:li:person:")
+            ? "member_social_activity"
+            : "organization_social_activity_authenticated_org",
           lastModified: comment.lastModified,
           raw: comment,
         },
@@ -704,7 +741,7 @@ export class LinkedInConnector extends BaseSocialConnector {
     const orgId = rawAccountId.replace(/^urn:li:organization:/, "");
     const orgUrn = `urn:li:organization:${orgId}`;
 
-    let followerCount = 0;
+    let followerCount: number | undefined;
     try {
       // Current official network size endpoint for total organization followers
       const netRes = await this.client.get<{ firstDegreeSize?: number }>(
@@ -717,25 +754,11 @@ export class LinkedInConnector extends BaseSocialConnector {
         followerCount = netRes.body.firstDegreeSize;
       }
     } catch {
-      // If networkSizes is unavailable, try aggregate follower statistics
-      try {
-        const statRes = await this.client.get<LinkedInElementsResponse<Record<string, unknown>>>(
-          "/organizationalEntityFollowerStatistics",
-          token,
-          { q: "organizationalEntity", organizationalEntity: orgUrn },
-          { signal: context?.signal },
-        );
-        const first = statRes.body.elements?.[0];
-        if (first && typeof first.totalFollowerCounts === "number") {
-          followerCount = first.totalFollowerCounts;
-        }
-      } catch {
-        // Fall back gracefully
-      }
+      followerCount = undefined;
     }
 
-    let contentCount = 0;
     let engagementRate: number | undefined;
+    let providerMetrics: Record<string, unknown> | undefined;
 
     try {
       // Organization share statistics (organic engagement)
@@ -751,25 +774,93 @@ export class LinkedInConnector extends BaseSocialConnector {
         : null;
 
       if (stats) {
-        const shares = typeof stats.shareCount === "number" ? stats.shareCount : 0;
-        contentCount = shares;
         if (typeof stats.engagement === "number") {
           engagementRate = stats.engagement;
         }
+        providerMetrics = { linkedInShareStatistics: stats };
       }
     } catch {
       // Ignore if share stats not accessible
     }
 
     const metrics: AccountMetrics = {
-      followerCount,
-      followingCount: 0, // LinkedIn does not expose following for organizations
-      contentCount,
       collectedAt: new Date().toISOString(),
+      ...(typeof followerCount === "number" ? { followerCount } : {}),
       ...(typeof engagementRate === "number" ? { engagementRate } : {}),
+      ...(providerMetrics ? { providerMetrics } : {}),
     };
 
     return metrics;
+  }
+
+  async upsertOrganizationSocialActionSubscription(
+    input: LinkedInOrganizationNotificationSubscriptionInput,
+    context?: ConnectorOperationContext,
+  ): Promise<LinkedInOrganizationNotificationSubscriptionResult> {
+    const token = context?.credentials.accessToken ?? input.accessToken;
+    if (!token) throw new AuthenticationError("linkedin", "Missing access token");
+    const grantedScopes = context?.credentials.scopes ?? [];
+    if (!grantedScopes.includes("rw_organization_admin")) {
+      throw new AuthorizationError(
+        "linkedin",
+        "LinkedIn Organization Social Action Notifications require rw_organization_admin",
+        "NON_RETRYABLE",
+      );
+    }
+    if (!input.roles.includes("ADMINISTRATOR")) {
+      throw new AuthorizationError(
+        "linkedin",
+        "LinkedIn notification subscriptions require ADMINISTRATOR organization role",
+        "NON_RETRYABLE",
+      );
+    }
+    if (!input.developerApplicationUrn || !input.memberUrn || !input.organizationUrn || !input.webhookUrl) {
+      throw new ConnectorConfigurationError(
+        "linkedin",
+        "LinkedIn notification subscription requires developer application, member, organization, and webhook URL",
+      );
+    }
+    const eventType = input.eventType ?? "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS";
+    const response = await this.client.put<Record<string, unknown>>(
+      linkedInEventSubscriptionPath({
+        developerApplicationUrn: input.developerApplicationUrn,
+        memberUrn: input.memberUrn,
+        organizationUrn: input.organizationUrn,
+        eventType,
+      }),
+      token,
+      { webhook: input.webhookUrl },
+      { signal: context?.signal },
+    );
+    return {
+      providerStatus: "ACTIVE",
+      eventType,
+      developerApplicationUrn: input.developerApplicationUrn,
+      memberUrn: input.memberUrn,
+      organizationUrn: input.organizationUrn,
+      webhookUrl: input.webhookUrl,
+      expiresAt: typeof response.body.expiresAt === "string" ? response.body.expiresAt : undefined,
+      raw: response.body,
+    };
+  }
+
+  async deleteOrganizationSocialActionSubscription(
+    input: Omit<LinkedInOrganizationNotificationSubscriptionInput, "roles" | "webhookUrl">,
+    context?: ConnectorOperationContext,
+  ): Promise<void> {
+    const token = context?.credentials.accessToken ?? input.accessToken;
+    if (!token) throw new AuthenticationError("linkedin", "Missing access token");
+    const eventType = input.eventType ?? "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS";
+    await this.client.delete(
+      linkedInEventSubscriptionPath({
+        developerApplicationUrn: input.developerApplicationUrn,
+        memberUrn: input.memberUrn,
+        organizationUrn: input.organizationUrn,
+        eventType,
+      }),
+      token,
+      { signal: context?.signal },
+    );
   }
 
   override async searchProfiles(): Promise<NormalizedProfile[]> {
@@ -803,6 +894,50 @@ export class LinkedInConnector extends BaseSocialConnector {
       "Following listing is not supported by LinkedIn.",
     );
   }
+}
+
+export interface LinkedInOrganizationNotificationSubscriptionInput {
+  accessToken?: string | undefined;
+  developerApplicationUrn: string;
+  memberUrn: string;
+  organizationUrn: string;
+  roles: string[];
+  webhookUrl: string;
+  eventType?: string | undefined;
+}
+
+export interface LinkedInOrganizationNotificationSubscriptionResult {
+  providerStatus: "ACTIVE";
+  eventType: string;
+  developerApplicationUrn: string;
+  memberUrn: string;
+  organizationUrn: string;
+  webhookUrl: string;
+  expiresAt?: string | undefined;
+  raw: Record<string, unknown>;
+}
+
+function linkedInEventSubscriptionPath(input: {
+  developerApplicationUrn: string;
+  memberUrn: string;
+  organizationUrn: string;
+  eventType: string;
+}): string {
+  return `/eventSubscriptions/(developerApplication:${encodeURIComponent(input.developerApplicationUrn)},user:${encodeURIComponent(input.memberUrn)},entity:${encodeURIComponent(input.organizationUrn)},eventType:${input.eventType})`;
+}
+
+function isNonFatalLinkedInProfileDecorationError(err: unknown): boolean {
+  const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  if (
+    code === "AUTHENTICATION" ||
+    code === "AUTHORIZATION" ||
+    code === "RATE_LIMIT" ||
+    code === "TEMPORARY_PROVIDER_FAILURE" ||
+    code === "MALFORMED_PROVIDER_RESPONSE"
+  ) {
+    return false;
+  }
+  return err instanceof Error && /not found|field|projection|decoration/i.test(err.message);
 }
 
 function makeProvenance(

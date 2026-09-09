@@ -79,6 +79,10 @@ export {
   LINKEDIN_CAPABILITY_MATRIX,
 } from "./platforms/linkedin-connector.js";
 export type { LinkedInAsset } from "./platforms/linkedin-connector.js";
+export type {
+  LinkedInOrganizationNotificationSubscriptionInput,
+  LinkedInOrganizationNotificationSubscriptionResult,
+} from "./platforms/linkedin-connector.js";
 export {
   LINKEDIN_MARKETING_API_VERSION,
   LINKEDIN_REST_BASE_URL,

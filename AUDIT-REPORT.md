@@ -4,7 +4,7 @@
 
 **NOT PRODUCTION READY**
 
-Foundation security has been hardened. All known dependency vulnerabilities are resolved. Docker images build successfully. The verification pipeline is trustworthy. Worker/reference-provider social ingestion is implemented for Sprint 05 evidence. Sprint 06 added a production X OAuth/API connector with fixture-backed contract and remote CI gates. Sprint 07 added production Facebook and Instagram connectors with Facebook Login and direct Instagram Login auth modes, asset discovery, asset selection, opaque comment pagination, and HMAC-SHA256 webhooks. Sprint 08 adds a production LinkedIn Marketing API 202608 / Rest.li 2.0.0 connector with OIDC identity, organization ACL discovery, Posts API pagination, Social Actions comments, follower metrics, HMAC-SHA256 webhooks, BullMQ worker ingestion, and cross-scope data retention policies.
+Foundation security has been hardened. All known dependency vulnerabilities are resolved. Docker images build successfully. The verification pipeline is trustworthy. Worker/reference-provider social ingestion is implemented for Sprint 05 evidence. Sprint 06 added a production X OAuth/API connector with fixture-backed contract and remote CI gates. Sprint 07 added production Facebook and Instagram connectors with Facebook Login and direct Instagram Login auth modes, asset discovery, asset selection, opaque comment pagination, and HMAC-SHA256 webhooks. Sprint 08 adds a production LinkedIn Marketing API 202608 / Rest.li 2.0.0 connector with OIDC identity, organization ACL discovery, Posts API pagination, Social Actions comments, truth-preserving metrics, official raw-body webhook verification, local organization notification subscription support, BullMQ worker ingestion, and record-level data retention policies.
 
 Live provider verification remains externally blocked for all third-party social providers (X, Facebook, Instagram, LinkedIn) because no live production credentials were supplied. Remote CI is `BLOCKED_INFRA` due to exhausted workflow run quota. Worker Docker runtime is `BLOCKED_LOCAL_INFRA`. Other third-party social connectors (Reddit), AI providers, intelligence engines, billing, extension production integration, and full deployment remain unverified.
 
@@ -52,9 +52,9 @@ Live provider verification remains externally blocked for all third-party social
 | Worker Docker Runtime         | VERIFIED | Built worker image readiness check against PostgreSQL and Redis                                      |
 | X Connector Contract          | VERIFIED | Local HTTP fixture contract gate for X OAuth 2.0 PKCE, API v2, pagination, rate limits, error taxonomy |
 | Meta Connector Contract       | VERIFIED | Local HTTP fixture contract gate for Graph v26.0 Facebook & Instagram connectors                      |
-| LinkedIn Connector Contract   | VERIFIED | packages/social-core/test/linkedin-connector.test.mjs (20/20 pass, Version 202608, Rest.li 2.0.0)      |
-| LinkedIn OAuth & Asset E2E    | VERIFIED | apps/api/test/platforms-oauth.e2e.mjs (6/6 pass with real PostgreSQL, OIDC, org ACLs, webhooks)        |
-| LinkedIn Worker Ingestion E2E | VERIFIED | apps/worker/test/worker-ingestion.e2e.mjs (15/15 pass with real PostgreSQL + Redis + real worker)       |
+| LinkedIn Connector Contract   | VERIFIED | packages/social-core/test/linkedin-connector.test.mjs (21/21 pass, Version 202608, Rest.li 2.0.0)      |
+| LinkedIn OAuth & Asset E2E    | VERIFIED | apps/api/test/platforms-oauth.e2e.mjs focused LinkedIn gate with real PostgreSQL, OIDC, org ACLs, webhooks, and notification subscription persistence |
+| LinkedIn Worker Ingestion E2E | VERIFIED | apps/worker/test/worker-ingestion.e2e.mjs focused LinkedIn + retention gate with real PostgreSQL + Redis + BullMQ |
 | Data Retention Purge          | VERIFIED | packages/database/src/social/retention.ts and worker E2E cross-scope retention tests                  |
 
 
@@ -82,21 +82,22 @@ Sprint 08 establishes the official, production-grade LinkedIn integration in XLR
 | Identity Resolution | OpenID Connect `/v2/userinfo`; immutable `sub` claim truthfully represented as non-KYC account identifier |
 | Asset Discovery | Discovers administered organizations via `/rest/organizationAcls?q=roleAssignee`; stores in `provider_authorization_assets` |
 | Asset Selection | User explicitly chooses organization assets; isolated per scope with IDOR checks (`(scope_id, platform_id, verified_external_id)`) |
-| Dynamic Capabilities | Role-sensitive capability matrix (`ADMINISTRATOR` vs `ANALYST`); unpermitted features truthfully marked `APP_REVIEW_REQUIRED` / `UNAVAILABLE` |
-| Ingestion Pagination | 2-page Posts API pagination (`start`/`count` cursors), Social Actions comments, and follower metrics |
-| Webhooks | HMAC-SHA256 challenge-response handshake (`GET`) and notification verification (`POST` with `X-LI-Signature`, `@CsrfExempt()`) |
+| Dynamic Capabilities | Product-access-aware capability matrix; follower identity lists `UNAVAILABLE`; audience insights gated on implemented/approved follower-statistics access |
+| Ingestion Pagination | 2-page Posts API pagination (`start`/`count` cursors), Social Actions comments, and truth-preserving aggregate metrics |
+| Webhooks | HMAC-SHA256 challenge-response handshake (`GET`) and official raw-body notification verification (`POST` with bare hex `X-LI-Signature`, `@CsrfExempt()`) |
+| Event Subscriptions | Local Event Subscription API adapter and persistence for organization social action notifications; live registration/access blocked externally |
 | Worker Ingestion | Durable webhook receipt outbox, BullMQ worker asset resolution, multi-page post sync, follower statistics snapshot |
 | Error Handling | 401 reauth stop, 403 role loss / access control transitions connection to `DEGRADED`, 429 rate limit backoff |
-| Data Retention | Migration `0007_linkedin_retention_policies.sql` + `purgeExpiredProviderData`: member 24h, org 56d, metrics 30d, receipts 7d |
+| Data Retention | Forward migration `0008_linkedin_retention_subscriptions_truthfulness.sql` + record-level `purgeExpiredProviderData`: authenticated member no provider duration limit, other-member profile 24h, member social activity 48h, organization social activity six weeks or six months when authenticated-org condition applies, organization profile eight weeks, admin/reporting one year, webhook receipts under `XLRRANK_OPERATIONAL_RETENTION` |
 
 ### Evidence Matrix
 
 | Gate / Test Suite | Result | Details |
 |---|---|---|
-| Database Migrations & Retention | PASS | 11 passed, 1 skipped. Migration 0007 clean forward apply, constraint updates, retention purge tests |
-| Social-Core Contract Suite | PASS | 20 passed. Version 202608, Rest.li 2.0.0, dynamic capabilities, posts/comments/metrics pagination, HMAC signatures |
-| API OAuth & Webhook E2E | PASS | 6 passed. Start OAuth, code exchange, OIDC identity, org discovery, asset selection, IDOR denial, webhook challenge/delivery |
-| Worker Ingestion & Retention E2E | PASS | 15 passed. Real PostgreSQL + Redis + BullMQ + child worker. Posts, comments, metrics, webhook dispatch, retention purge |
+| Database Migrations & Retention | PASS | 11 passed, 1 skipped. Forward migration 0008, nullable no-duration-limit policy model, retention purge tests |
+| Social-Core Contract Suite | PASS | 21 passed. Version 202608, Rest.li 2.0.0, dynamic capabilities, posts/comments/metrics pagination, official webhook signatures, event subscriptions |
+| API OAuth & Webhook E2E | PASS | Focused LinkedIn pass. Start OAuth, code exchange, OIDC identity, org discovery, asset selection, IDOR denial, webhook fail-closed delivery, subscription gating |
+| Worker Ingestion & Retention E2E | PASS | Focused LinkedIn + retention pass. Real PostgreSQL + Redis + BullMQ + child worker. Posts, comments, metrics, webhook dispatch, cross-scope retention purge |
 | Monorepo Build & Types | PASS | 17/17 packages built, 26/26 typecheck tasks passed, 12/12 lint tasks passed (0 errors), 0 prod audit vulnerabilities |
 | Live Provider Gate | BLOCKED_EXTERNAL | No live LinkedIn Partner credentials or Community Management API approvals supplied; production ready: NO |
 
