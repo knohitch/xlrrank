@@ -21,7 +21,7 @@ test(
       "refusing to reset a database that is not the dedicated xlrrank_audit database",
     );
 
-    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+    await pool.query("DROP SCHEMA IF EXISTS drizzle CASCADE; DROP SCHEMA public CASCADE; CREATE SCHEMA public");
     await runMigrations();
 
     const tables = await pool.query(
