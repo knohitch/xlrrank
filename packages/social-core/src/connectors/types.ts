@@ -41,6 +41,7 @@ export interface OAuthTokenExchangeRequest {
   code: string;
   codeVerifier: string;
   redirectUri: string;
+  requestedScopes: string[];
 }
 
 export interface OAuthTokenRefreshRequest {

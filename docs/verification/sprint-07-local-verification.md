@@ -29,6 +29,7 @@ Live verification remains `BLOCKED_EXTERNAL` because no Meta app credentials, ap
 - Generic OAuth start resolves the configured connector auth-mode contract before scope normalization. Requested scopes outside the selected mode's default/allowed set are rejected, so Facebook Login scopes cannot leak into Instagram Login and Instagram Login scopes cannot leak into Facebook Login.
 - Direct Instagram Login token lifecycle now performs short-lived code exchange, long-lived token extension, and long-lived token refresh through the documented Instagram endpoints. Refresh support is claimed only for that executable fixture path.
 - Direct Instagram Login capability evaluation is mode-specific: profile, owned media, comments, and profile aggregate metrics require `instagram_business_*` grants; insights, mentions, business discovery, hashtag discovery, followers actor list, and following actor list remain unavailable/not claimed because there is no executable connector support in this closure.
+- Granted OAuth scopes are now source-of-truth based. Provider-returned scopes win when present; otherwise adapters fall back only to the exact normalized scopes stored in the OAuth transaction. Direct Instagram Login no longer manufactures `instagram_business_manage_insights` when only `instagram_business_basic` and `instagram_business_manage_comments` were requested.
 - Corrected metrics semantics: profile/public aggregate metrics are not represented as Page/Instagram Insights, and `fan_count` is not used as content count.
 - Added opaque cursor pagination for Facebook and Instagram comments.
 - Added durable webhook processing: valid receipt, durable outbox job `social.webhook.process` v1 with only `receiptId`, BullMQ dispatch, worker asset resolution, normal social sync enqueue, and receipt state transition to `PROCESSED` or `IGNORED`.
@@ -50,6 +51,7 @@ Results:
 - Meta connector contract: PASS, including direct Instagram Login Graph-host isolation, `/me` identity, media pagination, comment pagination, and token extension/refresh.
 - Meta OAuth shared grant, asset selection, AAD, and IDOR E2E: PASS.
 - Direct Instagram Login OAuth E2E: PASS, including Instagram-specific scopes, token exchange/extension, provider authorization asset persistence, AAD, personal scope isolation, organization scope isolation, and wrong-user denial.
+- Direct Instagram Login granted-scope truthfulness: PASS. The two-scope request persists exactly `instagram_business_basic` and `instagram_business_manage_comments`; the full allowed set persists only when explicitly requested.
 - Meta webhook signature/dedupe E2E: PASS.
 - Meta webhook worker E2E: PASS.
 - Facebook worker ingestion: PASS.

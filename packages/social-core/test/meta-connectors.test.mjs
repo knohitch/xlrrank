@@ -282,8 +282,15 @@ test("Facebook Pages connector handles OAuth, assets, pagination, and normalizat
     assert.equal(url.pathname, "/v26.0/dialog/oauth");
     assert.equal(url.searchParams.get("scope"), "pages_show_list,pages_read_engagement");
 
-    const token = await oauth.exchangeAuthorizationCode({ providerConfig, code: "code", codeVerifier: "unused", redirectUri: providerConfig.redirectUri });
+    const token = await oauth.exchangeAuthorizationCode({
+      providerConfig,
+      code: "code",
+      codeVerifier: "unused",
+      redirectUri: providerConfig.redirectUri,
+      requestedScopes: ["pages_show_list", "pages_read_engagement"],
+    });
     assert.equal(token.accessToken, "meta-access-1");
+    assert.ok(token.grantedScopes.includes("read_insights"));
     const assets = await connector.listAssets(ctx("facebook", "page-1").credentials);
     assert.deepEqual(assets.map((asset) => asset.assetId), ["page-1", "ig-1", "page-2"]);
 
@@ -390,12 +397,12 @@ test("Instagram connector executes direct Instagram Login against Instagram Grap
       code: "ig-code",
       codeVerifier: "unused",
       redirectUri: providerConfig.redirectUri,
+      requestedScopes: contract.defaultScopes,
     });
     assert.equal(exchanged.accessToken, "ig-long-token");
     assert.equal(exchanged.refreshToken, "ig-long-token");
     assert.deepEqual(exchanged.grantedScopes, [
       "instagram_business_basic",
-      "instagram_business_manage_insights",
       "instagram_business_manage_comments",
     ]);
 

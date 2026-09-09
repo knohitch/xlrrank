@@ -270,7 +270,7 @@ export class FacebookConnector extends BaseSocialConnector {
       code: request.code,
     });
     const response = await this.client.postForm<{ access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown }>("/oauth/access_token", form, { signal });
-    return tokenResult(response.body, FACEBOOK_SCOPES);
+    return tokenResult(response.body, request.requestedScopes);
   }
 
   private async refreshAccessToken(request: OAuthTokenRefreshRequest, signal?: AbortSignal): Promise<OAuthTokenResult> {
@@ -281,7 +281,7 @@ export class FacebookConnector extends BaseSocialConnector {
       fb_exchange_token: request.refreshToken,
     });
     const response = await this.client.postForm<{ access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown }>("/oauth/access_token", form, { signal });
-    return tokenResult(response.body, FACEBOOK_SCOPES);
+    return tokenResult(response.body, []);
   }
 
   private assertAvailable(capability: ConnectorCapability, context?: ConnectorOperationContext): void {

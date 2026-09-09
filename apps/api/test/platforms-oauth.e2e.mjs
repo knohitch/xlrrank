@@ -589,7 +589,11 @@ test("Meta OAuth E2E: shared grant, multi-asset selection, AAD, and IDOR", { ski
 
 test("Instagram Login OAuth E2E: direct auth mode, asset, AAD, and scope isolation", { skip }, async () => {
   await reset();
-  const [userA, userB] = await Promise.all([user("ig-login-a@example.test"), user("ig-login-b@example.test")]);
+  const [userA, userB, userC] = await Promise.all([
+    user("ig-login-a@example.test"),
+    user("ig-login-b@example.test"),
+    user("ig-login-c@example.test"),
+  ]);
   const instagramPlatformId = await metaPlatform("instagram");
   await metaProviderConfig(instagramPlatformId, "instagram", { authMode: "INSTAGRAM_LOGIN" });
 
@@ -650,9 +654,9 @@ test("Instagram Login OAuth E2E: direct auth mode, asset, AAD, and scope isolati
   assert.equal(grant.provider_user_id, "ig-direct-a");
   assert.deepEqual(grant.granted_scopes, [
     "instagram_business_basic",
-    "instagram_business_manage_insights",
     "instagram_business_manage_comments",
   ]);
+  assert.equal(grant.granted_scopes.includes("instagram_business_manage_insights"), false);
   const grantPlain = JSON.parse(shared.decryptSecret(
     grant.credentials_encrypted,
     undefined,
@@ -664,6 +668,10 @@ test("Instagram Login OAuth E2E: direct auth mode, asset, AAD, and scope isolati
   ));
   assert.equal(grantPlain.accessToken, "ig-long-token");
   assert.equal(grantPlain.metadata.authMode, "INSTAGRAM_LOGIN");
+  assert.deepEqual(grantPlain.scopes, [
+    "instagram_business_basic",
+    "instagram_business_manage_comments",
+  ]);
 
   const assetRow = (
     await pool.query(
@@ -691,6 +699,10 @@ test("Instagram Login OAuth E2E: direct auth mode, asset, AAD, and scope isolati
   ));
   assert.equal(assetPlain.accessToken, "ig-long-token");
   assert.equal(assetPlain.metadata.authMode, "INSTAGRAM_LOGIN");
+  assert.deepEqual(assetPlain.scopes, [
+    "instagram_business_basic",
+    "instagram_business_manage_comments",
+  ]);
 
   const connection = (
     await pool.query(
@@ -700,6 +712,34 @@ test("Instagram Login OAuth E2E: direct auth mode, asset, AAD, and scope isolati
   assert.equal(connection.credentials_encrypted.includes("ig-long-token"), false);
   assert.equal(JSON.stringify(connection.provider_metadata).includes("ig-long-token"), false);
   assert.equal(connection.provider_metadata.authMode, "INSTAGRAM_LOGIN");
+  assert.deepEqual(connection.provider_metadata.grantedScopes, [
+    "instagram_business_basic",
+    "instagram_business_manage_comments",
+  ]);
+  assert.equal(connection.provider_metadata.grantedCapabilities.metrics, "AVAILABLE");
+
+  const fullStart = await service.startOAuth("instagram", userC, {
+    requestedScopes: [
+      "instagram_business_basic",
+      "instagram_business_manage_insights",
+      "instagram_business_manage_comments",
+    ],
+  });
+  const fullCallback = await service.handleOAuthCallback("instagram", userC, {
+    state: stateFrom(fullStart),
+    code: "ig-full-code",
+  });
+  const fullGrant = (
+    await pool.query(
+      "SELECT granted_scopes FROM provider_authorizations WHERE id = $1",
+      [fullCallback.authorizationId],
+    )
+  ).rows[0];
+  assert.deepEqual(fullGrant.granted_scopes, [
+    "instagram_business_basic",
+    "instagram_business_manage_insights",
+    "instagram_business_manage_comments",
+  ]);
 
   const orgA = await organizationWithManager(userA, "Instagram Login Org A");
   const orgB = await organizationWithManager(userB, "Instagram Login Org B");

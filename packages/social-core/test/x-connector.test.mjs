@@ -230,6 +230,7 @@ test("X OAuth adapter builds PKCE URL and exchanges authorization codes", async 
       code: "fixture-code",
       codeVerifier: "verifier",
       redirectUri: providerConfig.redirectUri,
+      requestedScopes: ["tweet.read", "users.read", "offline.access"],
     });
     assert.equal(token.accessToken, "fixture-access-1");
     assert.equal(token.refreshToken, "fixture-refresh-1");

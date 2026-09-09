@@ -383,7 +383,7 @@ export class InstagramConnector extends BaseSocialConnector {
       code: request.code,
     });
     const response = await this.client.postForm<{ access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown }>("/oauth/access_token", form, { signal });
-    return tokenResult(response.body, INSTAGRAM_SCOPES);
+    return tokenResult(response.body, request.requestedScopes);
   }
 
   private async refreshAccessToken(request: OAuthTokenRefreshRequest, signal?: AbortSignal): Promise<OAuthTokenResult> {
@@ -398,7 +398,7 @@ export class InstagramConnector extends BaseSocialConnector {
         query,
         signal,
       );
-      return tokenResult(response, INSTAGRAM_LOGIN_SCOPES);
+      return tokenResult(response, []);
     }
     const form = new URLSearchParams({
       grant_type: "fb_exchange_token",
@@ -407,7 +407,7 @@ export class InstagramConnector extends BaseSocialConnector {
       fb_exchange_token: request.refreshToken,
     });
     const response = await this.client.postForm<{ access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown }>("/oauth/access_token", form, { signal });
-    return tokenResult(response.body, INSTAGRAM_SCOPES);
+    return tokenResult(response.body, []);
   }
 
   private async exchangeInstagramLoginCode(
@@ -434,9 +434,15 @@ export class InstagramConnector extends BaseSocialConnector {
       query,
       signal,
     );
+    const providerScope =
+      typeof longLived.scope === "string" ? longLived.scope : shortLived.scope;
     return tokenResult(
-      { ...longLived, scope: INSTAGRAM_LOGIN_SCOPES.join(","), user_id: shortLived.user_id },
-      INSTAGRAM_LOGIN_SCOPES,
+      {
+        ...longLived,
+        ...(typeof providerScope === "string" ? { scope: providerScope } : {}),
+        user_id: shortLived.user_id,
+      },
+      request.requestedScopes,
     );
   }
 

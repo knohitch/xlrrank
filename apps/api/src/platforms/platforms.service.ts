@@ -398,6 +398,7 @@ export class PlatformsService {
       code: input.code,
       codeVerifier: transaction.pkceVerifier,
       redirectUri: callbackProviderConfig.redirectUri,
+      requestedScopes: transaction.requestedScopes,
     });
     const credentials: ConnectorCredentials = {
       accessToken: tokenResult.accessToken,

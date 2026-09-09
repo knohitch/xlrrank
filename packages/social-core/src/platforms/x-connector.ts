@@ -701,7 +701,7 @@ export class XConnector extends BaseSocialConnector {
       form,
       requestOptions,
     );
-    return tokenResultFrom(response.body);
+    return tokenResultFrom(response.body, request.requestedScopes);
   }
 
   private async refreshAccessToken(
@@ -730,7 +730,7 @@ export class XConnector extends BaseSocialConnector {
       form,
       requestOptions,
     );
-    return tokenResultFrom(response.body);
+    return tokenResultFrom(response.body, []);
   }
 
   private async getAuthenticatedProfileOrThrow(
@@ -931,7 +931,7 @@ function assertProviderConfig(config: ProviderApplicationConfig): void {
   }
 }
 
-function tokenResultFrom(body: Record<string, unknown>): OAuthTokenResult {
+function tokenResultFrom(body: Record<string, unknown>, requestedScopes: string[]): OAuthTokenResult {
   const accessToken = stringOrUndefined(body.access_token);
   if (!accessToken)
     throw new MalformedProviderResponseError("x", "X token response missing access token");
@@ -939,7 +939,7 @@ function tokenResultFrom(body: Record<string, unknown>): OAuthTokenResult {
   const scope = stringOrUndefined(body.scope);
   const result: OAuthTokenResult = {
     accessToken,
-    grantedScopes: scope ? scope.split(/\s+/).filter(Boolean) : [],
+    grantedScopes: scope ? scope.split(/\s+/).filter(Boolean) : requestedScopes,
     rawProviderMetadata: redactProviderMetadata({
       tokenType: body.token_type,
       expiresIn,
