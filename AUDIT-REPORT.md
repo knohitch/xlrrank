@@ -4,7 +4,9 @@
 
 **NOT PRODUCTION READY**
 
-Foundation security has been hardened. All known dependency vulnerabilities are resolved. Docker images build successfully. The verification pipeline is trustworthy. Worker/reference-provider social ingestion is implemented for Sprint 05 evidence. Sprint 06 adds a production X OAuth/API connector with fixture-backed contract and remote CI gates. Live X provider verification remains externally blocked because no real X developer app credentials/access were supplied. Other third-party social connectors, AI providers, intelligence engines, billing, extension production integration, and full deployment remain unverified.
+Foundation security has been hardened. All known dependency vulnerabilities are resolved. Docker images build successfully. The verification pipeline is trustworthy. Worker/reference-provider social ingestion is implemented for Sprint 05 evidence. Sprint 06 added a production X OAuth/API connector with fixture-backed contract and remote CI gates. Sprint 07 added production Facebook and Instagram connectors with Facebook Login and direct Instagram Login auth modes, asset discovery, asset selection, opaque comment pagination, and HMAC-SHA256 webhooks. Sprint 08 adds a production LinkedIn Marketing API 202608 / Rest.li 2.0.0 connector with OIDC identity, organization ACL discovery, Posts API pagination, Social Actions comments, follower metrics, HMAC-SHA256 webhooks, BullMQ worker ingestion, and cross-scope data retention policies.
+
+Live provider verification remains externally blocked for all third-party social providers (X, Facebook, Instagram, LinkedIn) because no live production credentials were supplied. Remote CI is `BLOCKED_INFRA` due to exhausted workflow run quota. Worker Docker runtime is `BLOCKED_LOCAL_INFRA`. Other third-party social connectors (Reddit), AI providers, intelligence engines, billing, extension production integration, and full deployment remain unverified.
 
 ---
 
@@ -48,6 +50,13 @@ Foundation security has been hardened. All known dependency vulnerabilities are 
 | Connector Contract            | VERIFIED | Local HTTP fixture connector gate for factory isolation, auth, pagination, error taxonomy            |
 | Worker Ingestion E2E          | VERIFIED | Real worker process with PostgreSQL, Redis, BullMQ, local HTTP reference provider, crash/retry tests |
 | Worker Docker Runtime         | VERIFIED | Built worker image readiness check against PostgreSQL and Redis                                      |
+| X Connector Contract          | VERIFIED | Local HTTP fixture contract gate for X OAuth 2.0 PKCE, API v2, pagination, rate limits, error taxonomy |
+| Meta Connector Contract       | VERIFIED | Local HTTP fixture contract gate for Graph v26.0 Facebook & Instagram connectors                      |
+| LinkedIn Connector Contract   | VERIFIED | packages/social-core/test/linkedin-connector.test.mjs (20/20 pass, Version 202608, Rest.li 2.0.0)      |
+| LinkedIn OAuth & Asset E2E    | VERIFIED | apps/api/test/platforms-oauth.e2e.mjs (6/6 pass with real PostgreSQL, OIDC, org ACLs, webhooks)        |
+| LinkedIn Worker Ingestion E2E | VERIFIED | apps/worker/test/worker-ingestion.e2e.mjs (15/15 pass with real PostgreSQL + Redis + real worker)       |
+| Data Retention Purge          | VERIFIED | packages/database/src/social/retention.ts and worker E2E cross-scope retention tests                  |
+
 
 ### Dependency Audit Status
 
@@ -56,6 +65,83 @@ Foundation security has been hardened. All known dependency vulnerabilities are 
 | High/Critical blocking gate              | PASS   | pnpm audit --prod --audit-level=high  |
 | Full production dependency audit         | PASS   | pnpm audit --prod                     |
 | Current known production vulnerabilities | 0      | 0 critical, 0 high, 0 moderate, 0 low |
+
+---
+
+## Sprint 08 — LinkedIn Production Connector & Data Retention
+
+Sprint 08 establishes the official, production-grade LinkedIn integration in XLRrank adhering strictly to official Microsoft / LinkedIn documentation crawled and verified on 2026-09-09.
+
+### Architecture & Capabilities
+
+| Area | Implementation |
+|---|---|
+| Target API & Protocol | LinkedIn Marketing Developer Platform Version `202608`, Rest.li Protocol `2.0.0` (`X-Restli-Protocol-Version`, `Linkedin-Version`) |
+| Transport & SSRF Safety | Strict URL host enforcement (`https://api.linkedin.com/rest/`), blocking private IP ranges and unauthorized hosts |
+| Authentication | 3-legged member OAuth 2.0 (`/oauth/v2/authorization`, `/oauth/v2/accessToken`), encrypted tokens with AAD binding |
+| Identity Resolution | OpenID Connect `/v2/userinfo`; immutable `sub` claim truthfully represented as non-KYC account identifier |
+| Asset Discovery | Discovers administered organizations via `/rest/organizationAcls?q=roleAssignee`; stores in `provider_authorization_assets` |
+| Asset Selection | User explicitly chooses organization assets; isolated per scope with IDOR checks (`(scope_id, platform_id, verified_external_id)`) |
+| Dynamic Capabilities | Role-sensitive capability matrix (`ADMINISTRATOR` vs `ANALYST`); unpermitted features truthfully marked `APP_REVIEW_REQUIRED` / `UNAVAILABLE` |
+| Ingestion Pagination | 2-page Posts API pagination (`start`/`count` cursors), Social Actions comments, and follower metrics |
+| Webhooks | HMAC-SHA256 challenge-response handshake (`GET`) and notification verification (`POST` with `X-LI-Signature`, `@CsrfExempt()`) |
+| Worker Ingestion | Durable webhook receipt outbox, BullMQ worker asset resolution, multi-page post sync, follower statistics snapshot |
+| Error Handling | 401 reauth stop, 403 role loss / access control transitions connection to `DEGRADED`, 429 rate limit backoff |
+| Data Retention | Migration `0007_linkedin_retention_policies.sql` + `purgeExpiredProviderData`: member 24h, org 56d, metrics 30d, receipts 7d |
+
+### Evidence Matrix
+
+| Gate / Test Suite | Result | Details |
+|---|---|---|
+| Database Migrations & Retention | PASS | 11 passed, 1 skipped. Migration 0007 clean forward apply, constraint updates, retention purge tests |
+| Social-Core Contract Suite | PASS | 20 passed. Version 202608, Rest.li 2.0.0, dynamic capabilities, posts/comments/metrics pagination, HMAC signatures |
+| API OAuth & Webhook E2E | PASS | 6 passed. Start OAuth, code exchange, OIDC identity, org discovery, asset selection, IDOR denial, webhook challenge/delivery |
+| Worker Ingestion & Retention E2E | PASS | 15 passed. Real PostgreSQL + Redis + BullMQ + child worker. Posts, comments, metrics, webhook dispatch, retention purge |
+| Monorepo Build & Types | PASS | 17/17 packages built, 26/26 typecheck tasks passed, 12/12 lint tasks passed (0 errors), 0 prod audit vulnerabilities |
+| Live Provider Gate | BLOCKED_EXTERNAL | No live LinkedIn Partner credentials or Community Management API approvals supplied; production ready: NO |
+
+---
+
+## Sprint 07 — Meta Production Connectors (Facebook & Instagram)
+
+Sprint 07 establishes the production Graph API `v26.0` connectors for Facebook and Instagram.
+
+### Architecture & Capabilities
+
+| Area | Implementation |
+|---|---|
+| Target API | Meta Graph API `v26.0` (`graph.facebook.com` and `graph.instagram.com`) |
+| Auth Modes | Facebook Login (`FACEBOOK_LOGIN`) for Pages & Page-linked Instagram accounts; Instagram Login (`INSTAGRAM_LOGIN`) for direct Instagram accounts |
+| CSRF & Webhooks | Dedicated `@CsrfExempt()` decorator for `POST /webhook`; challenge-response verification with verify token; HMAC-SHA256 signature verification |
+| Asset Discovery & Selection | Facebook Login discovers Pages and linked Instagram accounts; user selects assets; stored in `provider_authorization_assets` |
+| Token Lifecycle | Short-lived code exchange, long-lived token exchange (`fb_exchange_token` / Instagram token exchange), token refresh |
+| Ingestion & Comments | Page/IG media pagination, opaque cursor comment pagination, profile aggregate metrics |
+| Worker Ingestion | Durable webhook receipt outbox, BullMQ worker resolution, real child worker ingestion |
+
+### Evidence Matrix
+
+| Gate / Test Suite | Result | Details |
+|---|---|---|
+| Meta Contract Suite | PASS | Graph v26.0 targets, Facebook Login & Instagram Login isolation, comment pagination, token refresh |
+| API OAuth & Asset E2E | PASS | Shared authorization grant, asset discovery, asset selection, IDOR protection, Instagram Login E2E |
+| Worker Ingestion E2E | PASS | Real PostgreSQL + Redis + BullMQ worker ingestion for Facebook Pages, Instagram via Facebook Login, Instagram Login |
+| Live Provider Gate | BLOCKED_EXTERNAL | No live Meta app credentials or approved permissions supplied; production ready: NO |
+
+---
+
+## Sprint 06 — X Production Connector
+
+Sprint 06 adds a production X OAuth 2.0 and API v2 connector with fixture-backed contracts and worker pipeline integration.
+
+### Architecture & Capabilities
+
+| Area | Implementation |
+|---|---|
+| Target API | X API v2 with OAuth 2.0 PKCE (`code_challenge_method=S256`) |
+| Credentials & Security | Client secrets encrypted with AES-256-GCM and AAD; PKCE transaction state single-use with TTL |
+| Token Lifecycle | Refresh token rotation and worker reauthentication handling |
+| Ingestion | Tweets, mentions, user timeline pagination, metrics snapshots |
+| Worker Integration | Outbox -> BullMQ -> real worker -> X connector fixture -> normalized persistence |
 
 ---
 
@@ -238,12 +324,12 @@ Local browser E2E execution was not completed because Docker is not installed on
 | Support system               | VERIFIED                         | Ticket portal, internal note filtering, and RBAC tested by Playwright suite in CI                                                                    |
 | Notifications                | SCAFFOLD ONLY                    | Service + controller exist, no notification triggers                                                                                                 |
 | X connector                  | CONTRACT VERIFIED / LIVE BLOCKED | OAuth 2.0 PKCE adapter, API v2 transport, normalization, rate-limit/error handling, and worker fixture gates; live provider credentials not supplied |
-| Instagram connector          | INTERFACE ONLY                   | Same pattern                                                                                                                                         |
-| Facebook connector           | INTERFACE ONLY                   | Same pattern                                                                                                                                         |
-| LinkedIn connector           | INTERFACE ONLY                   | Same pattern                                                                                                                                         |
+| Instagram connector          | CONTRACT VERIFIED / LIVE BLOCKED | Graph API v26.0, Facebook Login & direct Instagram Login auth modes, asset discovery/selection, comments, webhooks; live credentials not supplied   |
+| Facebook connector           | CONTRACT VERIFIED / LIVE BLOCKED | Graph API v26.0, Facebook Login, Page discovery/selection, comments, webhooks; live credentials not supplied                                         |
+| LinkedIn connector           | CONTRACT VERIFIED / LIVE BLOCKED | Version 202608, Rest.li 2.0.0, OIDC identity, org ACLs, Posts pagination, comments, follower stats, webhooks, worker ingestion, retention; live credentials not supplied |
 | Reddit connector             | INTERFACE ONLY                   | Same pattern                                                                                                                                         |
-| Ingestion                    | VERIFIED PARTIAL                 | Reference-provider social sync executes through PostgreSQL, Redis, BullMQ, real worker                                                               |
-| Workers                      | VERIFIED PARTIAL                 | Social ingestion processor implemented; intelligence/future queues remain fail-closed                                                                |
+| Ingestion                    | VERIFIED PARTIAL                 | Reference, X, Meta, and LinkedIn social sync executes through PostgreSQL, Redis, BullMQ, real worker                                                 |
+| Workers                      | VERIFIED PARTIAL                 | Social ingestion and webhook processors implemented; intelligence/future queues remain fail-closed                                                   |
 | Normalized social model      | VERIFIED                         | Types defined, DB schema complete                                                                                                                    |
 | Identity resolution          | SCAFFOLD ONLY                    | Algorithm exists, not tested with real data                                                                                                          |
 | Social DNA                   | SCAFFOLD ONLY                    | Generator exists, not tested end-to-end                                                                                                              |
@@ -323,9 +409,12 @@ No active HIGH defects are confirmed in the Sprint 01-05 foundation gates. Produ
 ## 7. Missing Verification
 
 - Live X provider OAuth/read/search/worker verification with real X developer app credentials/access
-- Meta/LinkedIn/Reddit social connector authentication flows
-- Social connector production integration beyond X contract fixtures
+- Live Meta (Facebook & Instagram) provider OAuth/read/webhook verification with real developer app credentials/access
+- Live LinkedIn provider OAuth/read/webhook verification with real developer app credentials and Partner Program approvals
+- Reddit social connector implementation and verification
 - Live third-party social ingestion through production provider APIs
+- Remote CI infrastructure quota exhaustion (`BLOCKED_INFRA`)
+- Worker Docker runtime local daemon availability (`BLOCKED_LOCAL_INFRA`)
 - AI provider actual API calls (no test API keys in CI)
 - AI runtime/provider configuration
 - Persistent dynamic model registry
@@ -346,10 +435,12 @@ No active HIGH defects are confirmed in the Sprint 01-05 foundation gates. Produ
 | Integration      | Status                                    | Reason                                                                                                                |
 | ---------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | X (Twitter)      | CONTRACT VERIFIED / LIVE BLOCKED_EXTERNAL | Production OAuth/API implementation exists; no real X developer app credentials/access supplied for live verification |
-| Instagram        | NOT PRODUCTION VERIFIED                   | No test credentials, requires Facebook app review                                                                     |
-| Facebook         | NOT PRODUCTION VERIFIED                   | No test credentials, requires app review                                                                              |
-| LinkedIn         | NOT PRODUCTION VERIFIED                   | No test credentials, requires app review                                                                              |
+| Instagram        | CONTRACT VERIFIED / LIVE BLOCKED_EXTERNAL | Graph v26.0 / Instagram Login implementation exists; no real test credentials supplied                                |
+| Facebook         | CONTRACT VERIFIED / LIVE BLOCKED_EXTERNAL | Graph v26.0 implementation exists; no real test credentials supplied                                                  |
+| LinkedIn         | CONTRACT VERIFIED / LIVE BLOCKED_EXTERNAL | Marketing API 202608 / Rest.li 2.0.0 implementation exists; no real credentials / partner approvals supplied          |
 | Reddit           | NOT PRODUCTION VERIFIED                   | No test credentials                                                                                                   |
+| Remote CI        | BLOCKED_INFRA                             | GitHub Actions workflow run quota exhausted; all local test matrices pass                                             |
+| Worker Docker    | BLOCKED_LOCAL_INFRA                       | Docker runtime daemon unavailable on local host; built image verification verified in earlier CI                       |
 | OpenAI           | IMPLEMENTED, NOT VERIFIED                 | Real HTTP implementation, no test API key                                                                             |
 | Anthropic        | IMPLEMENTED, NOT VERIFIED                 | Real HTTP implementation, no test API key                                                                             |
 | DeepSeek         | IMPLEMENTED, NOT VERIFIED                 | OpenAI-compatible adapter                                                                                             |
@@ -366,7 +457,7 @@ No active HIGH defects are confirmed in the Sprint 01-05 foundation gates. Produ
 2. ~~**Auth/User/Admin/Support**~~ — CI VERIFIED on current branch
 3. ~~**Persistence/Data ownership**~~ — DONE (Sprint 04)
 4. ~~**Worker ingestion reliability**~~ — DONE for reference-provider path (Sprint 05)
-5. **Social connector framework** — First live connector
+5. ~~**Social connector framework**~~ — CONTRACT VERIFIED (Reference, X, Meta, LinkedIn; live credentials blocked)
 6. **AI provider runtime** — At least one real provider verified
 7. **Dynamic model discovery** — Real model enumeration
 8. **Routing/Fallback/Language** — End-to-end AI routing

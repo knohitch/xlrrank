@@ -388,6 +388,155 @@ function createInstagramLoginWorkerFixtureServer() {
   };
 }
 
+function createLinkedInWorkerFixtureServer() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    requests.push({ path: url.pathname, params: Object.fromEntries(url.searchParams) });
+    res.setHeader("content-type", "application/json");
+
+    const auth = req.headers.authorization ?? "";
+    if (!auth.startsWith("Bearer li-access-worker")) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ status: 401, message: "Unauthorized token" }));
+      return;
+    }
+
+    if (url.pathname === "/v2/userinfo") {
+      res.end(
+        JSON.stringify({
+          sub: "li-worker-member-1",
+          name: "LinkedIn Worker Member",
+          email: "worker-member@example.com",
+        }),
+      );
+      return;
+    }
+
+    if (url.pathname === "/rest/organizations/12345") {
+      res.end(
+        JSON.stringify({
+          id: 12345,
+          localizedName: "Acme Corp Worker",
+          vanityName: "acme-corp-worker",
+          primaryOrganizationType: "COMPANY",
+        }),
+      );
+      return;
+    }
+
+    if (url.pathname === "/rest/posts") {
+      const start = Number(url.searchParams.get("start") ?? "0");
+      if (start === 0) {
+        res.end(
+          JSON.stringify({
+            elements: [
+              {
+                id: "urn:li:share:10001",
+                commentary: "First LinkedIn test post",
+                createdAt: Date.parse("2026-03-01T10:00:00.000Z"),
+                lifecycleState: "PUBLISHED",
+                visibility: "PUBLIC",
+              },
+            ],
+            paging: {
+              start: 0,
+              count: 1,
+              total: 2,
+            },
+          }),
+        );
+        return;
+      }
+      if (start === 1) {
+        res.end(
+          JSON.stringify({
+            elements: [
+              {
+                id: "urn:li:share:10002",
+                commentary: "Second LinkedIn test post",
+                createdAt: Date.parse("2026-03-02T10:00:00.000Z"),
+                lifecycleState: "PUBLISHED",
+                visibility: "PUBLIC",
+              },
+            ],
+            paging: {
+              start: 1,
+              count: 1,
+              total: 2,
+            },
+          }),
+        );
+        return;
+      }
+      res.end(JSON.stringify({ elements: [], paging: { start: 2, count: 1, total: 2 } }));
+      return;
+    }
+
+    if (url.pathname.includes("/socialActions/") && url.pathname.endsWith("/comments")) {
+      res.end(
+        JSON.stringify({
+          elements: [
+            {
+              id: "comment-li-001",
+              actor: "urn:li:person:commenter-1",
+              message: { text: "Great post!" },
+              created: { time: Date.parse("2026-03-01T11:00:00.000Z") },
+            },
+          ],
+          paging: {
+            start: 0,
+            count: 1,
+            total: 1,
+          },
+        }),
+      );
+      return;
+    }
+
+    if (url.pathname.startsWith("/rest/networkSizes/")) {
+      res.end(JSON.stringify({ firstDegreeSize: 450 }));
+      return;
+    }
+
+    if (url.pathname === "/rest/organizationalEntityFollowerStatistics") {
+      res.end(
+        JSON.stringify({
+          elements: [{ totalFollowerCounts: 450 }],
+        }),
+      );
+      return;
+    }
+
+    if (url.pathname === "/rest/organizationalEntityShareStatistics") {
+      res.end(
+        JSON.stringify({
+          elements: [{ shareCounts: 12 }],
+        }),
+      );
+      return;
+    }
+
+    res.writeHead(404);
+    res.end(JSON.stringify({ message: `Not found: ${url.pathname}` }));
+  });
+
+  return {
+    requests,
+    async start() {
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("LinkedIn fixture server did not bind");
+      return `http://127.0.0.1:${address.port}`;
+    },
+    async stop() {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
 function xUser() {
   return {
     id: "9001",
@@ -590,6 +739,96 @@ async function createMetaProviderConfig(platformId, slug = "facebook", metadata 
         enabled = true
     `,
     [providerConfigId, platformId, encrypted, JSON.stringify({ webhookVerifyToken: "verify-token", ...metadata })],
+  );
+}
+
+async function createLinkedInConnection(assetId = "12345", options = {}) {
+  const user = await pool.query(
+    "INSERT INTO users (email, password_hash, display_name, status) VALUES ($1, 'hash', $2, 'ACTIVE') RETURNING id",
+    [`linkedin-${randomUUID()}@example.test`, "LinkedIn User"],
+  );
+  const platform = await pool.query(
+    "INSERT INTO platforms (slug, display_name, enabled) VALUES ('linkedin', 'LinkedIn', true) ON CONFLICT (slug) DO UPDATE SET enabled = true RETURNING id",
+  );
+  const scope = await database.ensurePersonalScope(user.rows[0].id);
+  const connectionId = randomUUID();
+  const credentials = {
+    accessToken: options.accessToken ?? "li-access-worker",
+    scopes: [
+      "openid",
+      "profile",
+      "email",
+      "r_organization_social",
+      "rw_organization_admin",
+      "r_organization_admin",
+      "r_organization_social_feed",
+    ],
+    metadata: {
+      assetId,
+      providerAssetId: assetId,
+      ...(options.metadata ?? {}),
+    },
+  };
+  const encrypted = shared.encryptSecret(
+    JSON.stringify(credentials),
+    undefined,
+    shared.socialCredentialAssociatedData({
+      connectionId,
+      scopeId: scope.scopeId,
+      platformSlug: "linkedin",
+    }),
+  );
+  await pool.query(
+    `
+      INSERT INTO social_connections (
+        id, scope_id, platform_id, status, credentials_encrypted,
+        verified_external_id, verified_handle, provider_metadata
+      )
+      VALUES ($1, $2, $3, 'CONNECTED', $4, $5, $6, $7::jsonb)
+    `,
+    [
+      connectionId,
+      scope.scopeId,
+      platform.rows[0].id,
+      encrypted,
+      assetId,
+      `org-${assetId}`,
+      JSON.stringify({
+        providerAssetId: assetId,
+        assetType: "LINKEDIN_ORGANIZATION",
+        grantedScopes: credentials.scopes,
+      }),
+    ],
+  );
+  return { userId: user.rows[0].id, platformId: platform.rows[0].id, scope, connectionId };
+}
+
+async function createLinkedInProviderConfig(platformId, metadata = {}) {
+  const providerConfigId = randomUUID();
+  const encrypted = shared.encryptSecret(
+    "synthetic-linkedin-client-secret",
+    undefined,
+    shared.providerAppSecretAssociatedData({
+      providerConfigId,
+      platformSlug: "linkedin",
+      secretName: "clientSecret",
+    }),
+  );
+  await pool.query(
+    `
+      INSERT INTO provider_app_configurations (
+        id, platform_id, environment, client_id, client_secret_encrypted,
+        redirect_uri, enabled, metadata
+      )
+      VALUES ($1, $2, 'test', 'synthetic-linkedin-client-id', $3,
+        'https://app.example.test/platforms/linkedin/oauth/callback', true,
+        $4::jsonb)
+      ON CONFLICT (platform_id, environment) DO UPDATE SET
+        client_id = EXCLUDED.client_id,
+        client_secret_encrypted = EXCLUDED.client_secret_encrypted,
+        enabled = true
+    `,
+    [providerConfigId, platformId, encrypted, JSON.stringify({ ...metadata })],
   );
 }
 
@@ -1516,5 +1755,240 @@ test(
     );
     assert.equal(credentials.accessToken, "x-access-newer");
     assert.equal(credentials.refreshToken, "x-refresh-newer");
+  },
+);
+
+test(
+  "LinkedIn worker ingestion e2e: organization posts, pagination, comments, and follower metrics",
+  { skip },
+  async () => {
+    await reset();
+    const fixture = createLinkedInWorkerFixtureServer();
+    const baseUrl = await fixture.start();
+    let worker;
+    try {
+      const linkedInConn = await createLinkedInConnection("12345");
+      const request = await database.createSocialConnectionSyncRequest({
+        connectionId: linkedInConn.connectionId,
+        reason: "MANUAL",
+      });
+      assert.equal(request.accepted, true);
+
+      worker = await startWorker({
+        LINKEDIN_REST_BASE_URL: `${baseUrl}/rest`,
+      });
+
+      const completed = await waitForJob(request.jobId, ["COMPLETED"], 30_000);
+      assert.equal(completed.status, "COMPLETED");
+
+      // Verify posts were ingested across pages (total 2 posts)
+      const posts = await pool.query(
+        "SELECT external_id, body FROM social_content_items WHERE platform_id = $1 ORDER BY external_id",
+        [linkedInConn.platformId],
+      );
+      assert.equal(posts.rows.length, 2);
+      assert.equal(posts.rows[0].external_id, "urn:li:share:10001");
+      assert.equal(posts.rows[0].body, "First LinkedIn test post");
+      assert.equal(posts.rows[1].external_id, "urn:li:share:10002");
+      assert.equal(posts.rows[1].body, "Second LinkedIn test post");
+
+      // Verify observations in scope
+      const observations = await pool.query(
+        "SELECT count(*)::int AS count FROM social_content_observations WHERE scope_id = $1",
+        [linkedInConn.scope.scopeId],
+      );
+      assert.equal(observations.rows[0].count, 2);
+
+      // Verify connection updated
+      const updatedConn = (
+        await pool.query(
+          "SELECT status, last_sync_at, sync_error FROM social_connections WHERE id = $1",
+          [linkedInConn.connectionId],
+        )
+      ).rows[0];
+      assert.equal(updatedConn.status, "CONNECTED");
+      assert.ok(updatedConn.last_sync_at);
+      assert.equal(updatedConn.sync_error, null);
+
+      // Verify token secrecy
+      const jobs = await pool.query("SELECT payload::text AS payload FROM jobs");
+      assert.equal(jobs.rows.some((row) => row.payload.includes("li-access-worker")), false);
+    } finally {
+      if (worker) await stopWorker(worker);
+      await fixture.stop();
+    }
+  },
+);
+
+test(
+  "LinkedIn webhook worker e2e: receipt outbox resolves connected scopes and triggers sync",
+  { skip },
+  async () => {
+    await reset();
+    const fixture = createLinkedInWorkerFixtureServer();
+    const baseUrl = await fixture.start();
+    let worker;
+    try {
+      const connA = await createLinkedInConnection("12345");
+      const connB = await createLinkedInConnection("12345");
+      await createLinkedInProviderConfig(connA.platformId);
+
+      const { PlatformsService } = await import("../../api/dist/platforms/platforms.service.js");
+      const service = new PlatformsService({ record: async () => undefined });
+      const payload = {
+        organization: "urn:li:organization:12345",
+        action: "ORGANIZATION_SOCIAL_ACTION",
+        notificationId: "notif-worker-test-01",
+      };
+      const rawBody = JSON.stringify(payload);
+      const signature = createHmac("sha256", "synthetic-linkedin-client-secret")
+        .update(rawBody, "utf8")
+        .digest("hex");
+
+      const received = await service.receiveLinkedInWebhook(
+        connA.platformId,
+        signature,
+        payload,
+        rawBody,
+      );
+      assert.equal(received.duplicate, false);
+      assert.ok(received.receiptId);
+
+      worker = await startWorker({ LINKEDIN_REST_BASE_URL: `${baseUrl}/rest` });
+
+      await waitFor(async () => {
+        const result = await pool.query(
+          "SELECT status FROM webhook_receipts WHERE id = $1",
+          [received.receiptId],
+        );
+        return result.rows[0]?.status === "PROCESSED";
+      }, 30_000);
+
+      await waitFor(async () => {
+        const result = await pool.query(
+          `
+            SELECT count(*)::int AS count
+            FROM social_content_observations sco
+            JOIN social_connections sc ON sc.id = sco.connection_id
+            WHERE sc.id = ANY($1::uuid[])
+          `,
+          [[connA.connectionId, connB.connectionId]],
+        );
+        return result.rows[0]?.count === 4; // 2 posts * 2 connections
+      }, 30_000);
+
+      const receipt = (
+        await pool.query("SELECT metadata FROM webhook_receipts WHERE id = $1", [
+          received.receiptId,
+        ])
+      ).rows[0];
+      assert.equal(receipt.metadata.resolvedConnectionCount, 2);
+    } finally {
+      if (worker) await stopWorker(worker);
+      await fixture.stop();
+    }
+  },
+);
+
+test(
+  "Data retention: purgeExpiredProviderData purges aged LinkedIn data without affecting other scopes",
+  { skip },
+  async () => {
+    await reset();
+    const policies = await database.loadProviderRetentionPolicies("linkedin");
+    assert.ok(policies.length >= 4, "Expected at least 4 default LinkedIn retention policies");
+    const orgContentPolicy = policies.find((p) => p.dataCategory === "organization_content");
+    assert.ok(orgContentPolicy);
+    assert.equal(orgContentPolicy.maxRetentionSeconds, 4838400); // 56 days
+
+    // Create two connections in different scopes
+    const connA = await createLinkedInConnection("12345");
+    const connB = await createLinkedInConnection("12345");
+
+    // Insert author in social_external_accounts
+    const extAccountId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_external_accounts (id, platform_id, external_id, current_handle, display_name)
+        VALUES ($1, $2, '12345', 'acme-corp', 'Acme Corp')
+      `,
+      [extAccountId, connA.platformId],
+    );
+
+    // Insert a shared item in social_content_items
+    const contentItemId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_content_items (
+          id, scope_id, platform_id, author_external_account_id, external_id, body,
+          visibility, provider_created_at
+        )
+        VALUES ($1, NULL, $2, $3, 'li-retained-item-1', 'Retained post body',
+          'PUBLIC', now() - interval '60 days')
+      `,
+      [contentItemId, connA.platformId, extAccountId],
+    );
+
+    // In Scope A: Observation is 60 days old (expired beyond 56-day policy)
+    const obsAId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_content_observations (
+          id, scope_id, connection_id, content_item_id, visibility, observed_at,
+          normalization_version, adapter_version
+        )
+        VALUES ($1, $2, $3, $4, 'PUBLIC', now() - interval '60 days', '1', '1')
+      `,
+      [obsAId, connA.scope.scopeId, connA.connectionId, contentItemId],
+    );
+
+    // In Scope B: Observation is 5 days old (active, within 56-day policy)
+    const obsBId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_content_observations (
+          id, scope_id, connection_id, content_item_id, visibility, observed_at,
+          normalization_version, adapter_version
+        )
+        VALUES ($1, $2, $3, $4, 'PUBLIC', now() - interval '5 days', '1', '1')
+      `,
+      [obsBId, connB.scope.scopeId, connB.connectionId, contentItemId],
+    );
+
+    // Insert an expired webhook receipt (10 days old, exceeds 7 days policy)
+    const receiptId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO webhook_receipts (
+          id, provider_family, platform_id, dedupe_key, signature_valid,
+          status, payload, metadata, received_at
+        )
+        VALUES ($1, 'linkedin', $2, 'old-hook-dedupe', true,
+          'PROCESSED', '{}'::jsonb, '{}'::jsonb, now() - interval '10 days')
+      `,
+      [receiptId, connA.platformId],
+    );
+
+    // Execute purge
+    const purgeResult = await database.purgeExpiredProviderData({ providerFamily: "linkedin" });
+    assert.equal(purgeResult.providerFamily, "linkedin");
+    assert.ok(purgeResult.contentObservationsPurged >= 1);
+    assert.ok(purgeResult.receiptsPurged >= 1);
+
+    // Scope A's observation is purged
+    const checkObsA = await pool.query("SELECT * FROM social_content_observations WHERE id = $1", [obsAId]);
+    assert.equal(checkObsA.rows.length, 0);
+
+    // Scope B's observation is preserved
+    const checkObsB = await pool.query("SELECT * FROM social_content_observations WHERE id = $1", [obsBId]);
+    assert.equal(checkObsB.rows.length, 1);
+
+    // Canonical content item is PRESERVED because Scope B still has active observation
+    const checkItem = await pool.query("SELECT * FROM social_content_items WHERE id = $1", [contentItemId]);
+    assert.equal(checkItem.rows.length, 1);
+
+    // Expired webhook receipt is purged
+    const checkReceipt = await pool.query("SELECT * FROM webhook_receipts WHERE id = $1", [receiptId]);
+    assert.equal(checkReceipt.rows.length, 0);
   },
 );

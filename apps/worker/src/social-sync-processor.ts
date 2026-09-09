@@ -362,11 +362,22 @@ async function updateConnectionAfterFailure(input: {
   retryAfterMs?: number;
 }): Promise<void> {
   const retryAt = input.retryAfterMs ? new Date(Date.now() + input.retryAfterMs) : null;
-  const setReauth = retryClassification(input.err) === "REAUTH_REQUIRED";
+  const classification = retryClassification(input.err);
+  const setReauth = classification === "REAUTH_REQUIRED";
+  const errorMessage = input.err instanceof Error ? input.err.message.toLowerCase() : "";
+  const isRoleOrAccessLoss =
+    errorMessage.includes("lacks required organization role") ||
+    errorMessage.includes("role") ||
+    errorMessage.includes("product or permission access required");
+
   await getPool().query(
     `
       UPDATE social_connections
-      SET status = CASE WHEN $2 THEN 'REAUTH_REQUIRED' ELSE status END,
+      SET status = CASE
+            WHEN $2 THEN 'REAUTH_REQUIRED'
+            WHEN $6 THEN 'DEGRADED'
+            ELSE status
+          END,
           sync_error = $3::jsonb,
           rate_limit_reset_at = CASE WHEN $4::timestamptz IS NULL THEN rate_limit_reset_at ELSE $4 END,
           retry_after_seconds = CASE WHEN $5::integer IS NULL THEN retry_after_seconds ELSE $5 END,
@@ -380,6 +391,7 @@ async function updateConnectionAfterFailure(input: {
       JSON.stringify(safeJobError(input.err)),
       retryAt,
       input.retryAfterMs ? Math.ceil(input.retryAfterMs / 1000) : null,
+      isRoleOrAccessLoss,
     ],
   );
 }

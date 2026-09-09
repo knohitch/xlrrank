@@ -111,6 +111,28 @@ export class PlatformsController {
     return this.platformsService.receiveMetaWebhook(id, signature, body ?? {}, req.rawBody);
   }
 
+  @Public()
+  @Get(":id/linkedin/webhook")
+  verifyLinkedInWebhook(
+    @Param("id") id: string,
+    @Query("challengeCode") challengeCode: string | undefined,
+  ) {
+    return this.platformsService.verifyLinkedInWebhookChallenge(id, { challengeCode });
+  }
+
+  @Public()
+  @CsrfExempt()
+  @Post(":id/linkedin/webhook")
+  @HttpCode(HttpStatus.OK)
+  async receiveLinkedInWebhook(
+    @Param("id") id: string,
+    @Headers("x-li-signature") signature: string | undefined,
+    @Body() body: Record<string, unknown>,
+    @Req() req: Request & { rawBody?: Buffer },
+  ) {
+    return this.platformsService.receiveLinkedInWebhook(id, signature, body ?? {}, req.rawBody);
+  }
+
   @Get("authorizations/:authorizationId/assets")
   async listAuthorizationAssets(
     @Param("authorizationId") authorizationId: string,

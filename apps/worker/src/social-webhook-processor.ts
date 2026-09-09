@@ -22,11 +22,14 @@ export async function processSocialWebhook(job: Job): Promise<void> {
         [payload.receiptId],
       )
     ).rows[0];
-    if (!receipt || receipt.provider_family !== "meta") {
+    if (!receipt || (receipt.provider_family !== "meta" && receipt.provider_family !== "linkedin")) {
       await markIgnored(payload.jobRequestId, payload.receiptId);
       return;
     }
-    const assetIds = providerAssetIdsFromMetaPayload(receipt.payload);
+    const assetIds =
+      receipt.provider_family === "linkedin"
+        ? providerAssetIdsFromLinkedInPayload(receipt.payload)
+        : providerAssetIdsFromMetaPayload(receipt.payload);
     if (assetIds.length === 0) {
       await markIgnored(payload.jobRequestId, payload.receiptId);
       return;
@@ -36,7 +39,10 @@ export async function processSocialWebhook(job: Job): Promise<void> {
         SELECT id
         FROM social_connections
         WHERE status IN ('CONNECTED', 'DEGRADED')
-          AND provider_metadata->>'providerAssetId' = ANY($1::text[])
+          AND (
+            provider_metadata->>'providerAssetId' = ANY($1::text[])
+            OR verified_external_id = ANY($1::text[])
+          )
         ORDER BY id
       `,
       [assetIds],
@@ -85,6 +91,26 @@ function providerAssetIdsFromMetaPayload(payload: Record<string, unknown>): stri
         .filter((value): value is string => !!value),
     ),
   ];
+}
+
+function providerAssetIdsFromLinkedInPayload(payload: Record<string, unknown>): string[] {
+  const ids = new Set<string>();
+  if (typeof payload.organization === "string") {
+    ids.add(payload.organization);
+    ids.add(payload.organization.replace(/^urn:li:organization:/, ""));
+  }
+  if (typeof payload.entityUrn === "string") {
+    ids.add(payload.entityUrn);
+    ids.add(payload.entityUrn.replace(/^urn:li:organization:/, ""));
+  }
+  if (typeof payload.organizationalEntity === "string") {
+    ids.add(payload.organizationalEntity);
+    ids.add(payload.organizationalEntity.replace(/^urn:li:organization:/, ""));
+  }
+  if (typeof payload.assetId === "string") {
+    ids.add(payload.assetId);
+  }
+  return [...ids].filter(Boolean);
 }
 
 async function markIgnored(jobId: string, receiptId: string): Promise<void> {

@@ -11,8 +11,8 @@ Tracking completion of each prompt from the Build Prompt Pack.
 | 2      | Complete Authentication and Authorization | DONE           | VERIFIED (Application E2E CI)                                      | PARTIAL          |
 | 3      | User, Admin and Support Portals           | DONE           | VERIFIED (Application E2E CI)                                      | NO               |
 | 4      | Core Domain Database                      | HARDENED       | VERIFIED (ownership/isolation PostgreSQL integration)              | PARTIAL          |
-| 5      | Social Platform Connector Framework       | HARDENED       | VERIFIED CONTRACT (local HTTP reference provider)                  | PARTIAL          |
-| 6      | Platform Connection UI and Data Ingestion | HARDENED       | VERIFIED (worker/reference-provider ingestion only)                | PARTIAL          |
+| 5      | Social Platform Connector Framework       | HARDENED       | VERIFIED CONTRACT (Reference, X, Meta, LinkedIn)                   | PARTIAL          |
+| 6      | Platform Connection UI and Data Ingestion | HARDENED       | VERIFIED (Reference, X, Meta, LinkedIn worker ingestion)           | PARTIAL          |
 | 7      | AI Provider Framework                     | DONE           | PARTIAL (real HTTP implementations)                                | NO               |
 | 8      | Dynamic Model Registry                    | DONE           | PARTIAL                                                            | NO               |
 | 9      | Reasoning Tier Engine and AI Router       | DONE           | SCAFFOLD ONLY                                                      | NO               |
@@ -148,11 +148,37 @@ Tracking completion of each prompt from the Build Prompt Pack.
 - **OAuth foundation**: Generic provider app configuration, encrypted client secrets, PKCE transaction persistence, single-use callback state, and worker refresh lifecycle added.
 - **Worker path**: X fixture coverage uses the Sprint 05 durable request -> outbox -> Redis/BullMQ -> real worker -> registry -> connector -> normalized persistence path in CI.
 
+## Audit Sprint 07 Results
+
+- **Meta Connectors (Facebook & Instagram)**: Implementation DONE.
+- **Verification**: CONTRACT VERIFIED locally; Graph API v26.0 targets, Facebook Login (Page & linked Instagram Professional) and direct Instagram Login auth modes, asset discovery, asset selection, opaque comment pagination, and HMAC-SHA256 webhooks.
+- **Worker path**: Facebook and Instagram worker ingestion via durable request -> outbox -> BullMQ -> worker -> normalized persistence, and durable webhook receipt processing.
+- **Live provider state**: `FACEBOOK LIVE PROVIDER GATE: BLOCKED_EXTERNAL`, `INSTAGRAM LIVE PROVIDER GATE: BLOCKED_EXTERNAL`, `META LIVE PROVIDER GATE: BLOCKED_EXTERNAL`.
+- **Production Ready**: NO.
+
+## Audit Sprint 08 Results
+
+- **LinkedIn Connector**: Implementation DONE.
+- **Standards**: LinkedIn Marketing API Version `202608`, Rest.li Protocol `2.0.0`, strict SSRF host validation (`api.linkedin.com`).
+- **OAuth & Identity**: 3-legged member OAuth 2.0 with OIDC `/v2/userinfo` identity (`sub` claim truthfully treated as non-KYC account ID).
+- **Organizations & Capabilities**: Dynamic role-sensitive capability evaluation (`ADMINISTRATOR` vs `ANALYST`), organization ACL discovery (`/rest/organizationAcls?q=roleAssignee`), Posts API 2-page pagination, Social Actions comments, and follower metrics.
+- **Truthful Statuses**: Unpermitted capabilities (member feed, follower lists, following lists, search) truthfully return `APP_REVIEW_REQUIRED` or `UNAVAILABLE`.
+- **Webhooks**: HMAC-SHA256 challenge-response handshake (`GET /platforms/:id/linkedin/webhook`) and notification delivery (`POST /platforms/:id/linkedin/webhook` with `X-LI-Signature` verification and `@CsrfExempt()`).
+- **Worker & Ingestion**: Real BullMQ worker ingestion with 2-page Posts pagination, comments, follower metrics, webhook receipt resolution, sync dispatch, and role loss / product access error handling transitioning to `DEGRADED`.
+- **Data Retention**: Forward migration `0007_linkedin_retention_policies.sql` and `purgeExpiredProviderData` implementing member data (24h), organization content (56d), analytics (30d), and webhook receipt (7d) limits with multi-tenant cross-scope safety.
+- **Verification**: Database suite (11/11 pass), social-core suite (20/20 pass), API OAuth/webhooks E2E (6/6 pass), Worker Ingestion & Retention E2E (15/15 pass) all VERIFIED LOCALLY.
+- **Live provider state**: `LINKEDIN LIVE PROVIDER GATE: BLOCKED_EXTERNAL` because no real LinkedIn Developer Application credentials or Partner Program approvals were supplied.
+- **Production Ready**: NO.
+
 ## Remaining Product Blockers
 
 - Live X provider verification with real X developer app credentials/access
-- Live social connector integration for Meta/LinkedIn/Reddit
+- Live Meta (Facebook & Instagram) provider verification with real developer app credentials/access
+- Live LinkedIn provider verification with real developer app credentials and Partner Program approvals
+- Live Reddit social connector integration
 - Live third-party social ingestion through production provider APIs
+- Remote CI infrastructure quota exhaustion (`BLOCKED_INFRA`)
+- Worker Docker runtime local daemon availability (`BLOCKED_LOCAL_INFRA`)
 - AI runtime/provider configuration
 - Persistent dynamic model registry
 - Routing/language enforcement

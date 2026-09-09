@@ -45,8 +45,12 @@ export class CapabilityUnavailableError extends ConnectorError {
 }
 
 export class AuthorizationError extends ConnectorError {
-  constructor(connectorId: string, message = "Provider authorization failed") {
-    super(message, connectorId, "AUTHORIZATION", false, "REAUTH_REQUIRED");
+  constructor(
+    connectorId: string,
+    message = "Provider authorization failed",
+    classification: RetryClassification = "REAUTH_REQUIRED",
+  ) {
+    super(message, connectorId, "AUTHORIZATION", false, classification);
     this.name = "AuthorizationError";
   }
 }

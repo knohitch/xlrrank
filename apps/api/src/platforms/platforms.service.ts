@@ -30,11 +30,17 @@ import {
 import type {
   CapabilityEvaluationInput,
   ConnectorCredentials,
+  LinkedInAsset,
   MetaAsset,
   NormalizedProfile,
   OAuthCapableConnector,
   OAuthProviderContract,
   ProviderApplicationConfig,
+} from "@xlrrank/social-core";
+import {
+  linkedInWebhookDedupeKey,
+  verifyLinkedInWebhookChallenge,
+  verifyLinkedInWebhookSignature,
 } from "@xlrrank/social-core";
 import type { ConnectorManifest } from "@xlrrank/shared";
 import { AuditService } from "../audit/audit.service.js";
@@ -566,6 +572,71 @@ export class PlatformsService {
     return { status: "received", receiptId, duplicate: !inserted, job };
   }
 
+  async verifyLinkedInWebhookChallenge(
+    platformId: string,
+    input: { challengeCode?: string | undefined },
+  ) {
+    const platform = await this.resolvePlatform(platformId);
+    if (platform.slug !== "linkedin") {
+      throw new BadRequestException("LinkedIn webhooks are only available for LinkedIn.");
+    }
+    if (!input.challengeCode) {
+      throw new BadRequestException("Missing challengeCode for LinkedIn webhook challenge.");
+    }
+    const providerConfig = await this.loadProviderAppConfig(platform);
+    const secret = providerConfig.clientSecret;
+    if (!secret) {
+      throw new BadRequestException("LinkedIn clientSecret is not configured.");
+    }
+    return verifyLinkedInWebhookChallenge(input.challengeCode, secret);
+  }
+
+  async receiveLinkedInWebhook(
+    platformId: string,
+    signature: string | undefined,
+    payload: Record<string, unknown>,
+    rawBody?: Buffer | string,
+  ) {
+    const platform = await this.resolvePlatform(platformId);
+    if (platform.slug !== "linkedin") {
+      throw new BadRequestException("LinkedIn webhooks are only available for LinkedIn.");
+    }
+    const providerConfig = await this.loadProviderAppConfig(platform);
+    const secret = providerConfig.clientSecret;
+    if (!secret) {
+      throw new BadRequestException("LinkedIn clientSecret is not configured.");
+    }
+    const canonical = rawBody ?? JSON.stringify(payload);
+    if (!verifyLinkedInWebhookSignature(canonical, signature, secret)) {
+      throw new ForbiddenException("LinkedIn webhook signature verification failed.");
+    }
+    const payloadJson = JSON.stringify(payload);
+    const dedupeKey = linkedInWebhookDedupeKey(payload, payloadJson);
+    const result = await getPool().query<{ id: string; inserted: boolean }>(
+      `
+        INSERT INTO webhook_receipts (
+          provider_family, platform_id, object_id, dedupe_key, signature_valid,
+          status, payload, metadata
+        )
+        VALUES ('linkedin', $1, $2, $3, true, 'RECEIVED', $4::jsonb, $5::jsonb)
+        ON CONFLICT (provider_family, dedupe_key) DO UPDATE SET
+          metadata = webhook_receipts.metadata || jsonb_build_object('duplicateSeenAt', now())
+        RETURNING id, (xmax = 0) AS inserted
+      `,
+      [
+        platform.id,
+        typeof payload.notificationId === "string" ? payload.notificationId : null,
+        dedupeKey,
+        payloadJson,
+        JSON.stringify({ platformSlug: platform.slug, signatureHeader: "x-li-signature" }),
+      ],
+    );
+    const receiptId = result.rows[0]?.id;
+    const inserted = result.rows[0]?.inserted === true;
+    const job = receiptId && inserted ? await createSocialWebhookProcessRequest({ receiptId }) : null;
+    return { status: "received", receiptId, duplicate: !inserted, job };
+  }
+
   async listAuthorizationAssets(authorizationId: string, userId: string) {
     if (!isUuid(authorizationId)) throw new NotFoundException("Provider authorization not found.");
     const auth = await this.loadAuthorizedProviderAuthorization(authorizationId, userId);
@@ -884,17 +955,18 @@ export class PlatformsService {
     providerUserId: string;
     credentials: ConnectorCredentials;
     providerConfig: ProviderApplicationConfig;
-    assets: MetaAsset[];
+    assets: Array<MetaAsset | LinkedInAsset>;
   }): Promise<{ authorizationId: string; assets: Array<Record<string, unknown>> }> {
     const pool = getPool();
+    const providerFamily = input.platform.slug === "linkedin" ? "linkedin" : "meta";
     const existingGrant = await pool.query<{ id: string }>(
       `
         SELECT id
         FROM provider_authorizations
-        WHERE scope_id = $1 AND provider_family = 'meta' AND provider_user_id = $2
+        WHERE scope_id = $1 AND provider_family = $2 AND provider_user_id = $3
         LIMIT 1
       `,
-      [input.scopeId, input.providerUserId],
+      [input.scopeId, providerFamily, input.providerUserId],
     );
     const grantId = existingGrant.rows[0]?.id ?? randomUUID();
     const encryptedGrant = encryptSecret(
@@ -903,7 +975,7 @@ export class PlatformsService {
       providerAuthorizationAssociatedData({
         authorizationId: grantId,
         scopeId: input.scopeId,
-        providerFamily: "meta",
+        providerFamily,
       }),
     );
     const grant = await pool.query<{ id: string }>(
@@ -913,7 +985,7 @@ export class PlatformsService {
           provider_user_id, status, credentials_encrypted, granted_scopes,
           expires_at, metadata
         )
-        VALUES ($1, 'meta', $2, $3, $4, $5, 'ACTIVE', $6, $7::jsonb, $8, $9::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6, 'ACTIVE', $7, $8::jsonb, $9, $10::jsonb)
         ON CONFLICT (scope_id, provider_family, provider_user_id) DO UPDATE SET
           platform_id = EXCLUDED.platform_id,
           actor_user_id = EXCLUDED.actor_user_id,
@@ -928,6 +1000,7 @@ export class PlatformsService {
       `,
       [
         grantId,
+        providerFamily,
         input.scopeId,
         input.platform.id,
         input.actorUserId,
@@ -939,11 +1012,11 @@ export class PlatformsService {
       ],
     );
     const providerAuthorizationId = grant.rows[0]?.id;
-    if (!providerAuthorizationId) throw new Error("Failed to persist Meta provider authorization");
-    const platformIds = await this.platformIdsBySlug(["facebook", "instagram"]);
+    if (!providerAuthorizationId) throw new Error("Failed to persist provider authorization");
+    const platformIds = await this.platformIdsBySlug([input.platform.slug, "facebook", "instagram", "linkedin"]);
     const persistedAssets: Array<Record<string, unknown>> = [];
     for (const asset of input.assets) {
-      const assetPlatformId = platformIds.get(asset.platformId);
+      const assetPlatformId = platformIds.get(asset.platformId) ?? input.platform.id;
       if (!assetPlatformId) continue;
       const existingAsset = await pool.query<{ id: string }>(
         `
@@ -1326,19 +1399,21 @@ function hasOAuthAdapter(connector: unknown): connector is OAuthCapableConnector
   );
 }
 
-function hasMetaAssetLister(
+function hasAssetLister(
   connector: unknown,
 ): connector is OAuthCapableConnector & {
   listAssets: (
     credentials: ConnectorCredentials,
     context?: { scopeId: string; connectionId: string; credentials: ConnectorCredentials },
-  ) => Promise<MetaAsset[]>;
+  ) => Promise<Array<MetaAsset | LinkedInAsset>>;
 } {
   return (
     hasOAuthAdapter(connector) &&
     typeof (connector as { listAssets?: unknown }).listAssets === "function"
   );
 }
+
+const hasMetaAssetLister = hasAssetLister;
 
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("base64url");

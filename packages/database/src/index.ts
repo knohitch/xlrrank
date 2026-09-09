@@ -56,3 +56,12 @@ export type {
   SocialSyncJobRecord,
   SocialSyncJobStatusView,
 } from "./social/jobs.js";
+export {
+  loadProviderRetentionPolicies,
+  purgeExpiredProviderData,
+} from "./social/retention.js";
+export type {
+  ProviderRetentionPolicy,
+  PurgeRetentionOptions,
+  PurgeRetentionResult,
+} from "./social/retention.js";

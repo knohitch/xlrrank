@@ -13,6 +13,8 @@ let service;
 let tokenCalls = 0;
 let instagramLoginTokenCalls = 0;
 let metaRequests = [];
+let linkedInTokenCalls = 0;
+let linkedInRequests = [];
 const originalFetch = globalThis.fetch;
 
 async function setup() {
@@ -32,11 +34,14 @@ async function reset() {
   tokenCalls = 0;
   instagramLoginTokenCalls = 0;
   metaRequests = [];
+  linkedInTokenCalls = 0;
+  linkedInRequests = [];
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input));
     if (url.hostname === "graph.facebook.com") return metaJson(url);
     if (url.hostname === "graph.instagram.com") return instagramGraphJson(url);
     if (url.hostname === "api.instagram.com") return instagramTokenJson(url, init);
+    if (url.hostname === "api.linkedin.com" || url.hostname === "www.linkedin.com") return linkedInJson(url, init);
     if (url.hostname !== "api.x.com") throw new Error(`Unexpected outbound fetch: ${url}`);
     if (url.pathname === "/2/oauth2/token") {
       tokenCalls += 1;
@@ -176,6 +181,87 @@ function instagramGraphJson(url) {
   return json({ error: { message: `not found: ${url.pathname}` } }, 404);
 }
 
+function linkedInJson(url, init = {}) {
+  const method = init.method ?? "GET";
+  const headers = new Headers(init.headers);
+  const body = init.body instanceof URLSearchParams
+    ? Object.fromEntries(init.body)
+    : (typeof init.body === "string" ? init.body : undefined);
+  linkedInRequests.push({ host: url.hostname, method, path: url.pathname, params: Object.fromEntries(url.searchParams), body });
+
+  if (url.pathname === "/oauth/v2/accessToken" && method === "POST") {
+    linkedInTokenCalls += 1;
+    return json({
+      access_token: `synthetic-linkedin-access-${linkedInTokenCalls}`,
+      refresh_token: `synthetic-linkedin-refresh-${linkedInTokenCalls}`,
+      expires_in: 5184000,
+      token_type: "Bearer",
+      scope: "openid,profile,email,r_organization_social,rw_organization_admin,r_organization_admin,r_organization_social_feed",
+    });
+  }
+
+  const auth = headers.get("authorization") ?? "";
+  if (!auth.startsWith("Bearer synthetic-linkedin-access-")) {
+    return json({ status: 401, message: "Unauthorized token" }, 401);
+  }
+
+  if (url.pathname === "/v2/userinfo") {
+    return json({
+      sub: "li-member-sub-123",
+      name: "LinkedIn Member",
+      email: "member@example.com",
+      email_verified: true,
+    });
+  }
+
+  if (url.pathname === "/rest/organizationAcls") {
+    assert.equal(headers.get("linkedin-version"), "202608");
+    assert.equal(headers.get("x-restli-protocol-version"), "2.0.0");
+    return json({
+      elements: [
+        {
+          role: "ADMINISTRATOR",
+          organization: "urn:li:organization:12345",
+          state: "APPROVED",
+          roleAssignee: "urn:li:person:li-member-sub-123",
+        },
+        {
+          role: "ANALYST",
+          organization: "urn:li:organization:67890",
+          state: "APPROVED",
+          roleAssignee: "urn:li:person:li-member-sub-123",
+        },
+      ],
+    });
+  }
+
+  if (url.pathname === "/rest/organizations/12345") {
+    assert.equal(headers.get("linkedin-version"), "202608");
+    assert.equal(headers.get("x-restli-protocol-version"), "2.0.0");
+    return json({
+      id: 12345,
+      localizedName: "Acme Corp",
+      vanityName: "acme-corp",
+      localizedDescription: "Acme Corporation on LinkedIn",
+      primaryOrganizationType: "COMPANY",
+    });
+  }
+
+  if (url.pathname === "/rest/organizations/67890") {
+    assert.equal(headers.get("linkedin-version"), "202608");
+    assert.equal(headers.get("x-restli-protocol-version"), "2.0.0");
+    return json({
+      id: 67890,
+      localizedName: "Beta Labs",
+      vanityName: "beta-labs",
+      localizedDescription: "Beta Labs on LinkedIn",
+      primaryOrganizationType: "NON_PROFIT",
+    });
+  }
+
+  return json({ message: `not found: ${url.pathname}` }, 404);
+}
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -253,6 +339,38 @@ async function metaProviderConfig(platformId, slug = "facebook", metadata = {}) 
         $4::jsonb)
     `,
     [configId, platformId, encrypted, JSON.stringify({ webhookVerifyToken: "verify-token", ...metadata })],
+  );
+}
+
+async function linkedinPlatform() {
+  const result = await pool.query(
+    "INSERT INTO platforms (slug, display_name, enabled) VALUES ('linkedin', 'LinkedIn', true) RETURNING id",
+  );
+  return result.rows[0].id;
+}
+
+async function linkedinProviderConfig(platformId) {
+  const configId = randomUUID();
+  const encrypted = shared.encryptSecret(
+    "synthetic-linkedin-client-secret",
+    undefined,
+    shared.providerAppSecretAssociatedData({
+      providerConfigId: configId,
+      platformSlug: "linkedin",
+      secretName: "clientSecret",
+    }),
+  );
+  await pool.query(
+    `
+      INSERT INTO provider_app_configurations (
+        id, platform_id, environment, client_id, client_secret_encrypted,
+        redirect_uri, enabled, metadata
+      )
+      VALUES ($1, $2, 'test', 'synthetic-linkedin-client-id', $3,
+        'https://app.example.test/platforms/linkedin/oauth/callback', true,
+        '{"access":{"fullArchiveSearch":false}}'::jsonb)
+    `,
+    [configId, platformId, encrypted],
   );
 }
 
@@ -760,3 +878,172 @@ test("Instagram Login OAuth E2E: direct auth mode, asset, AAD, and scope isolati
     /denied/,
   );
 });
+
+test(
+  "LinkedIn OAuth: start, callback, OIDC identity, organization asset discovery, asset connect, IDOR, and webhooks",
+  { skip },
+  async () => {
+    await reset();
+    const userA = await user("linkedin-user-a@example.test");
+    const userB = await user("linkedin-user-b@example.test");
+    const platformId = await linkedinPlatform();
+    await linkedinProviderConfig(platformId);
+
+    // 1. Start OAuth
+    const start = await service.startOAuth("linkedin", userA, {
+      scopeType: "PERSONAL",
+      redirectTo: "/platforms?connected=linkedin",
+    });
+    assert.ok(start.authorizationUrl);
+    const startUrl = new URL(start.authorizationUrl);
+    assert.equal(startUrl.hostname, "www.linkedin.com");
+    assert.equal(startUrl.pathname, "/oauth/v2/authorization");
+    assert.equal(startUrl.searchParams.get("client_id"), "synthetic-linkedin-client-id");
+    assert.equal(startUrl.searchParams.get("response_type"), "code");
+    assert.equal(startUrl.searchParams.get("redirect_uri"), "https://app.example.test/platforms/linkedin/oauth/callback");
+    const state = startUrl.searchParams.get("state");
+    assert.ok(state);
+
+    // 2. Complete OAuth Callback -> returns ASSET_SELECTION_REQUIRED
+    const callback = await service.handleOAuthCallback("linkedin", userA, {
+      state,
+      code: "synthetic-linkedin-auth-code",
+    });
+    assert.equal(callback.status, "ASSET_SELECTION_REQUIRED");
+    assert.ok(callback.authorizationId);
+    assert.equal(callback.assets.length, 2);
+
+    // 3. Verify provider authorization in database
+    const grant = (
+      await pool.query(
+        "SELECT * FROM provider_authorizations WHERE id = $1",
+        [callback.authorizationId],
+      )
+    ).rows[0];
+    assert.equal(grant.provider_family, "linkedin");
+    assert.equal(grant.provider_user_id, "li-member-sub-123");
+    assert.equal(grant.status, "ACTIVE");
+
+    // 4. List authorization assets
+    const assetList = await service.listAuthorizationAssets(callback.authorizationId, userA);
+    assert.equal(assetList.assets.length, 2);
+    const acmeAsset = assetList.assets.find((a) => a.providerAssetId === "12345");
+    const betaAsset = assetList.assets.find((a) => a.providerAssetId === "67890");
+    assert.ok(acmeAsset);
+    assert.ok(betaAsset);
+    assert.equal(acmeAsset.name, "Acme Corp");
+    assert.equal(acmeAsset.handle, "acme-corp");
+    assert.equal(acmeAsset.assetType, "LINKEDIN_ORGANIZATION");
+    assert.equal(acmeAsset.metadata.primaryRole, "ADMINISTRATOR");
+    assert.equal(betaAsset.name, "Beta Labs");
+    assert.equal(betaAsset.handle, "beta-labs");
+    assert.equal(betaAsset.metadata.primaryRole, "ANALYST");
+
+    // 5. Tenant / User isolation: User B cannot list or connect User A's assets
+    await assert.rejects(
+      () => service.listAuthorizationAssets(callback.authorizationId, userB),
+      /denied/,
+    );
+    await assert.rejects(
+      () => service.connectAuthorizationAsset(callback.authorizationId, acmeAsset.id, userB),
+      /denied/,
+    );
+
+    // 6. Connect Acme Asset
+    const connected1 = await service.connectAuthorizationAsset(
+      callback.authorizationId,
+      acmeAsset.id,
+      userA,
+    );
+    assert.equal(connected1.status, "CONNECTED");
+    assert.ok(connected1.connectionId);
+    assert.equal(connected1.handle, "acme-corp");
+
+    // 7. Verify Social Connection record in database
+    const conn1 = (
+      await pool.query(
+        "SELECT * FROM social_connections WHERE id = $1",
+        [connected1.connectionId],
+      )
+    ).rows[0];
+    assert.equal(conn1.status, "CONNECTED");
+    assert.equal(conn1.verified_external_id, "12345");
+    assert.equal(conn1.verified_handle, "acme-corp");
+
+    // 8. Connect Beta Asset in the same scope (multi-asset support)
+    const connected2 = await service.connectAuthorizationAsset(
+      callback.authorizationId,
+      betaAsset.id,
+      userA,
+    );
+    assert.equal(connected2.status, "CONNECTED");
+    assert.notEqual(connected2.connectionId, connected1.connectionId);
+    assert.equal(connected2.handle, "beta-labs");
+
+    // 9. Reconnecting Acme Asset idempotently
+    const reconnected1 = await service.connectAuthorizationAsset(
+      callback.authorizationId,
+      acmeAsset.id,
+      userA,
+    );
+    assert.equal(reconnected1.status, "CONNECTED");
+    assert.equal(reconnected1.connectionId, connected1.connectionId);
+
+    // 10. Webhook challenge-response handshake
+    const challengeRes = await service.verifyLinkedInWebhookChallenge(platformId, {
+      challengeCode: "test-challenge-code-123",
+    });
+    assert.equal(challengeRes.challengeCode, "test-challenge-code-123");
+    const expectedHmac = createHmac("sha256", "synthetic-linkedin-client-secret")
+      .update("test-challenge-code-123")
+      .digest("hex");
+    assert.equal(challengeRes.challengeResponse, expectedHmac);
+
+    // 11. Webhook delivery POST with valid HMAC signature
+    const webhookPayload = {
+      notificationId: "notif-uuid-001",
+      eventTime: Date.now(),
+      resource: "urn:li:organization:12345",
+      action: "ORGANIZATION_SOCIAL_ACTION",
+    };
+    const rawBody = JSON.stringify(webhookPayload);
+    const signature = createHmac("sha256", "synthetic-linkedin-client-secret")
+      .update(rawBody)
+      .digest("hex");
+
+    const webhookResult = await service.receiveLinkedInWebhook(
+      platformId,
+      signature,
+      webhookPayload,
+      rawBody,
+    );
+    assert.equal(webhookResult.status, "received");
+    assert.equal(webhookResult.duplicate, false);
+    assert.ok(webhookResult.receiptId);
+    assert.ok(webhookResult.job);
+
+    // Verify receipt stored in DB
+    const receipt = (
+      await pool.query("SELECT * FROM webhook_receipts WHERE id = $1", [webhookResult.receiptId])
+    ).rows[0];
+    assert.equal(receipt.provider_family, "linkedin");
+    assert.equal(receipt.signature_valid, true);
+    assert.equal(receipt.status, "PENDING_DISPATCH");
+
+    // 12. Webhook deduplication: send identical payload again
+    const duplicateResult = await service.receiveLinkedInWebhook(
+      platformId,
+      signature,
+      webhookPayload,
+      rawBody,
+    );
+    assert.equal(duplicateResult.status, "received");
+    assert.equal(duplicateResult.duplicate, true);
+
+    // 13. Invalid signature rejected with 403 Forbidden
+    await assert.rejects(
+      () => service.receiveLinkedInWebhook(platformId, "invalid-sig", webhookPayload, rawBody),
+      /signature verification failed/,
+    );
+  },
+);

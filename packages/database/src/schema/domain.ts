@@ -1200,3 +1200,22 @@ export const jobDeadLetters = pgTable(
     index("job_dead_letters_connection_idx").on(t.connectionId),
   ],
 );
+
+export const providerDataRetentionPolicies = pgTable(
+  "provider_data_retention_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerFamily: text("provider_family").notNull(),
+    dataCategory: text("data_category").notNull(),
+    retentionClass: text("retention_class").notNull(),
+    maxRetentionSeconds: integer("max_retention_seconds").notNull(),
+    description: text("description"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("provider_retention_family_category_unique").on(t.providerFamily, t.dataCategory),
+    index("provider_retention_family_idx").on(t.providerFamily),
+  ],
+);

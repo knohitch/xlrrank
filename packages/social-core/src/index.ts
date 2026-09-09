@@ -72,5 +72,27 @@ export {
   encodeMetaCursor,
 } from "./platforms/meta-api.js";
 export type { MetaAsset } from "./platforms/facebook-connector.js";
-export { LinkedInConnector } from "./platforms/linkedin-connector.js";
+export {
+  LinkedInConnector,
+  evaluateLinkedInCapabilities,
+  LINKEDIN_DEFAULT_SCOPES,
+  LINKEDIN_CAPABILITY_MATRIX,
+} from "./platforms/linkedin-connector.js";
+export type { LinkedInAsset } from "./platforms/linkedin-connector.js";
+export {
+  LINKEDIN_MARKETING_API_VERSION,
+  LINKEDIN_REST_BASE_URL,
+  LINKEDIN_OAUTH_AUTHORIZE_URL,
+  LINKEDIN_OAUTH_TOKEN_URL,
+  LINKEDIN_OIDC_USERINFO_URL,
+  LINKEDIN_RESTLI_PROTOCOL_VERSION,
+  LinkedInApiClient,
+  verifyLinkedInWebhookChallenge,
+  verifyLinkedInWebhookSignature,
+  linkedInWebhookDedupeKey,
+  encodeLinkedInCursor,
+  decodeLinkedInCursor,
+  mapLinkedInError,
+  parseLinkedInRateLimit,
+} from "./platforms/linkedin-api.js";
 export { RedditConnector } from "./platforms/reddit-connector.js";
