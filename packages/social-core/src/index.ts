@@ -18,6 +18,7 @@ export type {
   OAuthTokenExchangeRequest,
   OAuthTokenRefreshRequest,
   OAuthTokenResult,
+  OAuthProviderContract,
   OAuthProviderAdapter,
   OAuthCapableConnector,
   AuthResult,

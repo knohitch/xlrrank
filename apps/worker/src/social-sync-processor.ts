@@ -258,7 +258,10 @@ async function refreshCredentialsIfNeeded(input: {
   if (!isOAuthCapable(input.connector)) {
     return input.credentials;
   }
-  const providerConfig = await loadProviderConfigForWorker(input.connection.platformSlug);
+  const providerConfig = providerConfigWithCredentialAuthMode(
+    await loadProviderConfigForWorker(input.connection.platformSlug),
+    input.credentials,
+  );
   const refreshed = await input.connector.getOAuthAdapter().refreshAccessToken(
     {
       providerConfig,
@@ -336,6 +339,21 @@ function bindNormalizedPlatformId<
   T extends NormalizedProfile | NormalizedContent | NormalizedInteraction,
 >(item: T, platformId: string): T {
   return { ...item, platformId };
+}
+
+function providerConfigWithCredentialAuthMode(
+  providerConfig: ProviderApplicationConfig,
+  credentials: ConnectorCredentials,
+): ProviderApplicationConfig {
+  const authMode = credentials.metadata?.authMode;
+  if (typeof authMode !== "string") return providerConfig;
+  return {
+    ...providerConfig,
+    metadata: {
+      ...(providerConfig.metadata ?? {}),
+      authMode,
+    },
+  };
 }
 
 async function updateConnectionAfterFailure(input: {

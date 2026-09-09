@@ -77,6 +77,10 @@ export interface ConnectorManifest {
       authorizationEndpoint: string;
       tokenEndpoint: string;
       defaultScopes: string[];
+      pkceRequired?: boolean;
+      supportsRefresh?: boolean;
+      supportsRevocation?: boolean;
+      apiBaseUrl?: string;
       capabilities?: Partial<Record<ConnectorCapability, AvailabilityState>>;
     }>;
   };

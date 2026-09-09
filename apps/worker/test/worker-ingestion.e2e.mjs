@@ -319,6 +319,75 @@ function createMetaFixtureServer() {
   };
 }
 
+function createInstagramLoginWorkerFixtureServer() {
+  const requests = { instagram: [], facebookTrap: [] };
+  const instagramServer = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    requests.instagram.push({ path: url.pathname, params: Object.fromEntries(url.searchParams) });
+    res.setHeader("content-type", "application/json");
+    if (url.searchParams.get("access_token") !== "ig-direct-worker-token") {
+      res.writeHead(401);
+      res.end(JSON.stringify({ error: { type: "OAuthException", code: 190 } }));
+      return;
+    }
+    if (url.pathname === "/v26.0/ig-direct-worker") {
+      res.end(JSON.stringify({
+        user_id: "ig-direct-worker",
+        username: "worker_direct_ig",
+        name: "Worker Direct IG",
+        followers_count: 33,
+        follows_count: 4,
+        media_count: 2,
+        account_type: "BUSINESS",
+      }));
+      return;
+    }
+    if (url.pathname === "/v26.0/ig-direct-worker/media") {
+      const second = url.searchParams.get("after") === "direct-worker-page-2";
+      res.end(JSON.stringify({
+        data: [{
+          id: second ? "ig-direct-worker-media-2" : "ig-direct-worker-media-1",
+          caption: "direct instagram worker media",
+          media_type: "IMAGE",
+          timestamp: second ? "2030-04-02T00:00:00+0000" : "2030-04-01T00:00:00+0000",
+        }],
+        paging: second ? undefined : { cursors: { after: "direct-worker-page-2" } },
+      }));
+      return;
+    }
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: { message: "not found" } }));
+  });
+  const facebookTrap = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    requests.facebookTrap.push({ path: url.pathname, params: Object.fromEntries(url.searchParams) });
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "facebook graph trap" } }));
+  });
+  return {
+    requests,
+    async start() {
+      await Promise.all([instagramServer, facebookTrap].map((server) => new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))));
+      const addressFor = (server) => {
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("Instagram Login fixture server did not bind");
+        return `http://127.0.0.1:${address.port}`;
+      };
+      return {
+        instagramGraphBaseUrl: addressFor(instagramServer),
+        facebookTrapBaseUrl: addressFor(facebookTrap),
+      };
+    },
+    async stop() {
+      instagramServer.closeIdleConnections?.();
+      instagramServer.closeAllConnections?.();
+      facebookTrap.closeIdleConnections?.();
+      facebookTrap.closeAllConnections?.();
+      await Promise.all([instagramServer, facebookTrap].map((server) => new Promise((resolve) => server.close(resolve))));
+    },
+  };
+}
+
 function xUser() {
   return {
     id: "9001",
@@ -439,7 +508,7 @@ async function createXConnection(name, refreshToken) {
   return { userId: user.rows[0].id, platformId: platform.rows[0].id, scope, connectionId };
 }
 
-async function createMetaConnection(slug, assetId) {
+async function createMetaConnection(slug, assetId, options = {}) {
   const user = await pool.query(
     "INSERT INTO users (email, password_hash, display_name, status) VALUES ($1, 'hash', $2, 'ACTIVE') RETURNING id",
     [`${slug}-${randomUUID()}@example.test`, slug],
@@ -453,11 +522,17 @@ async function createMetaConnection(slug, assetId) {
   const scopes =
     slug === "facebook"
       ? ["pages_show_list", "pages_read_engagement", "pages_read_user_content", "read_insights"]
-      : ["pages_show_list", "instagram_basic", "instagram_manage_insights", "instagram_manage_comments"];
+      : options.authMode === "INSTAGRAM_LOGIN"
+        ? ["instagram_business_basic", "instagram_business_manage_comments"]
+        : ["pages_show_list", "instagram_basic", "instagram_manage_insights", "instagram_manage_comments"];
   const credentials = {
-    accessToken: "meta-access-worker",
+    accessToken: options.accessToken ?? "meta-access-worker",
     scopes,
-    metadata: { assetId, appSecret: "meta-app-secret" },
+    metadata: {
+      assetId,
+      appSecret: "meta-app-secret",
+      ...(options.authMode ? { authMode: options.authMode } : {}),
+    },
   };
   const encrypted = shared.encryptSecret(
     JSON.stringify(credentials),
@@ -489,7 +564,7 @@ async function createMetaConnection(slug, assetId) {
   return { userId: user.rows[0].id, platformId: platform.rows[0].id, scope, connectionId };
 }
 
-async function createMetaProviderConfig(platformId, slug = "facebook") {
+async function createMetaProviderConfig(platformId, slug = "facebook", metadata = {}) {
   const providerConfigId = randomUUID();
   const encrypted = shared.encryptSecret(
     "meta-app-secret",
@@ -508,13 +583,13 @@ async function createMetaProviderConfig(platformId, slug = "facebook") {
       )
       VALUES ($1, $2, 'test', 'meta-app-id', $3,
         'https://app.example.test/platforms/meta/oauth/callback', true,
-        '{"webhookVerifyToken":"verify-token"}'::jsonb)
+        $4::jsonb)
       ON CONFLICT (platform_id, environment) DO UPDATE SET
         client_id = EXCLUDED.client_id,
         client_secret_encrypted = EXCLUDED.client_secret_encrypted,
         enabled = true
     `,
-    [providerConfigId, platformId, encrypted],
+    [providerConfigId, platformId, encrypted, JSON.stringify({ webhookVerifyToken: "verify-token", ...metadata })],
   );
 }
 
@@ -1149,6 +1224,82 @@ test(
       assert.ok(fixture.requests.some((request) => request.path === "/v26.0/page-1/posts"));
       assert.ok(fixture.requests.some((request) => request.path === "/v26.0/ig-1/media"));
       assert.ok(fixture.requests.every((request) => request.params.appsecret_proof));
+    } finally {
+      if (worker) await stopWorker(worker);
+      await fixture.stop();
+    }
+  },
+);
+
+test(
+  "Instagram Login worker e2e: direct Graph fixture persists professional media",
+  { skip },
+  async () => {
+    await reset();
+    const fixture = createInstagramLoginWorkerFixtureServer();
+    const endpoints = await fixture.start();
+    let worker;
+    try {
+      const instagram = await createMetaConnection("instagram", "ig-direct-worker", {
+        authMode: "INSTAGRAM_LOGIN",
+        accessToken: "ig-direct-worker-token",
+      });
+      await createMetaProviderConfig(instagram.platformId, "instagram", { authMode: "INSTAGRAM_LOGIN" });
+      const request = await database.createSocialConnectionSyncRequest({
+        connectionId: instagram.connectionId,
+        reason: "MANUAL",
+      });
+      worker = await startWorker({
+        META_GRAPH_BASE_URL: endpoints.facebookTrapBaseUrl,
+        INSTAGRAM_GRAPH_BASE_URL: endpoints.instagramGraphBaseUrl,
+      });
+      await waitForJob(request.jobId, ["COMPLETED"], 30_000);
+      const rows = await pool.query(
+        `
+          SELECT p.slug, sci.external_id
+          FROM social_content_items sci
+          JOIN platforms p ON p.id = sci.platform_id
+          WHERE p.slug = 'instagram'
+          ORDER BY sci.external_id
+        `,
+      );
+      assert.deepEqual(rows.rows, [
+        { slug: "instagram", external_id: "ig-direct-worker-media-1" },
+        { slug: "instagram", external_id: "ig-direct-worker-media-2" },
+      ]);
+      const observation = (
+        await pool.query(
+          `
+            SELECT sea.external_id, sea.follower_count
+            FROM social_account_observations sao
+            JOIN social_external_accounts sea ON sea.id = sao.external_account_id
+            WHERE sea.external_id = 'ig-direct-worker'
+          `,
+        )
+      ).rows[0];
+      assert.equal(observation.external_id, "ig-direct-worker");
+      assert.equal(observation.follower_count, 33);
+      const connection = (
+        await pool.query("SELECT credentials_encrypted FROM social_connections WHERE id = $1", [
+          instagram.connectionId,
+        ])
+      ).rows[0];
+      const cursorRun = (
+        await pool.query(
+          "SELECT cursor_before, cursor_after FROM social_ingestion_runs WHERE connection_id = $1",
+          [instagram.connectionId],
+        )
+      ).rows[0];
+      assert.equal(cursorRun.cursor_before, null);
+      assert.equal(cursorRun.cursor_after, null);
+      assert.ok(fixture.requests.instagram.some((request) => request.params.after === "direct-worker-page-2"));
+      assert.equal(connection.credentials_encrypted.includes("ig-direct-worker-token"), false);
+      const jobs = await pool.query("SELECT payload::text AS payload FROM jobs");
+      assert.equal(jobs.rows.some((row) => row.payload.includes("ig-direct-worker-token")), false);
+      assert.equal(fixture.requests.facebookTrap.length, 0);
+      assert.ok(fixture.requests.instagram.some((request) => request.path === "/v26.0/ig-direct-worker"));
+      assert.ok(fixture.requests.instagram.some((request) => request.path === "/v26.0/ig-direct-worker/media"));
+      assert.ok(fixture.requests.instagram.every((request) => request.params.access_token === "ig-direct-worker-token"));
     } finally {
       if (worker) await stopWorker(worker);
       await fixture.stop();

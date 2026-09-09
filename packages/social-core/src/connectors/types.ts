@@ -29,6 +29,7 @@ export interface ProviderApplicationConfig {
 
 export interface OAuthAuthorizationRequest {
   providerConfig: ProviderApplicationConfig;
+  contract?: OAuthProviderContract;
   state: string;
   codeChallenge: string;
   requestedScopes: string[];
@@ -36,6 +37,7 @@ export interface OAuthAuthorizationRequest {
 
 export interface OAuthTokenExchangeRequest {
   providerConfig: ProviderApplicationConfig;
+  contract?: OAuthProviderContract;
   code: string;
   codeVerifier: string;
   redirectUri: string;
@@ -43,7 +45,19 @@ export interface OAuthTokenExchangeRequest {
 
 export interface OAuthTokenRefreshRequest {
   providerConfig: ProviderApplicationConfig;
+  contract?: OAuthProviderContract;
   refreshToken: string;
+}
+
+export interface OAuthProviderContract {
+  id?: string;
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  defaultScopes: string[];
+  pkceRequired: boolean;
+  supportsRefresh: boolean;
+  supportsRevocation: boolean;
+  apiBaseUrl?: string | undefined;
 }
 
 export interface OAuthTokenResult {
@@ -85,6 +99,7 @@ export interface CapabilityEvaluationInput {
   configured: boolean;
   grantedScopes?: string[];
   access?: Record<string, unknown>;
+  authMode?: string | undefined;
 }
 
 export interface AuthResult {

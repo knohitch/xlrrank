@@ -134,6 +134,112 @@ async function startMetaFixture() {
   };
 }
 
+async function startInstagramLoginFixture() {
+  const requests = { auth: [], token: [], graph: [], facebookTrap: [] };
+  const authServer = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    requests.auth.push({ method: req.method, path: url.pathname, params: Object.fromEntries(url.searchParams) });
+    res.writeHead(404);
+    res.end();
+  });
+  const tokenServer = http.createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const body = await readBody(req);
+    requests.token.push({ method: req.method, path: url.pathname, body: Object.fromEntries(new URLSearchParams(body)) });
+    res.setHeader("content-type", "application/json");
+    if (url.pathname === "/oauth/access_token" && req.method === "POST") {
+      res.end(JSON.stringify({ access_token: "ig-short-token", user_id: "ig-direct-1" }));
+      return;
+    }
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: { message: "not found" } }));
+  });
+  const graphServer = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    requests.graph.push({ method: req.method, path: url.pathname, params: Object.fromEntries(url.searchParams) });
+    res.setHeader("content-type", "application/json");
+    if (url.pathname === "/access_token") {
+      assert.equal(url.searchParams.get("grant_type"), "ig_exchange_token");
+      assert.equal(url.searchParams.get("access_token"), "ig-short-token");
+      res.end(JSON.stringify({ access_token: "ig-long-token", token_type: "bearer", expires_in: 5184000 }));
+      return;
+    }
+    if (url.pathname === "/refresh_access_token") {
+      assert.equal(url.searchParams.get("grant_type"), "ig_refresh_token");
+      assert.equal(url.searchParams.get("access_token"), "ig-long-token");
+      res.end(JSON.stringify({ access_token: "ig-refreshed-token", token_type: "bearer", expires_in: 5184000 }));
+      return;
+    }
+    if (url.searchParams.get("access_token") !== "ig-long-token") {
+      res.writeHead(401);
+      res.end(JSON.stringify({ error: { type: "OAuthException", code: 190, message: "bad token" } }));
+      return;
+    }
+    if (url.pathname === "/v26.0/me" || url.pathname === "/v26.0/ig-direct-1") {
+      res.end(JSON.stringify({
+        user_id: "ig-direct-1",
+        username: "direct_ig",
+        name: "Direct IG",
+        followers_count: 42,
+        follows_count: 8,
+        media_count: 2,
+        account_type: "BUSINESS",
+      }));
+      return;
+    }
+    if (url.pathname === "/v26.0/ig-direct-1/media") {
+      const second = url.searchParams.get("after") === "direct-media-2";
+      res.end(JSON.stringify({
+        data: [{ id: second ? "direct-media-2" : "direct-media-1", caption: "direct media", media_type: "IMAGE", timestamp: "2026-02-01T00:00:00+0000", like_count: 4, comments_count: 1 }],
+        paging: second ? undefined : { cursors: { after: "direct-media-2" } },
+      }));
+      return;
+    }
+    if (url.pathname === "/v26.0/direct-media-1/comments") {
+      const second = url.searchParams.get("after") === "direct-comment-2";
+      res.end(JSON.stringify({
+        data: [{ id: second ? "direct-comment-2" : "direct-comment-1", text: "direct comment", timestamp: "2026-02-01T01:00:00+0000", username: "commenter" }],
+        paging: second ? undefined : { cursors: { after: "direct-comment-2" } },
+      }));
+      return;
+    }
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: { message: `not found: ${url.pathname}` } }));
+  });
+  const facebookTrap = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    requests.facebookTrap.push({ method: req.method, path: url.pathname });
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "facebook graph trap" } }));
+  });
+  await Promise.all([authServer, tokenServer, graphServer, facebookTrap].map((server) => new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))));
+  const urlFor = (server) => {
+    const address = server.address();
+    return `http://127.0.0.1:${address.port}`;
+  };
+  return {
+    authorizeBaseUrl: `${urlFor(authServer)}/oauth/authorize`,
+    tokenEndpoint: `${urlFor(tokenServer)}/oauth/access_token`,
+    graphBaseUrl: urlFor(graphServer),
+    longTokenEndpoint: `${urlFor(graphServer)}/access_token`,
+    refreshEndpoint: `${urlFor(graphServer)}/refresh_access_token`,
+    facebookTrapBaseUrl: urlFor(facebookTrap),
+    requests,
+    close: async () => {
+      await Promise.all([authServer, tokenServer, graphServer, facebookTrap].map((server) => new Promise((resolve) => server.close(resolve))));
+    },
+  };
+}
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
 function ctx(platform, assetId) {
   return {
     scopeId: `scope-${platform}`,
@@ -142,6 +248,19 @@ function ctx(platform, assetId) {
       accessToken: "meta-access-1",
       scopes: ["public_profile", "pages_show_list", "pages_read_engagement", "pages_read_user_content", "read_insights", "instagram_basic", "instagram_manage_insights", "instagram_manage_comments"],
       metadata: { assetId, appSecret: "app-secret" },
+    },
+  };
+}
+
+function directInstagramCtx(assetId = "ig-direct-1", accessToken = "ig-long-token") {
+  return {
+    scopeId: "scope-instagram-direct",
+    connectionId: "connection-instagram-direct",
+    credentials: {
+      accessToken,
+      refreshToken: accessToken,
+      scopes: ["instagram_business_basic", "instagram_business_manage_comments"],
+      metadata: { assetId, authMode: "INSTAGRAM_LOGIN" },
     },
   };
 }
@@ -217,6 +336,116 @@ test("Instagram connector handles Page-linked professional assets and read-only 
     assert.equal(evaluateInstagramCapabilities({ configured: true, grantedScopes: ["instagram_basic"] }).comments, "PERMISSION_REQUIRED");
     assert.equal(evaluateInstagramCapabilities({ configured: true, grantedScopes: ["instagram_basic"] }).metrics, "AVAILABLE");
     assert.equal(connector.getManifest().capabilities.publishing, "UNAVAILABLE");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Instagram connector executes direct Instagram Login against Instagram Graph only", async () => {
+  const { InstagramConnector, evaluateInstagramCapabilities } = await import("../dist/index.js");
+  const fixture = await startInstagramLoginFixture();
+  try {
+    const connector = new InstagramConnector({
+      baseUrl: fixture.facebookTrapBaseUrl,
+      instagramLoginGraphBaseUrl: fixture.graphBaseUrl,
+      instagramLoginAuthorizeBaseUrl: fixture.authorizeBaseUrl,
+      instagramLoginTokenEndpoint: fixture.tokenEndpoint,
+      instagramLoginLongTokenEndpoint: fixture.longTokenEndpoint,
+      instagramLoginRefreshEndpoint: fixture.refreshEndpoint,
+    });
+    const providerConfig = {
+      platformId: "instagram",
+      clientId: "ig-app-id",
+      clientSecret: "ig-app-secret",
+      redirectUri: "https://app.example.test/instagram/callback",
+      enabled: true,
+      metadata: { authMode: "INSTAGRAM_LOGIN" },
+    };
+    const contract = {
+      id: "INSTAGRAM_LOGIN",
+      authorizationEndpoint: fixture.authorizeBaseUrl,
+      tokenEndpoint: fixture.tokenEndpoint,
+      defaultScopes: ["instagram_business_basic", "instagram_business_manage_comments"],
+      pkceRequired: false,
+      supportsRefresh: true,
+      supportsRevocation: false,
+      apiBaseUrl: fixture.graphBaseUrl,
+    };
+    const oauth = connector.getOAuthAdapter();
+    const authUrl = oauth.buildAuthorizationUrl({
+      providerConfig,
+      contract,
+      state: "state",
+      codeChallenge: "unused",
+      requestedScopes: contract.defaultScopes,
+    });
+    assert.equal(authUrl.pathname, "/oauth/authorize");
+    assert.equal(authUrl.searchParams.get("scope"), "instagram_business_basic,instagram_business_manage_comments");
+    assert.equal(authUrl.searchParams.get("scope").includes("instagram_basic"), false);
+    assert.equal(authUrl.searchParams.get("scope").includes("pages_show_list"), false);
+
+    const exchanged = await oauth.exchangeAuthorizationCode({
+      providerConfig,
+      contract,
+      code: "ig-code",
+      codeVerifier: "unused",
+      redirectUri: providerConfig.redirectUri,
+    });
+    assert.equal(exchanged.accessToken, "ig-long-token");
+    assert.equal(exchanged.refreshToken, "ig-long-token");
+    assert.deepEqual(exchanged.grantedScopes, [
+      "instagram_business_basic",
+      "instagram_business_manage_insights",
+      "instagram_business_manage_comments",
+    ]);
+
+    const credentials = {
+      accessToken: exchanged.accessToken,
+      refreshToken: exchanged.refreshToken,
+      scopes: exchanged.grantedScopes,
+      metadata: { authMode: "INSTAGRAM_LOGIN" },
+    };
+    const identity = await oauth.verifyIdentity(credentials, { ...directInstagramCtx(), credentials });
+    assert.equal(identity.externalId, "ig-direct-1");
+    const assets = await connector.listAssets({ ...credentials, metadata: { ...credentials.metadata, providerUserId: identity.externalId } });
+    assert.equal(assets.length, 1);
+    assert.equal(assets[0].assetId, "ig-direct-1");
+    assert.equal(assets[0].tokenKind, "USER");
+    assert.equal(assets[0].parentAssetId, undefined);
+
+    const selectedCredentials = { ...credentials, metadata: { ...credentials.metadata, assetId: "ig-direct-1" } };
+    const profile = await connector.getAuthenticatedProfile({ ...directInstagramCtx(), credentials: selectedCredentials });
+    assert.equal(profile.handle, "direct_ig");
+    const media = await connector.getContentPage({ limit: 5 }, { ...directInstagramCtx(), credentials: selectedCredentials });
+    assert.equal(media.items[0].externalId, "direct-media-1");
+    assert.equal(media.cursor.hasMore, true);
+    const comments = await connector.getInteractionsPage({ accountId: "direct-media-1" }, { ...directInstagramCtx(), credentials: selectedCredentials });
+    assert.equal(comments.items[0].externalId, "direct-comment-1");
+    assert.equal(comments.cursor.hasMore, true);
+    const comments2 = await connector.getInteractionsPage({ accountId: "direct-media-1", cursor: comments.cursor.value }, { ...directInstagramCtx(), credentials: selectedCredentials });
+    assert.equal(comments2.items[0].externalId, "direct-comment-2");
+    const refreshed = await oauth.refreshAccessToken({ providerConfig, contract, refreshToken: "ig-long-token" });
+    assert.equal(refreshed.accessToken, "ig-refreshed-token");
+
+    assert.equal(fixture.requests.facebookTrap.length, 0);
+    assert.equal(fixture.requests.graph.some((request) => request.path === "/v26.0/me"), true);
+    assert.equal(fixture.requests.graph.some((request) => request.path === "/v26.0/me/accounts"), false);
+    assert.equal(fixture.requests.graph.some((request) => request.path === "/v26.0/ig-direct-1/media"), true);
+    assert.equal(fixture.requests.graph.some((request) => request.path === "/v26.0/direct-media-1/comments"), true);
+    assert.equal(fixture.requests.token[0].method, "POST");
+    assert.equal(fixture.requests.token[0].body.grant_type, "authorization_code");
+    assert.equal(fixture.requests.graph.some((request) => request.path === "/access_token"), true);
+    assert.equal(fixture.requests.graph.some((request) => request.path === "/refresh_access_token"), true);
+    assert.equal(evaluateInstagramCapabilities({
+      configured: true,
+      authMode: "INSTAGRAM_LOGIN",
+      grantedScopes: ["instagram_business_basic"],
+    }).content, "AVAILABLE");
+    assert.equal(evaluateInstagramCapabilities({
+      configured: true,
+      authMode: "INSTAGRAM_LOGIN",
+      grantedScopes: ["instagram_basic", "instagram_manage_comments"],
+    }).content, "PERMISSION_REQUIRED");
   } finally {
     await fixture.close();
   }

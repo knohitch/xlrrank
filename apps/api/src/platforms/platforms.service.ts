@@ -33,8 +33,10 @@ import type {
   MetaAsset,
   NormalizedProfile,
   OAuthCapableConnector,
+  OAuthProviderContract,
   ProviderApplicationConfig,
 } from "@xlrrank/social-core";
+import type { ConnectorManifest } from "@xlrrank/shared";
 import { AuditService } from "../audit/audit.service.js";
 import {
   decryptSecret,
@@ -294,13 +296,14 @@ export class PlatformsService {
     }
     const scope = await this.resolveRequestedScope(userId, input);
     const providerConfig = await this.loadProviderAppConfig(platform);
+    const oauthContract = resolveOAuthContract(connector.getManifest().oauth, providerConfig);
     const state = randomBytes(32).toString("base64url");
     const stateDigest = digest(state);
     const pkceVerifier = randomBytes(64).toString("base64url");
     const codeChallenge = base64UrlSha256(pkceVerifier);
     const requestedScopes = this.normalizeScopes(
       input.requestedScopes,
-      connector.getManifest().oauth?.defaultScopes ?? [],
+      oauthContract.defaultScopes,
       platform.slug,
     );
     const redirectTo = safeLocalRedirect(input.redirectTo ?? "/platforms");
@@ -323,7 +326,11 @@ export class PlatformsService {
         JSON.stringify(requestedScopes),
         redirectTo,
         expiresAt,
-        JSON.stringify({ scopeType: scope.scopeType, organizationId: scope.organizationId }),
+        JSON.stringify({
+          scopeType: scope.scopeType,
+          organizationId: scope.organizationId,
+          authMode: oauthContract.id,
+        }),
       ],
     );
 
@@ -331,6 +338,7 @@ export class PlatformsService {
       .getOAuthAdapter()
       .buildAuthorizationUrl({
         providerConfig,
+        contract: oauthContract,
         state,
         codeChallenge,
         requestedScopes,
@@ -382,11 +390,14 @@ export class PlatformsService {
     }
     if (!input.code) throw new BadRequestException("OAuth authorization code is required.");
     const providerConfig = await this.loadProviderAppConfig(platform);
+    const callbackProviderConfig = providerConfigWithAuthMode(providerConfig, transaction.authMode);
+    const oauthContract = resolveOAuthContract(connector.getManifest().oauth, callbackProviderConfig);
     const tokenResult = await connector.getOAuthAdapter().exchangeAuthorizationCode({
-      providerConfig,
+      providerConfig: callbackProviderConfig,
+      contract: oauthContract,
       code: input.code,
       codeVerifier: transaction.pkceVerifier,
-      redirectUri: providerConfig.redirectUri,
+      redirectUri: callbackProviderConfig.redirectUri,
     });
     const credentials: ConnectorCredentials = {
       accessToken: tokenResult.accessToken,
@@ -398,11 +409,11 @@ export class PlatformsService {
     if (tokenResult.refreshToken) credentials.refreshToken = tokenResult.refreshToken;
     if (tokenResult.expiresAt) credentials.expiresAt = tokenResult.expiresAt;
     if (tokenResult.tokenType) credentials.metadata!.tokenType = tokenResult.tokenType;
-    if (typeof providerConfig.metadata?.environment === "string") {
-      credentials.metadata!.providerConfigEnvironment = providerConfig.metadata.environment;
+    if (typeof callbackProviderConfig.metadata?.environment === "string") {
+      credentials.metadata!.providerConfigEnvironment = callbackProviderConfig.metadata.environment;
     }
-    if (typeof providerConfig.metadata?.authMode === "string") {
-      credentials.metadata!.authMode = providerConfig.metadata.authMode;
+    if (typeof callbackProviderConfig.metadata?.authMode === "string") {
+      credentials.metadata!.authMode = callbackProviderConfig.metadata.authMode;
     }
     const profile = await connector.getOAuthAdapter().verifyIdentity(credentials, {
       scopeId: transaction.scopeId,
@@ -415,7 +426,8 @@ export class PlatformsService {
     };
     const capabilityInput: CapabilityEvaluationInput = { configured: true };
     if (credentials.scopes) capabilityInput.grantedScopes = credentials.scopes;
-    const access = objectFromMetadata(providerConfig.metadata, "access");
+    if (typeof credentials.metadata?.authMode === "string") capabilityInput.authMode = credentials.metadata.authMode;
+    const access = objectFromMetadata(callbackProviderConfig.metadata, "access");
     if (access) capabilityInput.access = access;
     const capabilities = connector.evaluateCapabilities?.(capabilityInput) ?? {};
     if (hasMetaAssetLister(connector)) {
@@ -425,7 +437,7 @@ export class PlatformsService {
         actorUserId: userId,
         providerUserId: profile.externalId,
         credentials,
-        providerConfig,
+        providerConfig: callbackProviderConfig,
         assets: await connector.listAssets(credentials, {
           scopeId: transaction.scopeId,
           connectionId: "meta-asset-discovery",
@@ -462,7 +474,7 @@ export class PlatformsService {
         providerUserId: profile.externalId,
         grantedScopes: credentials.scopes ?? [],
         grantedCapabilities: capabilities,
-        access: objectFromMetadata(providerConfig.metadata, "access") ?? {},
+        access: objectFromMetadata(callbackProviderConfig.metadata, "access") ?? {},
       },
     });
     const sync = await createSocialConnectionSyncRequest({
@@ -668,6 +680,7 @@ export class PlatformsService {
     const capabilities = connector.evaluateCapabilities?.({
       configured: true,
       grantedScopes: credentials.scopes ?? [],
+      authMode: typeof credentials.metadata?.authMode === "string" ? credentials.metadata.authMode : undefined,
     }) ?? {};
     const persistResult = await this.persistConnectedConnection({
       scopeId: auth.scope_id,
@@ -682,6 +695,7 @@ export class PlatformsService {
         providerAssetId: asset.provider_asset_id,
         parentProviderAssetId: asset.parent_provider_asset_id,
         assetType: asset.asset_type,
+        authMode: typeof credentials.metadata?.authMode === "string" ? credentials.metadata.authMode : undefined,
         grantedScopes: credentials.scopes ?? [],
         grantedCapabilities: capabilities,
       },
@@ -949,6 +963,7 @@ export class PlatformsService {
                 assetId: asset.assetId,
                 parentAssetId: asset.parentAssetId,
                 tokenKind: asset.tokenKind,
+                ...asset.metadata,
               },
             }),
             undefined,
@@ -1134,7 +1149,13 @@ export class PlatformsService {
   ): string[] {
     const allowed = new Set(defaults);
     const source = requested && requested.length ? requested : defaults;
-    const normalized = source.filter((scope) => allowed.has(scope));
+    const invalid = source.filter((scope) => !allowed.has(scope));
+    if (invalid.length) {
+      throw new BadRequestException(
+        `Requested OAuth scopes are not allowed for this authorization mode: ${invalid.join(", ")}`,
+      );
+    }
+    const normalized = [...source];
     if (platformSlug === "x") {
       if (!normalized.includes("tweet.read")) normalized.push("tweet.read");
       if (!normalized.includes("users.read")) normalized.push("users.read");
@@ -1152,6 +1173,7 @@ export class PlatformsService {
     pkceVerifier: string;
     requestedScopes: string[];
     redirectTo: string;
+    authMode?: string | undefined;
   }> {
     const client = await getPool().connect();
     try {
@@ -1166,10 +1188,11 @@ export class PlatformsService {
         redirect_to: string;
         expires_at: Date;
         used_at: Date | null;
+        metadata: Record<string, unknown> | null;
       }>(
         `
           SELECT id, platform_id, scope_id, actor_user_id, pkce_verifier,
-                 requested_scopes, redirect_to, expires_at, used_at
+                 requested_scopes, redirect_to, expires_at, used_at, metadata
           FROM oauth_authorization_transactions
           WHERE state_digest = $1
           LIMIT 1
@@ -1201,6 +1224,7 @@ export class PlatformsService {
           ? row.requested_scopes.filter((value): value is string => typeof value === "string")
           : [],
         redirectTo: row.redirect_to,
+        authMode: typeof row.metadata?.authMode === "string" ? row.metadata.authMode : undefined,
       };
     } catch (err) {
       await client.query("ROLLBACK");
@@ -1451,10 +1475,52 @@ function evaluateConnectorCapabilities(input: {
       configured: input.configured,
       grantedScopes: input.grantedScopes,
     };
+    const authMode = stringFromMetadata(input.metadata, "authMode");
+    if (authMode) evaluation.authMode = authMode;
     if (access) evaluation.access = access;
     return (
       instance as { evaluateCapabilities(input: CapabilityEvaluationInput): unknown }
     ).evaluateCapabilities(evaluation);
   }
   return input.connector.manifest.capabilities;
+}
+
+function resolveOAuthContract(
+  oauth: ConnectorManifest["oauth"] | undefined,
+  providerConfig: ProviderApplicationConfig,
+): OAuthProviderContract {
+  if (!oauth) throw new BadRequestException("This platform does not support OAuth authorization.");
+  const requestedMode =
+    typeof providerConfig.metadata?.authMode === "string" ? providerConfig.metadata.authMode : undefined;
+  const mode = requestedMode
+    ? oauth.authModes?.find((entry) => entry.id === requestedMode)
+    : undefined;
+  if (requestedMode && !mode) {
+    throw new BadRequestException("Configured OAuth authorization mode is not supported.");
+  }
+  const contract: OAuthProviderContract = {
+    authorizationEndpoint: mode?.authorizationEndpoint ?? oauth.authorizationEndpoint,
+    tokenEndpoint: mode?.tokenEndpoint ?? oauth.tokenEndpoint,
+    defaultScopes: mode?.defaultScopes ?? oauth.defaultScopes,
+    pkceRequired: mode?.pkceRequired ?? oauth.pkceRequired,
+    supportsRefresh: mode?.supportsRefresh ?? oauth.supportsRefresh,
+    supportsRevocation: mode?.supportsRevocation ?? oauth.supportsRevocation,
+  };
+  if (mode?.id) contract.id = mode.id;
+  if (mode?.apiBaseUrl) contract.apiBaseUrl = mode.apiBaseUrl;
+  return contract;
+}
+
+function providerConfigWithAuthMode(
+  providerConfig: ProviderApplicationConfig,
+  authMode: string | undefined,
+): ProviderApplicationConfig {
+  if (!authMode) return providerConfig;
+  return {
+    ...providerConfig,
+    metadata: {
+      ...(providerConfig.metadata ?? {}),
+      authMode,
+    },
+  };
 }

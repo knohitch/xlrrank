@@ -11,6 +11,8 @@ let database;
 let shared;
 let service;
 let tokenCalls = 0;
+let instagramLoginTokenCalls = 0;
+let metaRequests = [];
 const originalFetch = globalThis.fetch;
 
 async function setup() {
@@ -28,9 +30,13 @@ async function setup() {
 async function reset() {
   await setup();
   tokenCalls = 0;
+  instagramLoginTokenCalls = 0;
+  metaRequests = [];
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input));
     if (url.hostname === "graph.facebook.com") return metaJson(url);
+    if (url.hostname === "graph.instagram.com") return instagramGraphJson(url);
+    if (url.hostname === "api.instagram.com") return instagramTokenJson(url, init);
     if (url.hostname !== "api.x.com") throw new Error(`Unexpected outbound fetch: ${url}`);
     if (url.pathname === "/2/oauth2/token") {
       tokenCalls += 1;
@@ -64,6 +70,7 @@ async function reset() {
 }
 
 function metaJson(url) {
+  metaRequests.push({ host: url.hostname, method: "GET", path: url.pathname, params: Object.fromEntries(url.searchParams) });
   if (url.pathname === "/v26.0/oauth/access_token") {
     return json({
       token_type: "bearer",
@@ -123,6 +130,52 @@ function metaJson(url) {
   return json({ error: { message: `not found: ${url.pathname}` } }, 404);
 }
 
+function instagramTokenJson(url, init) {
+  const body = init.body instanceof URLSearchParams
+    ? Object.fromEntries(init.body)
+    : Object.fromEntries(new URLSearchParams(String(init.body ?? "")));
+  metaRequests.push({ host: url.hostname, method: init.method ?? "GET", path: url.pathname, body });
+  if (url.pathname === "/oauth/access_token" && init.method === "POST") {
+    instagramLoginTokenCalls += 1;
+    return json({ access_token: `ig-short-token-${instagramLoginTokenCalls}`, user_id: "ig-direct-a" });
+  }
+  return json({ error: { message: `not found: ${url.pathname}` } }, 404);
+}
+
+function instagramGraphJson(url) {
+  metaRequests.push({ host: url.hostname, method: "GET", path: url.pathname, params: Object.fromEntries(url.searchParams) });
+  if (url.pathname === "/access_token") {
+    assert.equal(url.searchParams.get("grant_type"), "ig_exchange_token");
+    assert.match(url.searchParams.get("access_token") ?? "", /^ig-short-token-\d+$/);
+    return json({ access_token: "ig-long-token", token_type: "bearer", expires_in: 5184000 });
+  }
+  if (url.pathname === "/refresh_access_token") {
+    assert.equal(url.searchParams.get("grant_type"), "ig_refresh_token");
+    return json({ access_token: "ig-refreshed-token", token_type: "bearer", expires_in: 5184000 });
+  }
+  if (url.searchParams.get("access_token") !== "ig-long-token") {
+    return json({ error: { type: "OAuthException", code: 190, message: "bad token" } }, 401);
+  }
+  if (url.pathname === "/v26.0/me" || url.pathname === "/v26.0/ig-direct-a") {
+    return json({
+      user_id: "ig-direct-a",
+      username: "ig_direct_a",
+      name: "Instagram Direct A",
+      followers_count: 40,
+      follows_count: 6,
+      media_count: 2,
+      account_type: "BUSINESS",
+    });
+  }
+  if (url.pathname === "/v26.0/ig-direct-a/media") {
+    return json({ data: [{ id: "ig-direct-media-a", caption: "direct media", media_type: "IMAGE", timestamp: "2026-03-01T00:00:00+0000" }] });
+  }
+  if (url.pathname === "/v26.0/ig-direct-media-a/comments") {
+    return json({ data: [{ id: "ig-direct-comment-a", text: "direct comment", timestamp: "2026-03-01T01:00:00+0000", username: "commenter" }] });
+  }
+  return json({ error: { message: `not found: ${url.pathname}` } }, 404);
+}
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -178,7 +231,7 @@ async function metaPlatform(slug = "facebook") {
   return result.rows[0].id;
 }
 
-async function metaProviderConfig(platformId, slug = "facebook") {
+async function metaProviderConfig(platformId, slug = "facebook", metadata = {}) {
   const configId = randomUUID();
   const encrypted = shared.encryptSecret(
     "meta-app-secret",
@@ -197,9 +250,9 @@ async function metaProviderConfig(platformId, slug = "facebook") {
       )
       VALUES ($1, $2, 'test', 'meta-app-id', $3,
         'https://app.example.test/platforms/meta/oauth/callback', true,
-        '{"webhookVerifyToken":"verify-token"}'::jsonb)
+        $4::jsonb)
     `,
-    [configId, platformId, encrypted],
+    [configId, platformId, encrypted, JSON.stringify({ webhookVerifyToken: "verify-token", ...metadata })],
   );
 }
 
@@ -526,6 +579,140 @@ test("Meta OAuth E2E: shared grant, multi-asset selection, AAD, and IDOR", { ski
         scopeType: "ORGANIZATION",
         organizationId: orgB,
       }),
+    /denied/,
+  );
+  await assert.rejects(
+    () => service.listAuthorizationAssets(orgCallback.authorizationId, userB),
+    /denied/,
+  );
+});
+
+test("Instagram Login OAuth E2E: direct auth mode, asset, AAD, and scope isolation", { skip }, async () => {
+  await reset();
+  const [userA, userB] = await Promise.all([user("ig-login-a@example.test"), user("ig-login-b@example.test")]);
+  const instagramPlatformId = await metaPlatform("instagram");
+  await metaProviderConfig(instagramPlatformId, "instagram", { authMode: "INSTAGRAM_LOGIN" });
+
+  await assert.rejects(
+    () => service.startOAuth("instagram", userA, { requestedScopes: ["instagram_basic"] }),
+    /not allowed/,
+  );
+  const start = await service.startOAuth("instagram", userA, {
+    redirectTo: "/platforms/instagram",
+    requestedScopes: ["instagram_business_basic", "instagram_business_manage_comments"],
+  });
+  const authorizationUrl = new URL(start.authorizationUrl);
+  assert.equal(authorizationUrl.hostname, "www.instagram.com");
+  assert.equal(authorizationUrl.pathname, "/oauth/authorize");
+  assert.equal(authorizationUrl.searchParams.get("scope"), "instagram_business_basic,instagram_business_manage_comments");
+  assert.equal(authorizationUrl.searchParams.get("scope").includes("instagram_basic"), false);
+  assert.equal(authorizationUrl.searchParams.get("scope").includes("pages_show_list"), false);
+
+  const callback = await service.handleOAuthCallback("instagram", userA, {
+    state: stateFrom(start),
+    code: "ig-login-code",
+  });
+  assert.equal(callback.status, "ASSET_SELECTION_REQUIRED");
+  assert.equal(callback.assets.length, 1);
+  assert.equal(callback.assets[0].providerAssetId, "ig-direct-a");
+  assert.equal(callback.assets[0].parentProviderAssetId, null);
+  assert.equal(metaRequests.some((request) => request.host === "graph.instagram.com" && request.path === "/v26.0/me"), true);
+  assert.equal(metaRequests.some((request) => request.host === "graph.instagram.com" && request.path === "/v26.0/me/accounts"), false);
+  assert.equal(metaRequests.some((request) => request.host === "api.instagram.com" && request.path === "/oauth/access_token" && request.method === "POST"), true);
+  assert.equal(metaRequests.some((request) => request.host === "graph.instagram.com" && request.path === "/access_token"), true);
+  assert.equal(metaRequests.some((request) => request.host === "graph.facebook.com"), false);
+
+  const listed = await service.listAuthorizationAssets(callback.authorizationId, userA);
+  assert.equal(JSON.stringify(listed).includes("ig-long-token"), false);
+  const asset = listed.assets[0];
+  assert.equal(asset.providerAssetId, "ig-direct-a");
+  await assert.rejects(
+    () => service.listAuthorizationAssets(callback.authorizationId, userB),
+    /denied/,
+  );
+  await assert.rejects(
+    () => service.connectAuthorizationAsset(callback.authorizationId, "ig-direct-a", userA),
+    /not found/i,
+  );
+
+  const connected = await service.connectAuthorizationAsset(callback.authorizationId, asset.id, userA);
+  assert.equal(connected.platformId, instagramPlatformId);
+  assert.equal(connected.externalAccountId, "ig-direct-a");
+  const duplicate = await service.connectAuthorizationAsset(callback.authorizationId, asset.id, userA);
+  assert.equal(duplicate.duplicate, true);
+
+  const grant = (
+    await pool.query(
+      "SELECT id, scope_id, provider_user_id, credentials_encrypted, granted_scopes FROM provider_authorizations WHERE id = $1",
+      [callback.authorizationId],
+    )
+  ).rows[0];
+  assert.equal(grant.provider_user_id, "ig-direct-a");
+  assert.deepEqual(grant.granted_scopes, [
+    "instagram_business_basic",
+    "instagram_business_manage_insights",
+    "instagram_business_manage_comments",
+  ]);
+  const grantPlain = JSON.parse(shared.decryptSecret(
+    grant.credentials_encrypted,
+    undefined,
+    shared.providerAuthorizationAssociatedData({
+      authorizationId: grant.id,
+      scopeId: grant.scope_id,
+      providerFamily: "meta",
+    }),
+  ));
+  assert.equal(grantPlain.accessToken, "ig-long-token");
+  assert.equal(grantPlain.metadata.authMode, "INSTAGRAM_LOGIN");
+
+  const assetRow = (
+    await pool.query(
+      `
+        SELECT paa.id, paa.provider_authorization_id, pa.scope_id, p.slug,
+               paa.provider_asset_id, paa.credentials_encrypted
+        FROM provider_authorization_assets paa
+        JOIN provider_authorizations pa ON pa.id = paa.provider_authorization_id
+        JOIN platforms p ON p.id = paa.platform_id
+        WHERE paa.id = $1
+      `,
+      [asset.id],
+    )
+  ).rows[0];
+  const assetPlain = JSON.parse(shared.decryptSecret(
+    assetRow.credentials_encrypted,
+    undefined,
+    shared.providerAuthorizationAssetAssociatedData({
+      authorizationAssetId: assetRow.id,
+      authorizationId: assetRow.provider_authorization_id,
+      scopeId: assetRow.scope_id,
+      platformSlug: assetRow.slug,
+      providerAssetId: assetRow.provider_asset_id,
+    }),
+  ));
+  assert.equal(assetPlain.accessToken, "ig-long-token");
+  assert.equal(assetPlain.metadata.authMode, "INSTAGRAM_LOGIN");
+
+  const connection = (
+    await pool.query(
+      "SELECT credentials_encrypted, provider_metadata FROM social_connections WHERE verified_external_id = 'ig-direct-a'",
+    )
+  ).rows[0];
+  assert.equal(connection.credentials_encrypted.includes("ig-long-token"), false);
+  assert.equal(JSON.stringify(connection.provider_metadata).includes("ig-long-token"), false);
+  assert.equal(connection.provider_metadata.authMode, "INSTAGRAM_LOGIN");
+
+  const orgA = await organizationWithManager(userA, "Instagram Login Org A");
+  const orgB = await organizationWithManager(userB, "Instagram Login Org B");
+  const orgStart = await service.startOAuth("instagram", userA, {
+    scopeType: "ORGANIZATION",
+    organizationId: orgA,
+  });
+  const orgCallback = await service.handleOAuthCallback("instagram", userA, {
+    state: stateFrom(orgStart),
+    code: "ig-org-code",
+  });
+  await assert.rejects(
+    () => service.startOAuth("instagram", userA, { scopeType: "ORGANIZATION", organizationId: orgB }),
     /denied/,
   );
   await assert.rejects(

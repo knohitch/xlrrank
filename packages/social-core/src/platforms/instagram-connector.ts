@@ -37,6 +37,9 @@ const ADAPTER_VERSION = "instagram-graph-v26-2026-09-08";
 const INSTAGRAM_AUTHORIZATION_ENDPOINT = `${META_DIALOG_BASE_URL}/${META_GRAPH_API_VERSION}/dialog/oauth`;
 const INSTAGRAM_LOGIN_AUTHORIZATION_ENDPOINT = "https://www.instagram.com/oauth/authorize";
 const INSTAGRAM_LOGIN_TOKEN_ENDPOINT = "https://api.instagram.com/oauth/access_token";
+const INSTAGRAM_GRAPH_BASE_URL = "https://graph.instagram.com";
+const INSTAGRAM_LOGIN_LONG_TOKEN_ENDPOINT = `${INSTAGRAM_GRAPH_BASE_URL}/access_token`;
+const INSTAGRAM_LOGIN_REFRESH_ENDPOINT = `${INSTAGRAM_GRAPH_BASE_URL}/refresh_access_token`;
 const INSTAGRAM_SCOPES = [
   "public_profile",
   "pages_show_list",
@@ -50,7 +53,10 @@ const INSTAGRAM_LOGIN_SCOPES = [
   "instagram_business_manage_comments",
 ];
 
-const INSTAGRAM_CAPABILITY_MATRIX: Record<ConnectorCapability, { scopes: string[]; state: AvailabilityState }> = {
+type InstagramAuthMode = "FACEBOOK_LOGIN" | "INSTAGRAM_LOGIN";
+
+const INSTAGRAM_CAPABILITY_MATRIX: Record<InstagramAuthMode, Record<ConnectorCapability, { scopes: string[]; state: AvailabilityState }>> = {
+  FACEBOOK_LOGIN: {
   profiles: { scopes: ["instagram_basic"], state: "CONFIGURATION_REQUIRED" },
   content: { scopes: ["instagram_basic"], state: "CONFIGURATION_REQUIRED" },
   comments: { scopes: ["instagram_manage_comments"], state: "CONFIGURATION_REQUIRED" },
@@ -61,18 +67,38 @@ const INSTAGRAM_CAPABILITY_MATRIX: Record<ConnectorCapability, { scopes: string[
   audience_insights: { scopes: [], state: "UNAVAILABLE" },
   messages: { scopes: [], state: "UNAVAILABLE" },
   publishing: { scopes: [], state: "UNAVAILABLE" },
+  },
+  INSTAGRAM_LOGIN: {
+    profiles: { scopes: ["instagram_business_basic"], state: "CONFIGURATION_REQUIRED" },
+    content: { scopes: ["instagram_business_basic"], state: "CONFIGURATION_REQUIRED" },
+    comments: { scopes: ["instagram_business_manage_comments"], state: "CONFIGURATION_REQUIRED" },
+    metrics: { scopes: ["instagram_business_basic"], state: "CONFIGURATION_REQUIRED" },
+    search: { scopes: [], state: "UNAVAILABLE" },
+    followers: { scopes: [], state: "UNAVAILABLE" },
+    following: { scopes: [], state: "UNAVAILABLE" },
+    audience_insights: { scopes: [], state: "UNAVAILABLE" },
+    messages: { scopes: [], state: "UNAVAILABLE" },
+    publishing: { scopes: [], state: "UNAVAILABLE" },
+  },
 };
 
 export interface InstagramConnectorOptions {
   baseUrl?: string | undefined;
+  instagramLoginGraphBaseUrl?: string | undefined;
   authorizeBaseUrl?: string | undefined;
+  instagramLoginAuthorizeBaseUrl?: string | undefined;
+  instagramLoginTokenEndpoint?: string | undefined;
+  instagramLoginLongTokenEndpoint?: string | undefined;
+  instagramLoginRefreshEndpoint?: string | undefined;
   fetchImpl?: typeof fetch | undefined;
 }
 
 export function evaluateInstagramCapabilities(input: CapabilityEvaluationInput) {
+  const mode = instagramAuthModeFromInput(input.authMode);
+  const matrix = INSTAGRAM_CAPABILITY_MATRIX[mode];
   const granted = new Set(input.grantedScopes ?? []);
   const output: Partial<Record<ConnectorCapability, AvailabilityState>> = {};
-  for (const [capability, details] of Object.entries(INSTAGRAM_CAPABILITY_MATRIX) as Array<[ConnectorCapability, { scopes: string[]; state: AvailabilityState }]>) {
+  for (const [capability, details] of Object.entries(matrix) as Array<[ConnectorCapability, { scopes: string[]; state: AvailabilityState }]>) {
     if (details.state === "UNAVAILABLE") output[capability] = "UNAVAILABLE";
     else if (!input.configured) output[capability] = "CONFIGURATION_REQUIRED";
     else if (details.scopes.some((scope) => !granted.has(scope))) output[capability] = "PERMISSION_REQUIRED";
@@ -89,7 +115,7 @@ export class InstagramConnector extends BaseSocialConnector {
     version: "0.2.0",
     apiVersion: META_GRAPH_API_VERSION,
     capabilities: Object.fromEntries(
-      Object.entries(INSTAGRAM_CAPABILITY_MATRIX).map(([key, value]) => [key, value.state]),
+      Object.entries(INSTAGRAM_CAPABILITY_MATRIX.FACEBOOK_LOGIN).map(([key, value]) => [key, value.state]),
     ) as Partial<Record<ConnectorCapability, AvailabilityState>>,
     providerConfig: {
       fields: [
@@ -112,21 +138,32 @@ export class InstagramConnector extends BaseSocialConnector {
           authorizationEndpoint: INSTAGRAM_AUTHORIZATION_ENDPOINT,
           tokenEndpoint: `https://graph.facebook.com/${META_GRAPH_API_VERSION}/oauth/access_token`,
           defaultScopes: INSTAGRAM_SCOPES,
+          pkceRequired: false,
+          supportsRefresh: true,
+          supportsRevocation: false,
+          apiBaseUrl: "https://graph.facebook.com",
         },
         {
           id: "INSTAGRAM_LOGIN",
           authorizationEndpoint: INSTAGRAM_LOGIN_AUTHORIZATION_ENDPOINT,
           tokenEndpoint: INSTAGRAM_LOGIN_TOKEN_ENDPOINT,
           defaultScopes: INSTAGRAM_LOGIN_SCOPES,
+          pkceRequired: false,
+          supportsRefresh: true,
+          supportsRevocation: false,
+          apiBaseUrl: INSTAGRAM_GRAPH_BASE_URL,
         },
       ],
     },
   };
 
   private readonly client: MetaGraphClient;
+  private readonly instagramLoginClient: MetaGraphClient;
   private readonly authorizeBaseUrl: string;
   private readonly instagramLoginAuthorizeBaseUrl: string;
-  private readonly instagramLoginTokenBaseUrl: string;
+  private readonly instagramLoginTokenEndpoint: string;
+  private readonly instagramLoginLongTokenEndpoint: string;
+  private readonly instagramLoginRefreshEndpoint: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: InstagramConnectorOptions = {}) {
@@ -136,11 +173,31 @@ export class InstagramConnector extends BaseSocialConnector {
       fetchImpl: options.fetchImpl,
       connectorId: "instagram",
     });
+    this.instagramLoginClient = new MetaGraphClient({
+      baseUrl:
+        options.instagramLoginGraphBaseUrl ??
+        process.env.INSTAGRAM_GRAPH_BASE_URL ??
+        INSTAGRAM_GRAPH_BASE_URL,
+      fetchImpl: options.fetchImpl,
+      connectorId: "instagram",
+    });
     this.authorizeBaseUrl = options.authorizeBaseUrl ?? process.env.META_OAUTH_AUTHORIZE_URL ?? INSTAGRAM_AUTHORIZATION_ENDPOINT;
     this.instagramLoginAuthorizeBaseUrl =
-      process.env.INSTAGRAM_LOGIN_OAUTH_AUTHORIZE_URL ?? INSTAGRAM_LOGIN_AUTHORIZATION_ENDPOINT;
-    this.instagramLoginTokenBaseUrl =
-      process.env.INSTAGRAM_LOGIN_TOKEN_BASE_URL ?? INSTAGRAM_LOGIN_TOKEN_ENDPOINT;
+      options.instagramLoginAuthorizeBaseUrl ??
+      process.env.INSTAGRAM_LOGIN_OAUTH_AUTHORIZE_URL ??
+      INSTAGRAM_LOGIN_AUTHORIZATION_ENDPOINT;
+    this.instagramLoginTokenEndpoint =
+      options.instagramLoginTokenEndpoint ??
+      process.env.INSTAGRAM_LOGIN_TOKEN_ENDPOINT ??
+      INSTAGRAM_LOGIN_TOKEN_ENDPOINT;
+    this.instagramLoginLongTokenEndpoint =
+      options.instagramLoginLongTokenEndpoint ??
+      process.env.INSTAGRAM_LOGIN_LONG_TOKEN_ENDPOINT ??
+      INSTAGRAM_LOGIN_LONG_TOKEN_ENDPOINT;
+    this.instagramLoginRefreshEndpoint =
+      options.instagramLoginRefreshEndpoint ??
+      process.env.INSTAGRAM_LOGIN_REFRESH_ENDPOINT ??
+      INSTAGRAM_LOGIN_REFRESH_ENDPOINT;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -178,10 +235,10 @@ export class InstagramConnector extends BaseSocialConnector {
 
   override async getProfile(identifier: string, context?: ConnectorOperationContext) {
     this.assertAvailable("profiles", context);
-    const response = await this.client.get<InstagramAccount>(
+    const response = await this.clientForCredentials(context?.credentials).get<InstagramAccount>(
       `/${encodeURIComponent(identifier)}`,
       token(this.requireAuth(context)),
-      new URLSearchParams({ fields: "id,username,name,biography,website,profile_picture_url,followers_count,follows_count,media_count,account_type" }),
+      new URLSearchParams({ fields: "id,user_id,username,name,biography,website,profile_picture_url,followers_count,follows_count,media_count,account_type" }),
       this.requestOptions(context),
     );
     const profile = normalizeInstagramProfile(response.body, context);
@@ -198,7 +255,7 @@ export class InstagramConnector extends BaseSocialConnector {
     });
     const cursor = decodeMetaCursor(options.cursor)?.after;
     if (typeof cursor === "string") query.set("after", cursor);
-    const response = await this.client.get<MetaEdge<InstagramMedia>>(
+    const response = await this.clientForCredentials(context?.credentials).get<MetaEdge<InstagramMedia>>(
       `/${encodeURIComponent(accountId)}/media`,
       token(this.requireAuth(context)),
       query,
@@ -235,6 +292,22 @@ export class InstagramConnector extends BaseSocialConnector {
   }
 
   async listAssets(credentials: ConnectorCredentials, context?: ConnectorOperationContext): Promise<MetaAsset[]> {
+    if (instagramAuthModeFromCredentials(credentials) === "INSTAGRAM_LOGIN") {
+      const profile = await this.getAuthenticatedProfileOrThrow(credentials, context);
+      return [{
+        platformId: "instagram",
+        assetType: "INSTAGRAM_PROFESSIONAL_ACCOUNT",
+        assetId: profile.externalId,
+        name: profile.displayName ?? profile.handle ?? profile.externalId,
+        handle: profile.handle,
+        tokenKind: "USER",
+        accessToken: credentials.accessToken,
+        metadata: {
+          authMode: "INSTAGRAM_LOGIN",
+          accountType: profile.metadata?.accountType,
+        },
+      }];
+    }
     const response = await this.client.get<MetaEdge<{ id?: unknown; name?: unknown; username?: unknown; access_token?: unknown; instagram_business_account?: InstagramAccount }>>(
       "/me/accounts",
       token(credentials),
@@ -259,10 +332,10 @@ export class InstagramConnector extends BaseSocialConnector {
   private async getAuthenticatedProfileOrThrow(credentials: ConnectorCredentials, context?: ConnectorOperationContext): Promise<NormalizedProfile> {
     const assetId = stringValue(credentials.metadata?.assetId) ?? stringValue(credentials.metadata?.instagramAccountId) ?? stringValue(credentials.metadata?.providerUserId);
     if (assetId) return this.getProfile(assetId, contextWithCredentials(credentials, context));
-    const response = await this.client.get<{ id?: unknown; user_id?: unknown; username?: unknown; name?: unknown }>(
+    const response = await this.clientForCredentials(credentials).get<{ id?: unknown; user_id?: unknown; username?: unknown; name?: unknown; account_type?: unknown }>(
       "/me",
       token(credentials),
-      new URLSearchParams({ fields: "id,user_id,username,name" }),
+      new URLSearchParams({ fields: "id,user_id,username,name,account_type" }),
       this.requestOptions(context, credentials),
     );
     const id = stringValue(response.body.user_id) ?? mustString(response.body.id, "me.id");
@@ -273,17 +346,16 @@ export class InstagramConnector extends BaseSocialConnector {
       displayName: stringValue(response.body.name),
       visibility: "SCOPE_PRIVATE",
       provenance: provenance(context),
-      metadata: { authMode: instagramAuthModeFromCredentials(credentials) },
+      metadata: { authMode: instagramAuthModeFromCredentials(credentials), accountType: stringValue(response.body.account_type) },
     };
     validateNormalizedProfile(profile);
     return profile;
   }
 
   private buildAuthorizationUrl(request: OAuthAuthorizationRequest): URL {
-    const url = new URL(this.authorizeBaseUrl);
     const mode = instagramAuthMode(request.providerConfig);
     if (mode === "INSTAGRAM_LOGIN") {
-      const directUrl = new URL(this.instagramLoginAuthorizeBaseUrl);
+      const directUrl = new URL(request.contract?.authorizationEndpoint ?? this.instagramLoginAuthorizeBaseUrl);
       directUrl.searchParams.set("client_id", request.providerConfig.clientId);
       directUrl.searchParams.set("redirect_uri", request.providerConfig.redirectUri);
       directUrl.searchParams.set("state", request.state);
@@ -291,6 +363,7 @@ export class InstagramConnector extends BaseSocialConnector {
       directUrl.searchParams.set("scope", request.requestedScopes.join(","));
       return directUrl;
     }
+    const url = new URL(request.contract?.authorizationEndpoint ?? this.authorizeBaseUrl);
     url.searchParams.set("client_id", request.providerConfig.clientId);
     url.searchParams.set("redirect_uri", request.providerConfig.redirectUri);
     url.searchParams.set("state", request.state);
@@ -310,18 +383,22 @@ export class InstagramConnector extends BaseSocialConnector {
       code: request.code,
     });
     const response = await this.client.postForm<{ access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown }>("/oauth/access_token", form, { signal });
-    return tokenResult(response.body);
+    return tokenResult(response.body, INSTAGRAM_SCOPES);
   }
 
   private async refreshAccessToken(request: OAuthTokenRefreshRequest, signal?: AbortSignal): Promise<OAuthTokenResult> {
     if (instagramAuthMode(request.providerConfig) === "INSTAGRAM_LOGIN") {
-      const form = new URLSearchParams({
-        grant_type: "ig_exchange_token",
-        client_secret: request.providerConfig.clientSecret ?? "",
+      const query = new URLSearchParams({
+        grant_type: "ig_refresh_token",
         access_token: request.refreshToken,
       });
-      const response = await this.postInstagramLoginToken(form, signal);
-      return tokenResult(response);
+      const response = await this.getInstagramLoginToken(
+        request.contract?.apiBaseUrl,
+        this.instagramLoginRefreshEndpoint,
+        query,
+        signal,
+      );
+      return tokenResult(response, INSTAGRAM_LOGIN_SCOPES);
     }
     const form = new URLSearchParams({
       grant_type: "fb_exchange_token",
@@ -330,7 +407,7 @@ export class InstagramConnector extends BaseSocialConnector {
       fb_exchange_token: request.refreshToken,
     });
     const response = await this.client.postForm<{ access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown }>("/oauth/access_token", form, { signal });
-    return tokenResult(response.body);
+    return tokenResult(response.body, INSTAGRAM_SCOPES);
   }
 
   private async exchangeInstagramLoginCode(
@@ -344,28 +421,48 @@ export class InstagramConnector extends BaseSocialConnector {
       redirect_uri: request.redirectUri,
       code: request.code,
     });
-    const response = await this.postInstagramLoginToken(form, signal);
-    return tokenResult({ ...response, scope: INSTAGRAM_LOGIN_SCOPES.join(",") });
+    const shortLived = await this.postInstagramLoginToken(request.contract?.tokenEndpoint, form, signal);
+    const shortToken = mustString(shortLived.access_token, "access_token");
+    const query = new URLSearchParams({
+      grant_type: "ig_exchange_token",
+      client_secret: request.providerConfig.clientSecret ?? "",
+      access_token: shortToken,
+    });
+    const longLived = await this.getInstagramLoginToken(
+      request.contract?.apiBaseUrl,
+      this.instagramLoginLongTokenEndpoint,
+      query,
+      signal,
+    );
+    return tokenResult(
+      { ...longLived, scope: INSTAGRAM_LOGIN_SCOPES.join(","), user_id: shortLived.user_id },
+      INSTAGRAM_LOGIN_SCOPES,
+    );
   }
 
   private async postInstagramLoginToken(
+    endpoint: string | undefined,
     form: URLSearchParams,
     signal?: AbortSignal,
-  ): Promise<{ access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown }> {
+  ): Promise<{ access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown; user_id?: unknown }> {
     const init: RequestInit = {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: form,
     };
     if (signal) init.signal = signal;
-    const response = await this.fetchImpl(this.instagramLoginTokenBaseUrl, init);
+    const response = await this.fetchImpl(endpoint ?? this.instagramLoginTokenEndpoint, init);
     const body = await response.json().catch(() => ({})) as Record<string, unknown>;
     if (!response.ok) throw new AuthenticationError("instagram", "Instagram Login token exchange failed");
     return body;
   }
 
   private assertAvailable(capability: ConnectorCapability, context?: ConnectorOperationContext): void {
-    const evaluated = evaluateInstagramCapabilities({ configured: true, grantedScopes: context?.credentials.scopes ?? [] });
+    const evaluated = evaluateInstagramCapabilities({
+      configured: true,
+      grantedScopes: context?.credentials.scopes ?? [],
+      authMode: instagramAuthModeFromCredentials(context?.credentials),
+    });
     const state = evaluated[capability];
     if (state !== "AVAILABLE") throw new CapabilityUnavailableError("instagram", capability, state ?? "unavailable");
   }
@@ -377,7 +474,12 @@ export class InstagramConnector extends BaseSocialConnector {
   }
 
   private requestOptions(context?: ConnectorOperationContext, credentials = context?.credentials) {
-    return { appSecret: stringValue(credentials?.metadata?.appSecret), signal: context?.signal };
+    return {
+      appSecret: instagramAuthModeFromCredentials(credentials) === "FACEBOOK_LOGIN"
+        ? stringValue(credentials?.metadata?.appSecret)
+        : undefined,
+      signal: context?.signal,
+    };
   }
 
   private async fetchCommentPage(
@@ -392,7 +494,7 @@ export class InstagramConnector extends BaseSocialConnector {
     });
     const cursor = decodeMetaCursor(options.cursor)?.after;
     if (typeof cursor === "string") query.set("after", cursor);
-    const response = await this.client.get<MetaEdge<InstagramComment>>(
+    const response = await this.clientForCredentials(context?.credentials).get<MetaEdge<InstagramComment>>(
       `/${encodeURIComponent(contentId)}/comments`,
       token(this.requireAuth(context)),
       query,
@@ -403,6 +505,30 @@ export class InstagramConnector extends BaseSocialConnector {
     const after = stringValue(response.body.paging?.cursors?.after);
     return { items, cursor: { value: after ? encodeMetaCursor({ after }) : null, hasMore: !!after }, rateLimit: response.rateLimit };
   }
+
+  private clientForCredentials(credentials?: ConnectorCredentials): MetaGraphClient {
+    return instagramAuthModeFromCredentials(credentials) === "INSTAGRAM_LOGIN"
+      ? this.instagramLoginClient
+      : this.client;
+  }
+
+  private async getInstagramLoginToken(
+    apiBaseUrl: string | undefined,
+    endpoint: string,
+    query: URLSearchParams,
+    signal?: AbortSignal,
+  ): Promise<{ access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown }> {
+    const configuredEndpoint = new URL(endpoint);
+    const baseUrl = apiBaseUrl ? new URL(apiBaseUrl) : undefined;
+    const url = baseUrl ? new URL(configuredEndpoint.pathname, baseUrl) : configuredEndpoint;
+    for (const [key, value] of query) url.searchParams.set(key, value);
+    const init: RequestInit = { method: "GET" };
+    if (signal) init.signal = signal;
+    const response = await this.fetchImpl(url, init);
+    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
+    if (!response.ok) throw new AuthenticationError("instagram", "Instagram Login token refresh failed");
+    return body;
+  }
 }
 
 interface MetaEdge<T> {
@@ -412,6 +538,7 @@ interface MetaEdge<T> {
 
 interface InstagramAccount {
   id?: unknown;
+  user_id?: unknown;
   username?: unknown;
   name?: unknown;
   biography?: unknown;
@@ -443,7 +570,7 @@ interface InstagramComment {
 }
 
 function normalizeInstagramProfile(account: InstagramAccount, context?: ConnectorOperationContext): NormalizedProfile {
-  const id = mustString(account.id, "account.id");
+  const id = stringValue(account.user_id) ?? mustString(account.id, "account.id");
   return {
     platformId: "instagram",
     externalId: id,
@@ -504,7 +631,10 @@ function token(credentials: ConnectorCredentials): string {
   return credentials.accessToken;
 }
 
-function tokenResult(body: { access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown }): OAuthTokenResult {
+function tokenResult(
+  body: { access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown; user_id?: unknown },
+  defaults: string[],
+): OAuthTokenResult {
   const accessToken = mustString(body.access_token, "access_token");
   const expiresIn = numberValue(body.expires_in);
   return {
@@ -513,8 +643,8 @@ function tokenResult(body: { access_token?: unknown; expires_in?: unknown; token
     tokenType: stringValue(body.token_type),
     expiresIn,
     expiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : undefined,
-    grantedScopes: typeof body.scope === "string" ? body.scope.split(/[,\s]+/).filter(Boolean) : INSTAGRAM_SCOPES,
-    rawProviderMetadata: {},
+    grantedScopes: typeof body.scope === "string" ? body.scope.split(/[,\s]+/).filter(Boolean) : defaults,
+    rawProviderMetadata: typeof body.user_id === "string" ? { userId: body.user_id } : {},
   };
 }
 
@@ -537,14 +667,18 @@ function mustString(value: unknown, field: string): string {
   return normalized;
 }
 
-function instagramAuthMode(config: { metadata?: Record<string, unknown> | undefined }): "FACEBOOK_LOGIN" | "INSTAGRAM_LOGIN" {
+function instagramAuthMode(config: { metadata?: Record<string, unknown> | undefined }): InstagramAuthMode {
   return config.metadata?.authMode === "INSTAGRAM_LOGIN" ? "INSTAGRAM_LOGIN" : "FACEBOOK_LOGIN";
 }
 
 function instagramAuthModeFromCredentials(
-  credentials: ConnectorCredentials,
-): "FACEBOOK_LOGIN" | "INSTAGRAM_LOGIN" {
-  return credentials.metadata?.authMode === "INSTAGRAM_LOGIN" ? "INSTAGRAM_LOGIN" : "FACEBOOK_LOGIN";
+  credentials: ConnectorCredentials | undefined,
+): InstagramAuthMode {
+  return credentials?.metadata?.authMode === "INSTAGRAM_LOGIN" ? "INSTAGRAM_LOGIN" : "FACEBOOK_LOGIN";
+}
+
+function instagramAuthModeFromInput(authMode: string | undefined): InstagramAuthMode {
+  return authMode === "INSTAGRAM_LOGIN" ? "INSTAGRAM_LOGIN" : "FACEBOOK_LOGIN";
 }
 
 function contextWithCredentials(
