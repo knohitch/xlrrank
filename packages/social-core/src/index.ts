@@ -62,7 +62,14 @@ export {
   evaluateXCapabilities,
   getXCapabilityMatrix,
 } from "./platforms/x-connector.js";
-export { InstagramConnector } from "./platforms/instagram-connector.js";
-export { FacebookConnector } from "./platforms/facebook-connector.js";
+export { InstagramConnector, evaluateInstagramCapabilities } from "./platforms/instagram-connector.js";
+export { FacebookConnector, evaluateFacebookCapabilities } from "./platforms/facebook-connector.js";
+export {
+  META_GRAPH_API_VERSION,
+  appSecretProof,
+  decodeMetaCursor,
+  encodeMetaCursor,
+} from "./platforms/meta-api.js";
+export type { MetaAsset } from "./platforms/facebook-connector.js";
 export { LinkedInConnector } from "./platforms/linkedin-connector.js";
 export { RedditConnector } from "./platforms/reddit-connector.js";

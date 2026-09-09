@@ -849,6 +849,91 @@ export const oauthAuthorizationTransactions = pgTable(
   ],
 );
 
+export const providerAuthorizations = pgTable(
+  "provider_authorizations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerFamily: text("provider_family").notNull(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    platformId: uuid("platform_id").references(() => platforms.id, { onDelete: "set null" }),
+    actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    providerUserId: text("provider_user_id").notNull(),
+    status: text("status").notNull().default("ACTIVE"),
+    credentialsEncrypted: text("credentials_encrypted"),
+    credentialVersion: integer("credential_version").notNull().default(1),
+    grantedScopes: jsonb("granted_scopes").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("provider_authorizations_scope_family_user_unique").on(
+      t.scopeId,
+      t.providerFamily,
+      t.providerUserId,
+    ),
+    index("provider_authorizations_scope_idx").on(t.scopeId),
+    index("provider_authorizations_family_idx").on(t.providerFamily),
+  ],
+);
+
+export const providerAuthorizationAssets = pgTable(
+  "provider_authorization_assets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerAuthorizationId: uuid("provider_authorization_id")
+      .notNull()
+      .references(() => providerAuthorizations.id, { onDelete: "cascade" }),
+    platformId: uuid("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "restrict" }),
+    assetType: text("asset_type").notNull(),
+    providerAssetId: text("provider_asset_id").notNull(),
+    parentProviderAssetId: text("parent_provider_asset_id"),
+    name: text("name"),
+    handle: text("handle"),
+    tokenKind: text("token_kind").notNull(),
+    credentialsEncrypted: text("credentials_encrypted"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("provider_authorization_assets_grant_platform_asset_unique").on(
+      t.providerAuthorizationId,
+      t.platformId,
+      t.providerAssetId,
+    ),
+    index("provider_authorization_assets_platform_asset_idx").on(t.platformId, t.providerAssetId),
+    index("provider_authorization_assets_parent_idx").on(t.parentProviderAssetId),
+  ],
+);
+
+export const webhookReceipts = pgTable(
+  "webhook_receipts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerFamily: text("provider_family").notNull(),
+    platformId: uuid("platform_id").references(() => platforms.id, { onDelete: "set null" }),
+    objectId: text("object_id"),
+    dedupeKey: text("dedupe_key").notNull(),
+    signatureValid: boolean("signature_valid").notNull().default(false),
+    status: text("status").notNull().default("RECEIVED"),
+    payload: jsonb("payload").notNull(),
+    metadata: jsonb("metadata"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("webhook_receipts_dedupe_unique").on(t.providerFamily, t.dedupeKey),
+    index("webhook_receipts_platform_idx").on(t.platformId),
+    index("webhook_receipts_status_idx").on(t.status),
+  ],
+);
+
 export const communityMemberships = pgTable(
   "community_memberships",
   {

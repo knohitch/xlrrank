@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 
 const DATABASE_URL = process.env.DATABASE_URL ?? "";
 const skip =
@@ -58,7 +58,7 @@ async function reset() {
     return json({ errors: [{ title: "not found" }] }, 404);
   };
   await pool.query(
-    "TRUNCATE oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
+    "TRUNCATE webhook_receipts, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
   );
 }
 
@@ -104,6 +104,39 @@ async function providerConfig(platformId) {
       VALUES ($1, $2, 'test', 'synthetic-client-id', $3,
         'https://app.example.test/platforms/x/oauth/callback', true,
         '{"access":{"fullArchiveSearch":false}}'::jsonb)
+    `,
+    [configId, platformId, encrypted],
+  );
+}
+
+async function metaPlatform(slug = "facebook") {
+  const result = await pool.query(
+    "INSERT INTO platforms (slug, display_name, enabled) VALUES ($1, $2, true) RETURNING id",
+    [slug, slug === "facebook" ? "Facebook" : "Instagram"],
+  );
+  return result.rows[0].id;
+}
+
+async function metaProviderConfig(platformId, slug = "facebook") {
+  const configId = randomUUID();
+  const encrypted = shared.encryptSecret(
+    "meta-app-secret",
+    undefined,
+    shared.providerAppSecretAssociatedData({
+      providerConfigId: configId,
+      platformSlug: slug,
+      secretName: "clientSecret",
+    }),
+  );
+  await pool.query(
+    `
+      INSERT INTO provider_app_configurations (
+        id, platform_id, environment, client_id, client_secret_encrypted,
+        redirect_uri, enabled, metadata
+      )
+      VALUES ($1, $2, 'test', 'meta-app-id', $3,
+        'https://app.example.test/platforms/meta/oauth/callback', true,
+        '{"webhookVerifyToken":"verify-token"}'::jsonb)
     `,
     [configId, platformId, encrypted],
   );
@@ -227,3 +260,44 @@ test(
     assert.notEqual(connectionScope, scopeB);
   },
 );
+
+test("Meta webhook E2E: challenge, signature verification, and dedupe", { skip }, async () => {
+  await reset();
+  const platformId = await metaPlatform("facebook");
+  await metaProviderConfig(platformId, "facebook");
+  assert.equal(
+    await service.verifyMetaWebhookChallenge("facebook", {
+      mode: "subscribe",
+      token: "verify-token",
+      challenge: "challenge-value",
+    }),
+    "challenge-value",
+  );
+  await assert.rejects(
+    () =>
+      service.verifyMetaWebhookChallenge("facebook", {
+        mode: "subscribe",
+        token: "bad",
+        challenge: "challenge-value",
+      }),
+    /verification failed/i,
+  );
+
+  const payload = {
+    object: "page",
+    entry: [{ id: "page-1", time: 1788912000, changes: [{ field: "feed", value: { post_id: "post-1" } }] }],
+  };
+  const signature = `sha256=${createHmac("sha256", "meta-app-secret")
+    .update(JSON.stringify(payload), "utf8")
+    .digest("hex")}`;
+  await assert.rejects(
+    () => service.receiveMetaWebhook("facebook", "sha256=00", payload),
+    /signature verification failed/i,
+  );
+  const first = await service.receiveMetaWebhook("facebook", signature, payload);
+  const second = await service.receiveMetaWebhook("facebook", signature, payload);
+  assert.equal(first.duplicate, false);
+  assert.equal(second.duplicate, true);
+  const count = await pool.query("SELECT count(*)::int AS count FROM webhook_receipts");
+  assert.equal(count.rows[0].count, 1);
+});

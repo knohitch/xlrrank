@@ -48,12 +48,12 @@ export interface OAuthTokenRefreshRequest {
 
 export interface OAuthTokenResult {
   accessToken: string;
-  refreshToken?: string;
-  tokenType?: string;
-  expiresAt?: string;
-  expiresIn?: number;
+  refreshToken?: string | undefined;
+  tokenType?: string | undefined;
+  expiresAt?: string | undefined;
+  expiresIn?: number | undefined;
   grantedScopes: string[];
-  rawProviderMetadata?: Record<string, unknown>;
+  rawProviderMetadata?: Record<string, unknown> | undefined;
 }
 
 export interface OAuthProviderAdapter {

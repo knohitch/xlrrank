@@ -1,0 +1,196 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import http from "node:http";
+import { createHmac } from "node:crypto";
+
+async function startMetaFixture() {
+  const requests = [];
+  let tokenRequestCount = 0;
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    requests.push({ method: req.method, path: url.pathname, params: Object.fromEntries(url.searchParams) });
+    res.setHeader("content-type", "application/json");
+
+    if (url.pathname === "/v26.0/oauth/access_token" && req.method === "POST") {
+      tokenRequestCount += 1;
+      res.end(JSON.stringify({
+        access_token: `meta-access-${tokenRequestCount}`,
+        token_type: "bearer",
+        expires_in: 5184000,
+        scope: "public_profile,pages_show_list,pages_read_engagement,pages_read_user_content,read_insights,instagram_basic,instagram_manage_insights,instagram_manage_comments",
+      }));
+      return;
+    }
+
+    if (!url.searchParams.get("access_token")?.startsWith("meta-access")) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ error: { type: "OAuthException", code: 190, message: "bad token" } }));
+      return;
+    }
+
+    res.setHeader("x-app-usage", JSON.stringify({ call_count: 1 }));
+    if (url.pathname === "/v26.0/me") {
+      res.end(JSON.stringify({ id: "meta-user-1", name: "Meta User" }));
+      return;
+    }
+    if (url.pathname === "/v26.0/me/accounts") {
+      res.end(JSON.stringify({
+        data: [{
+          id: "page-1",
+          name: "Fixture Page",
+          username: "fixture_page",
+          category: "Community",
+          access_token: "meta-access-page-1",
+          tasks: ["ANALYZE"],
+          instagram_business_account: { id: "ig-1", username: "fixture_ig", name: "Fixture IG", account_type: "BUSINESS" },
+        }],
+      }));
+      return;
+    }
+    if (url.pathname === "/v26.0/page-1") {
+      res.end(JSON.stringify({
+        id: "page-1",
+        name: "Fixture Page",
+        username: "fixture_page",
+        about: "Synthetic page",
+        website: "https://example.test",
+        fan_count: 12,
+        followers_count: 14,
+        picture: { data: { url: "https://example.test/page.png" } },
+      }));
+      return;
+    }
+    if (url.pathname === "/v26.0/page-1/posts") {
+      res.end(JSON.stringify({
+        data: [{
+          id: "post-1",
+          message: "facebook fixture post",
+          created_time: "2026-01-01T00:00:00+0000",
+          permalink_url: "https://facebook.com/post-1",
+          shares: { count: 2 },
+          comments: { summary: { total_count: 3 } },
+          reactions: { summary: { total_count: 5 } },
+        }],
+        paging: { cursors: { after: "fb-after-1" } },
+      }));
+      return;
+    }
+    if (url.pathname === "/v26.0/post-1/comments") {
+      res.end(JSON.stringify({ data: [{ id: "comment-1", message: "fb comment", created_time: "2026-01-01T01:00:00+0000", from: { id: "user-2" } }] }));
+      return;
+    }
+    if (url.pathname === "/v26.0/ig-1") {
+      res.end(JSON.stringify({
+        id: "ig-1",
+        username: "fixture_ig",
+        name: "Fixture IG",
+        biography: "Synthetic IG",
+        website: "https://example.test/ig",
+        profile_picture_url: "https://example.test/ig.png",
+        followers_count: 22,
+        follows_count: 7,
+        media_count: 4,
+        account_type: "BUSINESS",
+      }));
+      return;
+    }
+    if (url.pathname === "/v26.0/ig-1/media") {
+      res.end(JSON.stringify({
+        data: [{ id: "media-1", caption: "instagram fixture media", media_type: "IMAGE", media_product_type: "FEED", timestamp: "2026-01-02T00:00:00+0000", permalink: "https://instagram.com/p/media-1", like_count: 9, comments_count: 2 }],
+        paging: { cursors: { after: "ig-after-1" } },
+      }));
+      return;
+    }
+    if (url.pathname === "/v26.0/media-1/comments") {
+      res.end(JSON.stringify({ data: [{ id: "ig-comment-1", text: "ig comment", timestamp: "2026-01-02T01:00:00+0000", username: "commenter" }] }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: { message: "not found" } }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    authorizeBaseUrl: `http://127.0.0.1:${address.port}/v26.0/dialog/oauth`,
+    requests,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+function ctx(platform, assetId) {
+  return {
+    scopeId: `scope-${platform}`,
+    connectionId: `connection-${platform}`,
+    credentials: {
+      accessToken: "meta-access-1",
+      scopes: ["public_profile", "pages_show_list", "pages_read_engagement", "pages_read_user_content", "read_insights", "instagram_basic", "instagram_manage_insights", "instagram_manage_comments"],
+      metadata: { assetId, appSecret: "app-secret" },
+    },
+  };
+}
+
+test("Meta helpers produce Graph v26 appsecret proof", async () => {
+  const { META_GRAPH_API_VERSION, appSecretProof } = await import("../dist/index.js");
+  assert.equal(META_GRAPH_API_VERSION, "v26.0");
+  assert.equal(appSecretProof("token", "secret"), createHmac("sha256", "secret").update("token").digest("hex"));
+});
+
+test("Facebook Pages connector handles OAuth, assets, pagination, and normalization", async () => {
+  const { FacebookConnector, evaluateFacebookCapabilities } = await import("../dist/index.js");
+  const fixture = await startMetaFixture();
+  try {
+    const connector = new FacebookConnector({ baseUrl: fixture.baseUrl, authorizeBaseUrl: fixture.authorizeBaseUrl });
+    const oauth = connector.getOAuthAdapter();
+    const providerConfig = { platformId: "facebook", clientId: "app-id", clientSecret: "app-secret", redirectUri: "https://app.example.test/callback", enabled: true };
+    const url = oauth.buildAuthorizationUrl({ providerConfig, state: "state", codeChallenge: "unused", requestedScopes: ["pages_show_list", "pages_read_engagement"] });
+    assert.equal(url.pathname, "/v26.0/dialog/oauth");
+    assert.equal(url.searchParams.get("scope"), "pages_show_list,pages_read_engagement");
+
+    const token = await oauth.exchangeAuthorizationCode({ providerConfig, code: "code", codeVerifier: "unused", redirectUri: providerConfig.redirectUri });
+    assert.equal(token.accessToken, "meta-access-1");
+    const assets = await connector.listAssets(ctx("facebook", "page-1").credentials);
+    assert.equal(assets[0].assetId, "page-1");
+    assert.equal(assets[0].metadata.instagramBusinessAccount.id, "ig-1");
+
+    const profile = await connector.getAuthenticatedProfile(ctx("facebook", "page-1"));
+    assert.equal(profile.handle, "fixture_page");
+    assert.equal(profile.followerCount, 14);
+    const page = await connector.getContentPage({ limit: 5 }, ctx("facebook", "page-1"));
+    assert.equal(page.items[0].externalId, "post-1");
+    assert.equal(page.items[0].metrics.shares, 2);
+    assert.equal(page.cursor.hasMore, true);
+    assert.equal(page.rateLimit.providerMetadata.headers.hasAppUsage, true);
+    const comments = await connector.getComments("post-1", {}, ctx("facebook", "page-1"));
+    assert.equal(comments[0].type, "COMMENT");
+    assert.equal(evaluateFacebookCapabilities({ configured: true, grantedScopes: ["pages_show_list"] }).content, "PERMISSION_REQUIRED");
+    assert.ok(fixture.requests.some((request) => request.params.appsecret_proof));
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Instagram connector handles Page-linked professional assets and read-only ingestion", async () => {
+  const { InstagramConnector, evaluateInstagramCapabilities } = await import("../dist/index.js");
+  const fixture = await startMetaFixture();
+  try {
+    const connector = new InstagramConnector({ baseUrl: fixture.baseUrl, authorizeBaseUrl: fixture.authorizeBaseUrl });
+    const assets = await connector.listAssets(ctx("instagram", "ig-1").credentials);
+    assert.equal(assets[0].assetId, "ig-1");
+    assert.equal(assets[0].parentAssetId, "page-1");
+
+    const profile = await connector.getAuthenticatedProfile(ctx("instagram", "ig-1"));
+    assert.equal(profile.handle, "fixture_ig");
+    assert.equal(profile.metadata.accountType, "BUSINESS");
+    const page = await connector.getContentPage({ limit: 5 }, ctx("instagram", "ig-1"));
+    assert.equal(page.items[0].externalId, "media-1");
+    assert.equal(page.items[0].metrics.likes, 9);
+    const comments = await connector.getComments("media-1", {}, ctx("instagram", "ig-1"));
+    assert.equal(comments[0].fromExternalId, "commenter");
+    assert.equal(evaluateInstagramCapabilities({ configured: true, grantedScopes: ["instagram_basic"] }).comments, "PERMISSION_REQUIRED");
+    assert.equal(connector.getManifest().capabilities.publishing, "UNAVAILABLE");
+  } finally {
+    await fixture.close();
+  }
+});

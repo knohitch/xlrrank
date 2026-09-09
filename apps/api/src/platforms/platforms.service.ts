@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   BadRequestException,
   ForbiddenException,
@@ -29,6 +29,7 @@ import {
 import type {
   CapabilityEvaluationInput,
   ConnectorCredentials,
+  MetaAsset,
   NormalizedProfile,
   OAuthCapableConnector,
   ProviderApplicationConfig,
@@ -423,6 +424,22 @@ export class PlatformsService {
         access: objectFromMetadata(providerConfig.metadata, "access") ?? {},
       },
     });
+    if (hasMetaAssetLister(connector)) {
+      await this.persistMetaAuthorizationSnapshot({
+        scopeId: transaction.scopeId,
+        platform,
+        actorUserId: userId,
+        connectionId: persistResult.connectionId,
+        providerUserId: profile.externalId,
+        credentials,
+        providerConfig,
+        assets: await connector.listAssets(credentials, {
+          scopeId: transaction.scopeId,
+          connectionId: persistResult.connectionId,
+          credentials,
+        }),
+      });
+    }
     const sync = await createSocialConnectionSyncRequest({
       connectionId: persistResult.connectionId,
       requestedByUserId: userId,
@@ -448,6 +465,64 @@ export class PlatformsService {
       redirectTo: transaction.redirectTo,
       sync,
     };
+  }
+
+  async verifyMetaWebhookChallenge(
+    platformId: string,
+    input: { mode?: string | undefined; token?: string | undefined; challenge?: string | undefined },
+  ) {
+    const platform = await this.resolvePlatform(platformId);
+    if (platform.slug !== "facebook" && platform.slug !== "instagram") {
+      throw new BadRequestException("Meta webhooks are only available for Facebook and Instagram.");
+    }
+    const providerConfig = await this.loadProviderAppConfig(platform);
+    const expected = metaWebhookVerifyToken(providerConfig);
+    if (!expected) throw new BadRequestException("Meta webhook verify token is not configured.");
+    if (input.mode !== "subscribe" || !input.challenge || input.token !== expected) {
+      throw new ForbiddenException("Meta webhook verification failed.");
+    }
+    return input.challenge;
+  }
+
+  async receiveMetaWebhook(
+    platformId: string,
+    signature: string | undefined,
+    payload: Record<string, unknown>,
+    rawBody?: Buffer | string,
+  ) {
+    const platform = await this.resolvePlatform(platformId);
+    if (platform.slug !== "facebook" && platform.slug !== "instagram") {
+      throw new BadRequestException("Meta webhooks are only available for Facebook and Instagram.");
+    }
+    const providerConfig = await this.loadProviderAppConfig(platform);
+    const secret = metaWebhookSigningSecret(providerConfig);
+    if (!secret) throw new BadRequestException("Meta webhook signing secret is not configured.");
+    const canonical = rawBody ?? JSON.stringify(payload);
+    if (!verifyMetaWebhookSignature(canonical, signature, secret)) {
+      throw new ForbiddenException("Meta webhook signature verification failed.");
+    }
+    const payloadJson = JSON.stringify(payload);
+    const dedupeKey = metaWebhookDedupeKey(platform.slug, payload, payloadJson);
+    const result = await getPool().query<{ id: string; inserted: boolean }>(
+      `
+        INSERT INTO webhook_receipts (
+          provider_family, platform_id, object_id, dedupe_key, signature_valid,
+          status, payload, metadata
+        )
+        VALUES ('meta', $1, $2, $3, true, 'RECEIVED', $4::jsonb, $5::jsonb)
+        ON CONFLICT (provider_family, dedupe_key) DO UPDATE SET
+          metadata = webhook_receipts.metadata || jsonb_build_object('duplicateSeenAt', now())
+        RETURNING id, (xmax = 0) AS inserted
+      `,
+      [
+        platform.id,
+        typeof payload.object === "string" ? payload.object : null,
+        dedupeKey,
+        payloadJson,
+        JSON.stringify({ platformSlug: platform.slug, signatureHeader: "x-hub-signature-256" }),
+      ],
+    );
+    return { status: "received", receiptId: result.rows[0]?.id, duplicate: !result.rows[0]?.inserted };
   }
 
   async disconnectPlatform(platformId: string, userId: string) {
@@ -599,6 +674,124 @@ export class PlatformsService {
     } finally {
       client.release();
     }
+  }
+
+  private async persistMetaAuthorizationSnapshot(input: {
+    scopeId: string;
+    platform: PlatformRow;
+    actorUserId: string;
+    connectionId: string;
+    providerUserId: string;
+    credentials: ConnectorCredentials;
+    providerConfig: ProviderApplicationConfig;
+    assets: MetaAsset[];
+  }): Promise<void> {
+    const pool = getPool();
+    const grantId = randomUUID();
+    const encryptedGrant = encryptSecret(
+      JSON.stringify(input.credentials),
+      undefined,
+      socialCredentialAssociatedData({
+        connectionId: input.connectionId,
+        scopeId: input.scopeId,
+        platformSlug: input.platform.slug,
+      }),
+    );
+    const grant = await pool.query<{ id: string }>(
+      `
+        INSERT INTO provider_authorizations (
+          id, provider_family, scope_id, platform_id, actor_user_id,
+          provider_user_id, status, credentials_encrypted, granted_scopes,
+          expires_at, metadata
+        )
+        VALUES ($1, 'meta', $2, $3, $4, $5, 'ACTIVE', $6, $7::jsonb, $8, $9::jsonb)
+        ON CONFLICT (scope_id, provider_family, provider_user_id) DO UPDATE SET
+          platform_id = EXCLUDED.platform_id,
+          actor_user_id = EXCLUDED.actor_user_id,
+          status = 'ACTIVE',
+          credentials_encrypted = EXCLUDED.credentials_encrypted,
+          credential_version = provider_authorizations.credential_version + 1,
+          granted_scopes = EXCLUDED.granted_scopes,
+          expires_at = EXCLUDED.expires_at,
+          metadata = EXCLUDED.metadata,
+          updated_at = now()
+        RETURNING id
+      `,
+      [
+        grantId,
+        input.scopeId,
+        input.platform.id,
+        input.actorUserId,
+        input.providerUserId,
+        encryptedGrant,
+        JSON.stringify(input.credentials.scopes ?? []),
+        input.credentials.expiresAt ? new Date(input.credentials.expiresAt) : null,
+        JSON.stringify({ platformSlug: input.platform.slug, providerAppPlatformId: input.providerConfig.platformId }),
+      ],
+    );
+    const providerAuthorizationId = grant.rows[0]?.id;
+    if (!providerAuthorizationId) return;
+    const platformIds = await this.platformIdsBySlug(["facebook", "instagram"]);
+    for (const asset of input.assets) {
+      const assetPlatformId = platformIds.get(asset.platformId);
+      if (!assetPlatformId) continue;
+      const assetCredentialsEncrypted = asset.accessToken
+        ? encryptSecret(
+            JSON.stringify({
+              accessToken: asset.accessToken,
+              scopes: input.credentials.scopes ?? [],
+              metadata: {
+                assetId: asset.assetId,
+                parentAssetId: asset.parentAssetId,
+                tokenKind: asset.tokenKind,
+              },
+            }),
+            undefined,
+            socialCredentialAssociatedData({
+              connectionId: input.connectionId,
+              scopeId: input.scopeId,
+              platformSlug: asset.platformId,
+            }),
+          )
+        : null;
+      await pool.query(
+        `
+          INSERT INTO provider_authorization_assets (
+            provider_authorization_id, platform_id, asset_type, provider_asset_id,
+            parent_provider_asset_id, name, handle, token_kind,
+            credentials_encrypted, metadata
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
+          ON CONFLICT (provider_authorization_id, platform_id, provider_asset_id) DO UPDATE SET
+            name = EXCLUDED.name,
+            handle = EXCLUDED.handle,
+            token_kind = EXCLUDED.token_kind,
+            credentials_encrypted = EXCLUDED.credentials_encrypted,
+            metadata = EXCLUDED.metadata,
+            updated_at = now()
+        `,
+        [
+          providerAuthorizationId,
+          assetPlatformId,
+          asset.assetType,
+          asset.assetId,
+          asset.parentAssetId ?? null,
+          asset.name,
+          asset.handle ?? null,
+          asset.tokenKind,
+          assetCredentialsEncrypted,
+          JSON.stringify(asset.metadata ?? {}),
+        ],
+      );
+    }
+  }
+
+  private async platformIdsBySlug(slugs: string[]): Promise<Map<string, string>> {
+    const result = await getPool().query<{ id: string; slug: string }>(
+      "SELECT id, slug FROM platforms WHERE slug = ANY($1::text[])",
+      [slugs],
+    );
+    return new Map(result.rows.map((row) => [row.slug, row.id]));
   }
 
   private async resolveRequestedScope(
@@ -855,6 +1048,20 @@ function hasOAuthAdapter(connector: unknown): connector is OAuthCapableConnector
   );
 }
 
+function hasMetaAssetLister(
+  connector: unknown,
+): connector is OAuthCapableConnector & {
+  listAssets: (
+    credentials: ConnectorCredentials,
+    context?: { scopeId: string; connectionId: string; credentials: ConnectorCredentials },
+  ) => Promise<MetaAsset[]>;
+} {
+  return (
+    hasOAuthAdapter(connector) &&
+    typeof (connector as { listAssets?: unknown }).listAssets === "function"
+  );
+}
+
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("base64url");
 }
@@ -904,6 +1111,57 @@ function objectFromMetadata(
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function metaWebhookVerifyToken(config: ProviderApplicationConfig): string | undefined {
+  const token = config.metadata?.webhookVerifyToken;
+  if (typeof token === "string" && token.length > 0) return token;
+  return process.env.META_WEBHOOK_VERIFY_TOKEN;
+}
+
+function metaWebhookSigningSecret(config: ProviderApplicationConfig): string | undefined {
+  const secret = config.metadata?.webhookAppSecret;
+  if (typeof secret === "string" && secret.length > 0) return secret;
+  return config.clientSecret ?? process.env.META_WEBHOOK_APP_SECRET;
+}
+
+function verifyMetaWebhookSignature(
+  canonicalPayload: string | Buffer,
+  signature: string | undefined,
+  secret: string,
+): boolean {
+  if (!signature?.startsWith("sha256=")) return false;
+  const actual = Buffer.from(signature.slice("sha256=".length), "hex");
+  const expected = Buffer.from(
+    createHmac("sha256", secret).update(canonicalPayload).digest("hex"),
+    "hex",
+  );
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function metaWebhookDedupeKey(
+  platformSlug: string,
+  payload: Record<string, unknown>,
+  canonicalPayload: string,
+): string {
+  const entries = Array.isArray(payload.entry) ? payload.entry : [];
+  const parts = entries.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const record = entry as { id?: unknown; time?: unknown; changes?: unknown };
+    const changeFields = Array.isArray(record.changes)
+      ? record.changes
+          .map((change) =>
+            change && typeof change === "object" && typeof (change as { field?: unknown }).field === "string"
+              ? (change as { field: string }).field
+              : undefined,
+          )
+          .filter(Boolean)
+          .join(",")
+      : "";
+    return [`${String(record.id ?? "")}:${String(record.time ?? "")}:${changeFields}`];
+  });
+  const material = parts.length ? parts.join("|") : canonicalPayload;
+  return `${platformSlug}:${createHash("sha256").update(material, "utf8").digest("base64url")}`;
 }
 
 function stringFromMetadata(

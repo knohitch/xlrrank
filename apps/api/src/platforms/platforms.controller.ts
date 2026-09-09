@@ -3,18 +3,21 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Inject,
   Param,
   Post,
   Query,
+  Req,
   Res,
   UseGuards,
 } from "@nestjs/common";
-import type { Response } from "express";
+import type { Request, Response } from "express";
 import { SessionAuthGuard } from "../common/guards/session-auth.guard.js";
 import { CurrentUser } from "../common/decorators/current-user.decorator.js";
+import { Public } from "../common/decorators/roles.decorator.js";
 import type { AuthContext } from "../common/types/auth-context.js";
 import { PlatformsService } from "./platforms.service.js";
 
@@ -82,6 +85,29 @@ export class PlatformsController {
     if (errorDescription !== undefined) callback.errorDescription = errorDescription;
     const result = await this.platformsService.handleOAuthCallback(id, auth.userId, callback);
     return res.redirect(303, result.redirectTo);
+  }
+
+  @Public()
+  @Get(":id/meta/webhook")
+  verifyMetaWebhook(
+    @Param("id") id: string,
+    @Query("hub.mode") mode: string | undefined,
+    @Query("hub.verify_token") token: string | undefined,
+    @Query("hub.challenge") challenge: string | undefined,
+  ) {
+    return this.platformsService.verifyMetaWebhookChallenge(id, { mode, token, challenge });
+  }
+
+  @Public()
+  @Post(":id/meta/webhook")
+  @HttpCode(HttpStatus.OK)
+  async receiveMetaWebhook(
+    @Param("id") id: string,
+    @Headers("x-hub-signature-256") signature: string | undefined,
+    @Body() body: Record<string, unknown>,
+    @Req() req: Request & { rawBody?: Buffer },
+  ) {
+    return this.platformsService.receiveMetaWebhook(id, signature, body ?? {}, req.rawBody);
   }
 
   @Delete(":id/disconnect")

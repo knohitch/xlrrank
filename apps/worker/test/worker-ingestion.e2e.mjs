@@ -34,7 +34,7 @@ async function reset() {
   await setup();
   process.env.QUEUE_PREFIX = `xlrrank-worker-e2e-${process.pid}-${Date.now()}-${Math.random()}`;
   await pool.query(
-    "TRUNCATE job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
+    "TRUNCATE webhook_receipts, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
   );
 }
 
@@ -273,6 +273,52 @@ function createXFixtureServer() {
   };
 }
 
+function createMetaFixtureServer() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    requests.push({ path: url.pathname, params: Object.fromEntries(url.searchParams) });
+    res.setHeader("content-type", "application/json");
+    if (!url.searchParams.get("access_token")?.startsWith("meta-access")) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ error: { type: "OAuthException", code: 190 } }));
+      return;
+    }
+    if (url.pathname === "/v26.0/page-1") {
+      res.end(JSON.stringify({ id: "page-1", name: "Fixture Page", username: "fixture_page", followers_count: 14, fan_count: 12 }));
+      return;
+    }
+    if (url.pathname === "/v26.0/page-1/posts") {
+      res.end(JSON.stringify({ data: [{ id: "fb-post-1", message: "facebook worker post", created_time: "2030-03-01T00:00:00+0000" }] }));
+      return;
+    }
+    if (url.pathname === "/v26.0/ig-1") {
+      res.end(JSON.stringify({ id: "ig-1", username: "fixture_ig", name: "Fixture IG", followers_count: 22, follows_count: 7, media_count: 4, account_type: "BUSINESS" }));
+      return;
+    }
+    if (url.pathname === "/v26.0/ig-1/media") {
+      res.end(JSON.stringify({ data: [{ id: "ig-media-1", caption: "instagram worker media", media_type: "IMAGE", timestamp: "2030-03-02T00:00:00+0000", like_count: 9, comments_count: 2 }] }));
+      return;
+    }
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: { message: "not found" } }));
+  });
+  return {
+    requests,
+    async start() {
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Meta fixture server did not bind");
+      return `http://127.0.0.1:${address.port}`;
+    },
+    async stop() {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
 function xUser() {
   return {
     id: "9001",
@@ -389,6 +435,48 @@ async function createXConnection(name, refreshToken) {
       VALUES ($1, $2, $3, 'CONNECTED', $4, '9001', 'xlr_x_fixture')
     `,
     [connectionId, scope.scopeId, platform.rows[0].id, encrypted],
+  );
+  return { userId: user.rows[0].id, platformId: platform.rows[0].id, scope, connectionId };
+}
+
+async function createMetaConnection(slug, assetId) {
+  const user = await pool.query(
+    "INSERT INTO users (email, password_hash, display_name, status) VALUES ($1, 'hash', $2, 'ACTIVE') RETURNING id",
+    [`${slug}-${randomUUID()}@example.test`, slug],
+  );
+  const platform = await pool.query(
+    "INSERT INTO platforms (slug, display_name, enabled) VALUES ($1, $2, true) ON CONFLICT (slug) DO UPDATE SET enabled = true RETURNING id",
+    [slug, slug === "facebook" ? "Facebook" : "Instagram"],
+  );
+  const scope = await database.ensurePersonalScope(user.rows[0].id);
+  const connectionId = randomUUID();
+  const scopes =
+    slug === "facebook"
+      ? ["pages_show_list", "pages_read_engagement", "pages_read_user_content", "read_insights"]
+      : ["pages_show_list", "instagram_basic", "instagram_manage_insights", "instagram_manage_comments"];
+  const credentials = {
+    accessToken: "meta-access-worker",
+    scopes,
+    metadata: { assetId, appSecret: "meta-app-secret" },
+  };
+  const encrypted = shared.encryptSecret(
+    JSON.stringify(credentials),
+    undefined,
+    shared.socialCredentialAssociatedData({
+      connectionId,
+      scopeId: scope.scopeId,
+      platformSlug: slug,
+    }),
+  );
+  await pool.query(
+    `
+      INSERT INTO social_connections (
+        id, scope_id, platform_id, status, credentials_encrypted,
+        verified_external_id, verified_handle
+      )
+      VALUES ($1, $2, $3, 'CONNECTED', $4, $5, $6)
+    `,
+    [connectionId, scope.scopeId, platform.rows[0].id, encrypted, assetId, assetId],
   );
   return { userId: user.rows[0].id, platformId: platform.rows[0].id, scope, connectionId };
 }
@@ -979,6 +1067,51 @@ test(
       assert.ok(scopedRows.rows.every((row) => row.scope_id === null || Number(row.count) <= 2));
       assert.ok(fixture.tokenLog.some((entry) => entry.url.startsWith("/2/oauth2/token")));
       assert.ok(fixture.tokenLog.some((entry) => entry.url.startsWith("/2/users/9001/tweets")));
+    } finally {
+      if (worker) await stopWorker(worker);
+      await fixture.stop();
+    }
+  },
+);
+
+test(
+  "Meta worker ingestion e2e: Facebook Page and Instagram Professional connectors persist content",
+  { skip },
+  async () => {
+    await reset();
+    const fixture = createMetaFixtureServer();
+    const baseUrl = await fixture.start();
+    let worker;
+    try {
+      const facebook = await createMetaConnection("facebook", "page-1");
+      const instagram = await createMetaConnection("instagram", "ig-1");
+      const requests = await Promise.all(
+        [facebook, instagram].map((item) =>
+          database.createSocialConnectionSyncRequest({
+            connectionId: item.connectionId,
+            reason: "MANUAL",
+          }),
+        ),
+      );
+      worker = await startWorker({ META_GRAPH_BASE_URL: baseUrl });
+      await waitForJob(requests[0].jobId, ["COMPLETED"], 30_000);
+      await waitForJob(requests[1].jobId, ["COMPLETED"], 30_000);
+      const rows = await pool.query(
+        `
+          SELECT p.slug, sci.external_id
+          FROM social_content_items sci
+          JOIN platforms p ON p.id = sci.platform_id
+          WHERE p.slug IN ('facebook', 'instagram')
+          ORDER BY p.slug, sci.external_id
+        `,
+      );
+      assert.deepEqual(rows.rows, [
+        { slug: "facebook", external_id: "fb-post-1" },
+        { slug: "instagram", external_id: "ig-media-1" },
+      ]);
+      assert.ok(fixture.requests.some((request) => request.path === "/v26.0/page-1/posts"));
+      assert.ok(fixture.requests.some((request) => request.path === "/v26.0/ig-1/media"));
+      assert.ok(fixture.requests.every((request) => request.params.appsecret_proof));
     } finally {
       if (worker) await stopWorker(worker);
       await fixture.stop();

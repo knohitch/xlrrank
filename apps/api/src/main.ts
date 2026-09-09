@@ -2,7 +2,7 @@ import "reflect-metadata";
 import dotenv from "dotenv";
 import { fileURLToPath } from "node:url";
 import { ValidationPipe } from "@nestjs/common";
-import { NestFactory } from "@nestjs/core";
+import { NestFactory, Reflector } from "@nestjs/core";
 import helmet from "helmet";
 import { getEnv } from "@xlrrank/config";
 import { createChildLogger } from "@xlrrank/observability";
@@ -18,6 +18,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     abortOnError: false,
     logger: false,
+    rawBody: true,
   });
 
   app.setGlobalPrefix("api");
@@ -41,7 +42,7 @@ async function bootstrap() {
     }),
   );
 
-  app.useGlobalGuards(new CsrfGuard());
+  app.useGlobalGuards(new CsrfGuard(app.get(Reflector)));
 
   const port = env.API_PORT;
   await app.listen(port);

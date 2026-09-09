@@ -36,6 +36,13 @@
       "when": 1788825600000,
       "tag": "0004_provider_oauth_foundation",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788912000000,
+      "tag": "0005_meta_authorizations_webhooks",
+      "breakpoints": true
     }
   ]
 }
