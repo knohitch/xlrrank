@@ -127,6 +127,17 @@ function activeStatusList(): string {
   return ACTIVE_JOB_STATUSES.map((status) => `'${status}'`).join(", ");
 }
 
+function isActiveSyncUniqueConflict(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: string }).code === "23505" &&
+    "constraint" in err &&
+    (err as { constraint?: string }).constraint === "jobs_active_social_connection_sync_unique"
+  );
+}
+
 export async function createSocialConnectionSyncRequest(input: {
   connectionId: string;
   requestedByUserId?: string | null;
@@ -219,6 +230,31 @@ export async function createSocialConnectionSyncRequest(input: {
     };
   } catch (err) {
     await client.query("ROLLBACK");
+    if (isActiveSyncUniqueConflict(err)) {
+      const active = await pool.query<{ id: string; status: JobStatus; scope_id: string }>(
+        `
+          SELECT id, status, scope_id
+          FROM jobs
+          WHERE type = $1
+            AND connection_id = $2
+            AND status IN (${activeStatusList()})
+          ORDER BY created_at ASC
+          LIMIT 1
+        `,
+        [JOB_TYPES.socialConnectionSync, input.connectionId],
+      );
+      const activeJob = active.rows[0];
+      if (activeJob) {
+        return {
+          jobId: activeJob.id,
+          status: activeJob.status,
+          connectionId: input.connectionId,
+          scopeId: activeJob.scope_id,
+          accepted: false,
+          duplicate: true,
+        };
+      }
+    }
     throw err;
   } finally {
     client.release();

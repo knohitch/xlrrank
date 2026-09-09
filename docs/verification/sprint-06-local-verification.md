@@ -21,7 +21,9 @@ Final SHA verified locally: closure commit containing this document; exact SHA r
 - X OAuth E2E: PASS, 2 tests passed, 0 failed, 0 skipped.
 - Generic connector contract: PASS, 9 tests passed, 0 failed, 0 skipped.
 - Social data isolation: PASS, 4 tests passed, 0 failed, 0 skipped.
-- Worker ingestion E2E: PASS, 8 tests passed, 0 failed, 0 skipped.
+- Worker ingestion E2E: PASS, 10 tests passed, 0 failed, 0 skipped.
+- OAuth refresh concurrency: PASS, concurrent same-connection sync requests dedupe to one active job while two workers run; rotating refresh token endpoint called once; final credential version increments once and persists the rotated access/refresh token pair.
+- Credential-version CAS collision: PASS, stale credential update affects 0 rows and newer encrypted credentials remain intact.
 - Application E2E: PASS, 5 tests passed, 0 failed, 0 skipped.
 - Security tests: PASS, 11 tests passed, 0 failed, 0 skipped.
 - Build: PASS.
@@ -42,3 +44,4 @@ Final SHA verified locally: closure commit containing this document; exact SHA r
 
 - `packages/database/test/migrations.integration.test.mjs`: destructive empty-database migration test now drops the Drizzle ledger schema before rerunning migrations.
 - `apps/worker/test/worker-ingestion.e2e.mjs`: deliberate crash assertion now accepts Windows' observed exit code, and X pagination proof asserts the actual second-page provider call.
+- `apps/worker/test/worker-ingestion.e2e.mjs`: added concurrent OAuth refresh and stale credential-version CAS proof for rotating refresh-token safety.

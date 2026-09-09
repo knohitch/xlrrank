@@ -163,6 +163,7 @@ function createFixtureServer() {
 function createXFixtureServer() {
   const tokenLog = [];
   const contentCalls = new Map();
+  const refreshCalls = new Map();
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const authorization = String(req.headers.authorization ?? "");
@@ -172,9 +173,29 @@ function createXFixtureServer() {
       const body = await readBody(req);
       const refreshToken = new URLSearchParams(body).get("refresh_token");
       res.setHeader("content-type", "application/json");
+      const refreshCount = (refreshCalls.get(refreshToken) ?? 0) + 1;
+      refreshCalls.set(refreshToken, refreshCount);
       if (refreshToken === "x-refresh-reauth") {
         res.writeHead(400);
         res.end(JSON.stringify({ error: "invalid_grant" }));
+        return;
+      }
+      if (refreshToken === "x-refresh-race") {
+        if (refreshCount > 1) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "invalid_grant" }));
+          return;
+        }
+        await delay(1_000);
+        res.end(
+          JSON.stringify({
+            token_type: "bearer",
+            access_token: "x-access-race-2",
+            refresh_token: "x-refresh-race-2",
+            expires_in: 7200,
+            scope: "tweet.read users.read follows.read offline.access",
+          }),
+        );
         return;
       }
       const suffix = refreshToken === "x-refresh-rate" ? "rate" : "ok";
@@ -237,6 +258,7 @@ function createXFixtureServer() {
   });
   return {
     tokenLog,
+    refreshCalls,
     async start() {
       await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
@@ -726,7 +748,7 @@ test(
         reason: "MANUAL",
       });
       crashingWorker = await startWorker({ WORKER_TEST_CRASH_AFTER_CURSOR: "page-1" });
-      await waitWorkerExit(crashingWorker, 76);
+      await waitWorkerExit(crashingWorker, process.platform === "win32" ? [76, 3221226505] : 76);
       await delay(1_500);
       worker = await startWorker();
       await waitForJob(request.jobId, ["COMPLETED"], 30_000);
@@ -961,5 +983,158 @@ test(
       if (worker) await stopWorker(worker);
       await fixture.stop();
     }
+  },
+);
+
+test(
+  "X worker ingestion e2e: concurrent same-connection refresh uses one rotating refresh token",
+  { skip },
+  async () => {
+    await reset();
+    const fixture = createXFixtureServer();
+    const baseUrl = await fixture.start();
+    let workerA;
+    let workerB;
+    try {
+      const connection = await createXConnection("x-race", "x-refresh-race");
+      const before = (
+        await pool.query("SELECT credential_version FROM social_connections WHERE id = $1", [
+          connection.connectionId,
+        ])
+      ).rows[0].credential_version;
+      const requests = await Promise.all([
+        database.createSocialConnectionSyncRequest({
+          connectionId: connection.connectionId,
+          reason: "MANUAL",
+        }),
+        database.createSocialConnectionSyncRequest({
+          connectionId: connection.connectionId,
+          reason: "MANUAL",
+        }),
+      ]);
+      const accepted = requests.filter((request) => request.accepted);
+      const duplicate = requests.filter((request) => request.duplicate);
+      assert.equal(accepted.length, 1);
+      assert.equal(duplicate.length, 1);
+
+      workerA = await startWorker({
+        X_API_BASE_URL: baseUrl,
+        SOCIAL_SYNC_LEASE_MS: "2000",
+      });
+      workerB = await startWorker({
+        X_API_BASE_URL: baseUrl,
+        SOCIAL_SYNC_LEASE_MS: "2000",
+      });
+
+      const completed = await waitForJob(accepted[0].jobId, ["COMPLETED"], 30_000);
+      assert.equal(completed.attempt_count, 1);
+      assert.equal(duplicate[0].jobId, accepted[0].jobId);
+      assert.equal(fixture.refreshCalls.get("x-refresh-race"), 1);
+
+      const row = (
+        await pool.query(
+          "SELECT credentials_encrypted, credential_version, status FROM social_connections WHERE id = $1",
+          [connection.connectionId],
+        )
+      ).rows[0];
+      assert.equal(row.status, "CONNECTED");
+      assert.equal(row.credential_version, before + 1);
+      const credentials = JSON.parse(
+        shared.decryptSecret(
+          row.credentials_encrypted,
+          undefined,
+          shared.socialCredentialAssociatedData({
+            connectionId: connection.connectionId,
+            scopeId: connection.scope.scopeId,
+            platformSlug: "x",
+          }),
+        ),
+      );
+      assert.equal(credentials.accessToken, "x-access-race-2");
+      assert.equal(credentials.refreshToken, "x-refresh-race-2");
+      assert.equal(
+        Number(
+          (
+            await pool.query(
+              "SELECT count(*) FROM social_content_items WHERE external_id LIKE 'x-post-%'",
+            )
+          ).rows[0].count,
+        ),
+        2,
+      );
+    } finally {
+      if (workerA) await stopWorker(workerA);
+      if (workerB) await stopWorker(workerB);
+      await fixture.stop();
+    }
+  },
+);
+
+test(
+  "X worker ingestion e2e: stale credential-version CAS cannot overwrite rotated credentials",
+  { skip },
+  async () => {
+    await reset();
+    const connection = await createXConnection("x-cas", "x-refresh-cas-1");
+    const current = (
+      await pool.query(
+        "SELECT credentials_encrypted, credential_version FROM social_connections WHERE id = $1",
+        [connection.connectionId],
+      )
+    ).rows[0];
+    const encrypt = (accessToken, refreshToken) =>
+      shared.encryptSecret(
+        JSON.stringify({
+          accessToken,
+          refreshToken,
+          expiresAt: "2030-01-01T00:00:00.000Z",
+          scopes: ["tweet.read", "users.read", "offline.access"],
+          metadata: { providerUserId: "9001" },
+        }),
+        undefined,
+        shared.socialCredentialAssociatedData({
+          connectionId: connection.connectionId,
+          scopeId: connection.scope.scopeId,
+          platformSlug: "x",
+        }),
+      );
+    const newer = encrypt("x-access-newer", "x-refresh-newer");
+    await pool.query(
+      "UPDATE social_connections SET credentials_encrypted = $2, credential_version = credential_version + 1 WHERE id = $1",
+      [connection.connectionId, newer],
+    );
+    const stale = await pool.query(
+      `
+        UPDATE social_connections
+        SET credentials_encrypted = $2, credential_version = credential_version + 1
+        WHERE id = $1 AND credential_version = $3
+      `,
+      [
+        connection.connectionId,
+        encrypt("x-access-stale", "x-refresh-stale"),
+        current.credential_version,
+      ],
+    );
+    assert.equal(stale.rowCount, 0);
+    const final = (
+      await pool.query(
+        "SELECT credentials_encrypted, credential_version FROM social_connections WHERE id = $1",
+        [connection.connectionId],
+      )
+    ).rows[0];
+    assert.equal(final.credential_version, current.credential_version + 1);
+    const credentials = JSON.parse(
+      shared.decryptSecret(
+        final.credentials_encrypted,
+        undefined,
+        shared.socialCredentialAssociatedData({
+          connectionId: connection.connectionId,
+          scopeId: connection.scope.scopeId,
+          platformSlug: "x",
+        }),
+      ),
+    );
+    assert.equal(credentials.accessToken, "x-access-newer");
+    assert.equal(credentials.refreshToken, "x-refresh-newer");
   },
 );
