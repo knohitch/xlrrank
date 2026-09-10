@@ -96,6 +96,42 @@ export interface OAuthCapableConnector extends SocialConnector {
   getOAuthAdapter(): OAuthProviderAdapter;
 }
 
+export interface ProviderAsset {
+  platformId: string;
+  assetType: string;
+  assetId: string;
+  parentAssetId?: string | undefined;
+  name: string;
+  handle?: string | undefined;
+  tokenKind: string;
+  accessToken?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
+}
+
+export interface ProviderEventSubscriptionRequest {
+  developerApplicationUrn: string;
+  memberUrn: string;
+  organizationUrn: string;
+  roles?: string[] | undefined;
+  webhookUrl?: string | undefined;
+  eventType: string;
+}
+
+export interface ProviderEventSubscriptionResult {
+  providerStatus: string;
+  eventType: string;
+  developerApplicationUrn: string;
+  memberUrn: string;
+  organizationUrn: string;
+  webhookUrl: string;
+  expiresAt?: string | undefined;
+  raw: Record<string, unknown>;
+}
+
+export interface ProviderWebhookAdapter {
+  extractAssetIds(payload: Record<string, unknown>): string[];
+}
+
 export interface CapabilityEvaluationInput {
   configured: boolean;
   grantedScopes?: string[];
@@ -182,6 +218,24 @@ export interface SocialConnector {
   evaluateCapabilities?(
     input: CapabilityEvaluationInput,
   ): Partial<Record<ConnectorCapability, AvailabilityState>>;
+  getProviderFamily?(): string;
+  resolveOAuthDefaultScopes?(
+    defaults: string[],
+    providerConfig: ProviderApplicationConfig,
+  ): string[];
+  listAuthorizationAssets?(
+    credentials: ConnectorCredentials,
+    context?: ConnectorOperationContext,
+  ): Promise<ProviderAsset[]>;
+  getWebhookAdapter?(): ProviderWebhookAdapter;
+  upsertProviderEventSubscription?(
+    input: ProviderEventSubscriptionRequest,
+    context?: ConnectorOperationContext,
+  ): Promise<ProviderEventSubscriptionResult>;
+  deleteProviderEventSubscription?(
+    input: ProviderEventSubscriptionRequest,
+    context?: ConnectorOperationContext,
+  ): Promise<void>;
   authenticate(
     credentials: ConnectorCredentials,
     context?: ConnectorOperationContext,

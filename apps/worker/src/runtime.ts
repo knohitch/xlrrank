@@ -29,6 +29,7 @@ import {
   socialWebhookBullMqJobId,
 } from "@xlrrank/queue";
 import { processProviderSubscriptionCleanup } from "./provider-subscription-cleanup-processor.js";
+import { runProviderRetentionSweepOnce } from "./provider-retention-sweep.js";
 import { processSocialConnectionSync, socialSyncJobOptions } from "./social-sync-processor.js";
 import { processSocialWebhook } from "./social-webhook-processor.js";
 
@@ -48,6 +49,7 @@ export interface WorkerRuntime {
   stop(): Promise<void>;
   dispatchOutboxOnce(): Promise<number>;
   scheduleDueSyncsOnce(): Promise<number>;
+  runRetentionSweepOnce(): Promise<unknown>;
 }
 
 export async function checkWorkerReadiness(): Promise<boolean> {
@@ -184,6 +186,13 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     if (!stopping)
       scheduleDueSyncsOnce(workerId).catch((err) => logger.error({ err }, "Scheduler failed"));
   }, env.SOCIAL_SYNC_SCHEDULER_INTERVAL_MS);
+  const retentionTimer = setInterval(() => {
+    if (!stopping) {
+      runProviderRetentionSweepOnce(workerId).catch((err) =>
+        logger.error({ err }, "Provider retention sweep failed"),
+      );
+    }
+  }, env.PROVIDER_RETENTION_SWEEP_INTERVAL_MS);
   const heartbeatTimer = setInterval(
     () => {
       if (!stopping) {
@@ -200,6 +209,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
 
   await dispatchOutboxOnce(workerId);
   await scheduleDueSyncsOnce(workerId);
+  await runProviderRetentionSweepOnce(workerId);
   await touchWorkerHeartbeat({
     workerId,
     kind: "worker",
@@ -220,10 +230,12 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     workers,
     dispatchOutboxOnce: () => dispatchOutboxOnce(workerId),
     scheduleDueSyncsOnce: () => scheduleDueSyncsOnce(workerId),
+    runRetentionSweepOnce: () => runProviderRetentionSweepOnce(workerId),
     async stop() {
       stopping = true;
       clearInterval(dispatcherTimer);
       clearInterval(schedulerTimer);
+      clearInterval(retentionTimer);
       clearInterval(heartbeatTimer);
       await touchWorkerHeartbeat({
         workerId,

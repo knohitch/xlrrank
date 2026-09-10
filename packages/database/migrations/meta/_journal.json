@@ -71,6 +71,13 @@
       "when": 1789257600000,
       "tag": "0009_authorization_asset_retention_minimization",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789344000000,
+      "tag": "0010_provider_retention_runtime_side_tables",
+      "breakpoints": true
     }
   ]
 }

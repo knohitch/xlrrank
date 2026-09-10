@@ -5,12 +5,13 @@ import { decryptSecret, providerAuthorizationAssociatedData } from "@xlrrank/sha
 import {
   AuthenticationError,
   AuthorizationError,
-  LinkedInConnector,
+  connectorRegistry,
   PermanentProviderError,
   RateLimitError,
   TemporaryProviderError,
   type ConnectorCredentials,
 } from "@xlrrank/social-core";
+import { ensureWorkerConnectors } from "./social-sync-processor.js";
 
 export async function processProviderSubscriptionCleanup(job: Job): Promise<void> {
   if (job.name !== JOB_TYPES.providerSubscriptionCleanup) {
@@ -30,6 +31,7 @@ export async function processProviderSubscriptionCleanup(job: Job): Promise<void
       provider_authorization_id: string;
       scope_id: string;
       social_connection_id: string;
+      platform_slug: string;
       developer_application_urn: string;
       member_urn: string;
       entity_urn: string;
@@ -39,10 +41,12 @@ export async function processProviderSubscriptionCleanup(job: Job): Promise<void
       `
         SELECT pes.id, pes.provider_status, pes.provider_family,
                pes.provider_authorization_id, pa.scope_id, pes.social_connection_id,
+               p.slug AS platform_slug,
                pes.developer_application_urn, pes.member_urn, pes.entity_urn,
                pes.event_type, pa.credentials_encrypted
         FROM provider_event_subscriptions pes
         JOIN provider_authorizations pa ON pa.id = pes.provider_authorization_id
+        JOIN platforms p ON p.id = pes.platform_id
         WHERE pes.id = $1
         LIMIT 1
       `,
@@ -55,7 +59,10 @@ export async function processProviderSubscriptionCleanup(job: Job): Promise<void
     ]);
     return;
   }
-  if (subscription.provider_family !== "linkedin" || !subscription.credentials_encrypted) {
+  ensureWorkerConnectors();
+  const connector = connectorRegistry.create(subscription.platform_slug);
+  const deleteSubscription = connector?.deleteProviderEventSubscription;
+  if (!deleteSubscription || !subscription.credentials_encrypted) {
     await markSubscriptionTerminal(subscription.id, payload.jobRequestId, {
       code: "PROVIDER_DELETE_TERMINAL",
       message: "Provider subscription cleanup is not executable",
@@ -73,22 +80,15 @@ export async function processProviderSubscriptionCleanup(job: Job): Promise<void
       }),
     ),
   ) as ConnectorCredentials;
-  const metadata = credentials?.metadata as Record<string, unknown> | undefined;
-  const rawBase =
-    process.env.LINKEDIN_REST_BASE_URL ??
-    (typeof metadata?.fixtureBaseUrl === "string" ? metadata.fixtureBaseUrl : undefined);
-  const baseUrl = rawBase
-    ? rawBase.endsWith("/rest")
-      ? rawBase
-      : `${rawBase.replace(/\/+$/, "")}/rest`
-    : undefined;
-  const connector = new LinkedInConnector(baseUrl ? { baseUrl } : {});
   try {
-    await connector.deleteOrganizationSocialActionSubscription(
+    await deleteSubscription.call(
+      connector,
       {
         developerApplicationUrn: subscription.developer_application_urn,
         memberUrn: subscription.member_urn,
         organizationUrn: subscription.entity_urn,
+        roles: [],
+        webhookUrl: "",
         eventType: subscription.event_type,
       },
       {

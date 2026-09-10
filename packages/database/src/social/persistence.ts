@@ -296,12 +296,22 @@ async function upsertExternalAccount(
   if (!id) throw new Error("Failed to upsert external account");
   await client.query(
     `
-      INSERT INTO social_account_handles (external_account_id, handle)
-      VALUES ($1, $2)
+      INSERT INTO social_account_handles (
+        external_account_id, handle, provider_data_category, provider_retention_basis
+      )
+      VALUES ($1, $2, $3, $4)
       ON CONFLICT (external_account_id, handle)
-      DO UPDATE SET last_seen_at = now()
+      DO UPDATE SET
+        provider_data_category = COALESCE(EXCLUDED.provider_data_category, social_account_handles.provider_data_category),
+        provider_retention_basis = COALESCE(EXCLUDED.provider_retention_basis, social_account_handles.provider_retention_basis),
+        last_seen_at = now()
     `,
-    [id, profile.handle],
+    [
+      id,
+      profile.handle,
+      classifyProfileProviderDataCategory(profile),
+      stringMetadata(profile.metadata, "providerRetentionBasis"),
+    ],
   );
   return id;
 }
@@ -626,6 +636,11 @@ async function upsertInteractionObservation(
 function providerCategoryFromMetadata(metadata: Record<string, unknown> | undefined): string | null {
   const category = metadata?.providerDataCategory;
   return typeof category === "string" && category.length > 0 ? category : null;
+}
+
+function stringMetadata(metadata: Record<string, unknown> | undefined, key: string): string | null {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function classifyProfileProviderDataCategory(

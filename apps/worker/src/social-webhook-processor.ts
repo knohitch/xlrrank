@@ -1,6 +1,8 @@
 import type { Job } from "bullmq";
 import { createSocialConnectionSyncRequest, getPool, safeJobError } from "@xlrrank/database";
 import { JOB_TYPES, parseSocialWebhookProcessPayload } from "@xlrrank/queue";
+import { connectorRegistry } from "@xlrrank/social-core";
+import { ensureWorkerConnectors } from "./social-sync-processor.js";
 
 export async function processSocialWebhook(job: Job): Promise<void> {
   if (job.name !== JOB_TYPES.socialWebhookProcess) {
@@ -16,20 +18,30 @@ export async function processSocialWebhook(job: Job): Promise<void> {
     await pool.query("UPDATE webhook_receipts SET status = 'PROCESSING' WHERE id = $1", [
       payload.receiptId,
     ]);
+    ensureWorkerConnectors();
     const receipt = (
-      await pool.query<{ payload: Record<string, unknown>; provider_family: string }>(
-        "SELECT payload, provider_family FROM webhook_receipts WHERE id = $1",
+      await pool.query<{
+        payload: Record<string, unknown>;
+        provider_family: string;
+        platform_id: string | null;
+        platform_slug: string | null;
+      }>(
+        `
+          SELECT wr.payload, wr.provider_family, wr.platform_id, p.slug AS platform_slug
+          FROM webhook_receipts wr
+          LEFT JOIN platforms p ON p.id = wr.platform_id
+          WHERE wr.id = $1
+        `,
         [payload.receiptId],
       )
     ).rows[0];
-    if (!receipt || (receipt.provider_family !== "meta" && receipt.provider_family !== "linkedin")) {
+    if (!receipt?.platform_id || !receipt.platform_slug) {
       await markIgnored(payload.jobRequestId, payload.receiptId);
       return;
     }
-    const assetIds =
-      receipt.provider_family === "linkedin"
-        ? providerAssetIdsFromLinkedInPayload(receipt.payload)
-        : providerAssetIdsFromMetaPayload(receipt.payload);
+    const connector = connectorRegistry.create(receipt.platform_slug);
+    const webhookAdapter = connector?.getWebhookAdapter?.();
+    const assetIds = webhookAdapter?.extractAssetIds(receipt.payload) ?? [];
     if (assetIds.length === 0) {
       await markIgnored(payload.jobRequestId, payload.receiptId);
       return;
@@ -39,13 +51,14 @@ export async function processSocialWebhook(job: Job): Promise<void> {
         SELECT id
         FROM social_connections
         WHERE status IN ('CONNECTED', 'DEGRADED')
+          AND platform_id = $2
           AND (
             provider_metadata->>'providerAssetId' = ANY($1::text[])
             OR verified_external_id = ANY($1::text[])
           )
         ORDER BY id
       `,
-      [assetIds],
+      [assetIds, receipt.platform_id],
     );
     if (connections.rows.length === 0) {
       await markIgnored(payload.jobRequestId, payload.receiptId);
@@ -76,52 +89,6 @@ export async function processSocialWebhook(job: Job): Promise<void> {
     ]);
     throw err;
   }
-}
-
-function providerAssetIdsFromMetaPayload(payload: Record<string, unknown>): string[] {
-  const entries = Array.isArray(payload.entry) ? payload.entry : [];
-  return [
-    ...new Set(
-      entries
-        .map((entry) =>
-          entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
-            ? (entry as { id: string }).id
-            : undefined,
-        )
-        .filter((value): value is string => !!value),
-    ),
-  ];
-}
-
-function providerAssetIdsFromLinkedInPayload(payload: Record<string, unknown>): string[] {
-  const ids = new Set<string>();
-  const addUrn = (value: unknown) => {
-    if (typeof value !== "string" || value.length === 0) return;
-    ids.add(value);
-    ids.add(value.replace(/^urn:li:organization:/, ""));
-  };
-  const notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
-  for (const notification of notifications) {
-    if (!notification || typeof notification !== "object") continue;
-    const record = notification as Record<string, unknown>;
-    addUrn(record.organizationalEntity);
-    addUrn(record.organization);
-    addUrn(record.entityUrn);
-    addUrn(record.assetId);
-  }
-  if (typeof payload.organization === "string") {
-    addUrn(payload.organization);
-  }
-  if (typeof payload.entityUrn === "string") {
-    addUrn(payload.entityUrn);
-  }
-  if (typeof payload.organizationalEntity === "string") {
-    addUrn(payload.organizationalEntity);
-  }
-  if (typeof payload.assetId === "string") {
-    ids.add(payload.assetId);
-  }
-  return [...ids].filter(Boolean);
 }
 
 async function markIgnored(jobId: string, receiptId: string): Promise<void> {

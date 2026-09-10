@@ -73,12 +73,15 @@ export const socialAccountHandles = pgTable(
       .notNull()
       .references(() => socialExternalAccounts.id, { onDelete: "cascade" }),
     handle: text("handle").notNull(),
+    providerDataCategory: text("provider_data_category"),
+    providerRetentionBasis: text("provider_retention_basis"),
     firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     uniqueIndex("social_account_handles_account_handle_unique").on(t.externalAccountId, t.handle),
     index("social_account_handles_handle_idx").on(t.handle),
+    index("social_account_handles_provider_category_idx").on(t.providerDataCategory, t.lastSeenAt),
   ],
 );
 
@@ -1277,5 +1280,23 @@ export const providerDataRetentionPolicies = pgTable(
   (t) => [
     uniqueIndex("provider_retention_family_category_unique").on(t.providerFamily, t.dataCategory),
     index("provider_retention_family_idx").on(t.providerFamily),
+  ],
+);
+
+export const providerRetentionSweepClaims = pgTable(
+  "provider_retention_sweep_claims",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerFamily: text("provider_family").notNull(),
+    windowStart: timestamp("window_start", { withTimezone: true }).notNull(),
+    claimedBy: text("claimed_by").notNull(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    status: text("status").notNull().default("RUNNING"),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [
+    uniqueIndex("provider_retention_sweep_claim_window_unique").on(t.providerFamily, t.windowStart),
+    index("provider_retention_sweep_claim_status_idx").on(t.status, t.claimedAt),
   ],
 );

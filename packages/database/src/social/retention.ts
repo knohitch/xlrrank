@@ -24,7 +24,10 @@ export interface PurgeRetentionResult {
   policiesEvaluated: number;
   accountObservationsPurged: number;
   accountProfilesSanitized: number;
+  accountHandlesPurged: number;
+  connectionProfileCachesSanitized: number;
   authorizationAssetsSanitized: number;
+  authorizationAssetRolesExpired: number;
   contentObservationsPurged: number;
   interactionsPurged: number;
   canonicalItemsPurged: number;
@@ -80,7 +83,10 @@ export async function purgeExpiredProviderData(
   const policies = await loadProviderRetentionPolicies(providerFamily);
   let accountObservationsPurged = 0;
   let accountProfilesSanitized = 0;
+  let accountHandlesPurged = 0;
+  let connectionProfileCachesSanitized = 0;
   let authorizationAssetsSanitized = 0;
+  let authorizationAssetRolesExpired = 0;
   let contentObservationsPurged = 0;
   let interactionsPurged = 0;
   let canonicalItemsPurged = 0;
@@ -273,6 +279,116 @@ export async function purgeExpiredProviderData(
         const countRes = await pool.query<{ count: string }>(
           `
             SELECT count(*) AS count
+            FROM social_account_handles sah
+            JOIN social_external_accounts sea ON sea.id = sah.external_account_id
+            JOIN platforms p ON p.id = sea.platform_id
+            WHERE sah.last_seen_at < $1
+              AND p.slug = $2
+              AND COALESCE(sah.provider_data_category, sea.provider_data_category) = $3
+              AND NOT EXISTS (
+                SELECT 1
+                FROM social_account_observations sao
+                WHERE sao.external_account_id = sea.id
+                  AND COALESCE(sao.provider_data_category, sea.provider_data_category) = $3
+                  AND sao.observed_at >= $1
+              )
+          `,
+          params,
+        );
+        accountHandlesPurged += Number(countRes.rows[0]?.count ?? 0);
+      } else {
+        const delHandlesRes = await pool.query(
+          `
+            DELETE FROM social_account_handles sah
+            USING social_external_accounts sea, platforms p
+            WHERE sea.id = sah.external_account_id
+              AND p.id = sea.platform_id
+              AND sah.last_seen_at < $1
+              AND p.slug = $2
+              AND COALESCE(sah.provider_data_category, sea.provider_data_category) = $3
+              AND NOT EXISTS (
+                SELECT 1
+                FROM social_account_observations sao
+                WHERE sao.external_account_id = sea.id
+                  AND COALESCE(sao.provider_data_category, sea.provider_data_category) = $3
+                  AND sao.observed_at >= $1
+              )
+          `,
+          params,
+        );
+        accountHandlesPurged += delHandlesRes.rowCount ?? 0;
+      }
+    }
+
+    {
+      const scopeFilter = options.scopeId ? `AND sc.scope_id = ${scopeParamIndex}` : "";
+      const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
+      if (options.scopeId) params.push(options.scopeId);
+
+      const staleConnectionPredicate = `
+        sc.status IN ('CONNECTED', 'DEGRADED', 'REAUTH_REQUIRED', 'DISCONNECTED')
+        AND p.slug = $2
+        AND sea.provider_data_category = $3
+        AND (
+          sc.verified_handle IS NOT NULL
+          OR sc.provider_metadata ? 'displayName'
+          OR sc.provider_metadata ? 'handle'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM social_account_observations sao
+          WHERE sao.external_account_id = sea.id
+            AND sao.scope_id = sc.scope_id
+            AND COALESCE(sao.provider_data_category, sea.provider_data_category) = $3
+            AND sao.observed_at >= $1
+        )
+        ${scopeFilter}
+      `;
+
+      if (dryRun) {
+        const countRes = await pool.query<{ count: string }>(
+          `
+            SELECT count(*) AS count
+            FROM social_connections sc
+            JOIN social_external_accounts sea ON sea.id = sc.external_account_id
+            JOIN platforms p ON p.id = sc.platform_id
+            WHERE ${staleConnectionPredicate}
+          `,
+          params,
+        );
+        connectionProfileCachesSanitized += Number(countRes.rows[0]?.count ?? 0);
+      } else {
+        const sanitizeRes = await pool.query(
+          `
+            UPDATE social_connections sc
+            SET verified_handle = NULL,
+                provider_metadata = jsonb_strip_nulls(
+                  COALESCE(sc.provider_metadata, '{}'::jsonb)
+                    - 'displayName'
+                    - 'handle'
+                    || jsonb_build_object(
+                      'retentionProfileCacheRedactedAt', now(),
+                      'retentionProfileCacheRedactionCategory', $3
+                    )
+                ),
+                updated_at = now()
+            FROM social_external_accounts sea, platforms p
+            WHERE sea.id = sc.external_account_id
+              AND p.id = sc.platform_id
+              AND ${staleConnectionPredicate}
+          `,
+          params,
+        );
+        connectionProfileCachesSanitized += sanitizeRes.rowCount ?? 0;
+      }
+    }
+
+    {
+      const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
+      if (dryRun) {
+        const countRes = await pool.query<{ count: string }>(
+          `
+            SELECT count(*) AS count
             FROM provider_authorization_assets paa
             JOIN provider_authorizations pa ON pa.id = paa.provider_authorization_id
             WHERE paa.updated_at < $1
@@ -302,6 +418,9 @@ export async function purgeExpiredProviderData(
                   'roles', paa.metadata->'roles',
                   'primaryRole', paa.metadata->'primaryRole',
                   'access', paa.metadata->'access',
+                  'accessState', paa.metadata->'accessState',
+                  'rolesRetentionExpiredAt', paa.metadata->'rolesRetentionExpiredAt',
+                  'rolesRetentionCategory', paa.metadata->'rolesRetentionCategory',
                   'providerDataCategory', paa.provider_data_category,
                   'providerRetentionBasis', paa.metadata->'providerRetentionBasis',
                   'retentionRedactedAt', now(),
@@ -318,6 +437,80 @@ export async function purgeExpiredProviderData(
           params,
         );
         authorizationAssetsSanitized += sanitizeRes.rowCount ?? 0;
+      }
+    }
+
+    if (policy.dataCategory === "organization_admin_reporting") {
+      const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
+      const staleRolesPredicate = `
+        pa.provider_family = $2
+        AND paa.metadata->>'roleProviderDataCategory' = $3
+        AND COALESCE((paa.metadata->>'roleObservedAt')::timestamptz, paa.updated_at) < $1
+        AND (
+          paa.metadata ? 'roles'
+          OR paa.metadata ? 'primaryRole'
+        )
+      `;
+      if (dryRun) {
+        const countRes = await pool.query<{ count: string }>(
+          `
+            SELECT count(*) AS count
+            FROM provider_authorization_assets paa
+            JOIN provider_authorizations pa ON pa.id = paa.provider_authorization_id
+            WHERE ${staleRolesPredicate}
+          `,
+          params,
+        );
+        authorizationAssetRolesExpired += Number(countRes.rows[0]?.count ?? 0);
+      } else {
+        const expiredAssetIds = await pool.query<{ id: string }>(
+          `
+            UPDATE provider_authorization_assets paa
+            SET metadata = jsonb_strip_nulls(
+                  COALESCE(paa.metadata, '{}'::jsonb)
+                    - 'roles'
+                    - 'primaryRole'
+                    || jsonb_build_object(
+                      'rolesRetentionExpiredAt', now(),
+                      'rolesRetentionCategory', $3,
+                      'accessState', 'ACCESS_REQUIRED'
+                    )
+                )
+            FROM provider_authorizations pa
+            WHERE pa.id = paa.provider_authorization_id
+              AND ${staleRolesPredicate}
+            RETURNING paa.id
+          `,
+          params,
+        );
+        authorizationAssetRolesExpired += expiredAssetIds.rowCount ?? 0;
+        const ids = expiredAssetIds.rows.map((row) => row.id);
+        if (ids.length > 0) {
+          await pool.query(
+            `
+              UPDATE social_connections sc
+              SET status = CASE WHEN status = 'CONNECTED' THEN 'DEGRADED' ELSE status END,
+                  provider_metadata = jsonb_strip_nulls(
+                    COALESCE(provider_metadata, '{}'::jsonb)
+                      - 'roles'
+                      - 'primaryRole'
+                      - 'grantedCapabilities'
+                      || jsonb_build_object(
+                        'rolesRetentionExpiredAt', now(),
+                        'rolesRetentionCategory', $2::text,
+                        'accessState', 'ACCESS_REQUIRED'
+                      )
+                  ),
+                  sync_error = jsonb_build_object(
+                    'code', 'PROVIDER_ADMIN_ROLE_RETENTION_EXPIRED',
+                    'message', 'Provider-derived admin role data expired and requires revalidation'
+                  ),
+                  updated_at = now()
+              WHERE provider_metadata->>'providerAuthorizationAssetId' = ANY($1::text[])
+            `,
+            [ids, policy.dataCategory],
+          );
+        }
       }
     }
 
@@ -448,7 +641,10 @@ export async function purgeExpiredProviderData(
     policiesEvaluated: policies.length,
     accountObservationsPurged,
     accountProfilesSanitized,
+    accountHandlesPurged,
+    connectionProfileCachesSanitized,
     authorizationAssetsSanitized,
+    authorizationAssetRolesExpired,
     contentObservationsPurged,
     interactionsPurged,
     canonicalItemsPurged,

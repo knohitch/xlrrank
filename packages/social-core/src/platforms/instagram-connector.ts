@@ -209,6 +209,29 @@ export class InstagramConnector extends BaseSocialConnector {
     return evaluateInstagramCapabilities(input);
   }
 
+  getProviderFamily(): string {
+    return "meta";
+  }
+
+  getWebhookAdapter() {
+    return {
+      extractAssetIds: (payload: Record<string, unknown>) => {
+        const entries = Array.isArray(payload.entry) ? payload.entry : [];
+        return [
+          ...new Set(
+            entries
+              .map((entry) =>
+                entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string"
+                  ? (entry as { id: string }).id
+                  : undefined,
+              )
+              .filter((value): value is string => !!value),
+          ),
+        ];
+      },
+    };
+  }
+
   getOAuthAdapter(): OAuthProviderAdapter {
     return {
       buildAuthorizationUrl: (request) => this.buildAuthorizationUrl(request),
@@ -327,6 +350,10 @@ export class InstagramConnector extends BaseSocialConnector {
         accessToken: stringValue(page.access_token),
         metadata: { parentPageName: page.name, accountType: page.instagram_business_account?.account_type },
       }));
+  }
+
+  listAuthorizationAssets(credentials: ConnectorCredentials, context?: ConnectorOperationContext): Promise<MetaAsset[]> {
+    return this.listAssets(credentials, context);
   }
 
   private async getAuthenticatedProfileOrThrow(credentials: ConnectorCredentials, context?: ConnectorOperationContext): Promise<NormalizedProfile> {

@@ -74,7 +74,7 @@ async function reset() {
     return json({ errors: [{ title: "not found" }] }, 404);
   };
   await pool.query(
-    "TRUNCATE webhook_receipts, provider_event_subscriptions, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
+    "TRUNCATE provider_retention_sweep_claims, webhook_receipts, provider_event_subscriptions, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
   );
 }
 
@@ -1009,6 +1009,25 @@ test(
     assert.equal(conn1.status, "CONNECTED");
     assert.equal(conn1.verified_external_id, "12345");
     assert.equal(conn1.verified_handle, "acme-corp");
+    const initialProfileRetention = (
+      await pool.query(
+        `
+          SELECT sea.provider_data_category AS account_category,
+                 sao.provider_data_category AS observation_category,
+                 sah.provider_data_category AS handle_category
+          FROM social_connections sc
+          JOIN social_external_accounts sea ON sea.id = sc.external_account_id
+          JOIN social_account_observations sao ON sao.connection_id = sc.id
+          JOIN social_account_handles sah ON sah.external_account_id = sea.id
+          WHERE sc.id = $1
+          LIMIT 1
+        `,
+        [connected1.connectionId],
+      )
+    ).rows[0];
+    assert.equal(initialProfileRetention.account_category, "organization_profile");
+    assert.equal(initialProfileRetention.observation_category, "organization_profile");
+    assert.equal(initialProfileRetention.handle_category, "organization_profile");
 
     // 8. Connect Beta Asset in the same scope (multi-asset support)
     const connected2 = await service.connectAuthorizationAsset(
@@ -1180,13 +1199,13 @@ test(
         [connected.connectionId],
       )
     ).rows[0];
-    assert.equal(disconnectedSub.provider_status, "PROVIDER_DELETED");
+    assert.equal(disconnectedSub.provider_status, "PENDING_PROVIDER_DELETE");
     assert.equal(Number((await pool.query("SELECT count(*) FROM provider_authorizations")).rows[0].count), 1);
   },
 );
 
 test(
-  "Connection-specific disconnect: LinkedIn multi-org deletes only the exact provider subscription",
+  "Connection-specific disconnect: LinkedIn multi-org disconnect queues only the exact provider subscription cleanup",
   { skip },
   async () => {
     await reset();
@@ -1221,10 +1240,14 @@ test(
     linkedInRequests = [];
 
     await assert.rejects(() => service.disconnectConnection(orgB.connectionId, userB), /not found/i);
+    const startedAt = Date.now();
     const result = await service.disconnectConnection(orgB.connectionId, userA);
+    assert.ok(Date.now() - startedAt < 750, "local disconnect must not wait on provider DELETE");
     assert.equal(result.status, "DISCONNECTED");
     assert.equal(result.connectionId, orgB.connectionId);
-    assert.equal(result.providerCleanup.status, "PROVIDER_DELETED");
+    assert.equal(result.providerCleanup.status, "PENDING_PROVIDER_DELETE");
+    assert.equal(result.providerCleanup.subscriptionIds.length, 1);
+    assert.equal(result.providerCleanup.cleanupJobIds.length, 1);
 
     const connections = await pool.query(
       "SELECT id, verified_external_id, status, credentials_encrypted FROM social_connections ORDER BY verified_external_id",
@@ -1244,18 +1267,17 @@ test(
       subscriptions.rows.map((row) => [row.provider_asset_id, row.provider_status]),
       [
         ["12345", "ACTIVE"],
-        ["67890", "PROVIDER_DELETED"],
+        ["67890", "PENDING_PROVIDER_DELETE"],
       ],
     );
     const deleteRequests = linkedInRequests.filter((request) => request.method === "DELETE");
-    assert.equal(deleteRequests.length, 1);
-    assert.equal(decodeURIComponent(deleteRequests[0].path).includes("entity:urn:li:organization:67890"), true);
+    assert.equal(deleteRequests.length, 0);
     assert.equal(Number((await pool.query("SELECT count(*) FROM provider_authorizations")).rows[0].count), 1);
   },
 );
 
 test(
-  "Connection-specific disconnect: LinkedIn provider DELETE temporary failure disconnects locally and queues cleanup",
+  "Connection-specific disconnect: LinkedIn hanging provider DELETE is not on the local disconnect path",
   { skip },
   async () => {
     await reset();
@@ -1285,9 +1307,12 @@ test(
     const orgB = await service.connectAuthorizationAsset(callback.authorizationId, orgBAsset.id, userA);
     linkedInRequests = [];
 
+    globalThis.fetch = async () => new Promise(() => undefined);
+    const startedAt = Date.now();
     const result = await service.disconnectConnection(orgB.connectionId, userA);
+    assert.ok(Date.now() - startedAt < 750, "disconnect returned within strict local deadline");
     assert.equal(result.providerCleanup.status, "PENDING_PROVIDER_DELETE");
-    assert.ok(result.providerCleanup.cleanupJobId);
+    assert.ok(result.providerCleanup.cleanupJobIds[0]);
     const connection = (
       await pool.query("SELECT status, credentials_encrypted FROM social_connections WHERE id = $1", [orgB.connectionId])
     ).rows[0];
@@ -1301,6 +1326,7 @@ test(
     assert.equal(outbox.rows.length, 1);
     assert.equal(outbox.rows[0].job_type, "provider.subscription.cleanup");
     assert.equal(outbox.rows[0].payload.subscriptionId, subscription.id);
+    assert.equal(linkedInRequests.filter((request) => request.method === "DELETE").length, 0);
     assert.equal(Number((await pool.query("SELECT count(*) FROM provider_authorizations")).rows[0].count), 1);
   },
 );
@@ -1334,7 +1360,7 @@ test(
 );
 
 test(
-  "LinkedIn notification webhook deduplication: batches [100, 200] and [200, 300] accept 3 logical events, reject duplicates, handle reordering and standalone delivery",
+  "LinkedIn notification webhook deduplication: notificationId plus lastModifiedAt accepts updated versions and rejects duplicate versions",
   { skip },
   async () => {
     await reset();
@@ -1356,9 +1382,10 @@ test(
       type: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
       notifications: [
         { notificationId: "100", organizationalEntity: "urn:li:organization:12345", action: "COMMENT" },
-        { notificationId: "200", organizationalEntity: "urn:li:organization:12345", action: "LIKE" },
+        { notificationId: "200", lastModifiedAt: 1000, organizationalEntity: "urn:li:organization:12345", action: "LIKE" },
       ],
     };
+    batchA.notifications[0].lastModifiedAt = 1000;
     const resultA = await sendWebhook(batchA);
     assert.equal(resultA.acceptedCount, 2);
     assert.equal(resultA.duplicateCount, 0);
@@ -1370,9 +1397,10 @@ test(
       type: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
       notifications: [
         { notificationId: "200", organizationalEntity: "urn:li:organization:12345", action: "LIKE" },
-        { notificationId: "300", organizationalEntity: "urn:li:organization:12345", action: "SHARE" },
+        { notificationId: "300", lastModifiedAt: 1000, organizationalEntity: "urn:li:organization:12345", action: "SHARE" },
       ],
     };
+    batchB.notifications[0].lastModifiedAt = 1000;
     const resultB = await sendWebhook(batchB);
     assert.equal(resultB.acceptedCount, 1);
     assert.equal(resultB.duplicateCount, 1);
@@ -1390,9 +1418,9 @@ test(
     assert.deepEqual(
       receipts.rows.map((r) => [r.object_id, r.dedupe_key]),
       [
-        ["100", "linkedin:100"],
-        ["200", "linkedin:200"],
-        ["300", "linkedin:300"],
+        ["100", "linkedin:100:1000"],
+        ["200", "linkedin:200:1000"],
+        ["300", "linkedin:300:1000"],
       ],
     );
     const outboxJobs = await pool.query("SELECT count(*) FROM job_outbox");
@@ -1401,6 +1429,7 @@ test(
     // Standalone delivery of previously seen notification 100 -> duplicate
     const standalone100 = {
       notificationId: "100",
+      lastModifiedAt: 1000,
       organization: "urn:li:organization:12345",
       action: "COMMENT",
     };
@@ -1414,9 +1443,10 @@ test(
       type: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
       notifications: [
         { notificationId: "200", organizationalEntity: "urn:li:organization:12345", action: "LIKE" },
-        { notificationId: "100", organizationalEntity: "urn:li:organization:12345", action: "COMMENT" },
+        { notificationId: "100", lastModifiedAt: 1000, organizationalEntity: "urn:li:organization:12345", action: "COMMENT" },
       ],
     };
+    reorderedBatch.notifications[0].lastModifiedAt = 1000;
     const resultReordered = await sendWebhook(reorderedBatch);
     assert.equal(resultReordered.duplicate, true);
     assert.equal(resultReordered.acceptedCount, 0);
@@ -1425,6 +1455,21 @@ test(
     // Outbox count remains exactly 3
     const outboxStill3 = await pool.query("SELECT count(*) FROM job_outbox");
     assert.equal(Number(outboxStill3.rows[0].count), 3);
+
+    // Same notificationId with newer lastModifiedAt is a distinct provider version
+    const updated100 = {
+      notificationId: "100",
+      lastModifiedAt: 2000,
+      organization: "urn:li:organization:12345",
+      action: "COMMENT_EDITED",
+    };
+    const resultUpdated100 = await sendWebhook(updated100);
+    assert.equal(resultUpdated100.acceptedCount, 1);
+    assert.equal(resultUpdated100.duplicateCount, 0);
+    const updatedReceipt = (
+      await pool.query("SELECT dedupe_key FROM webhook_receipts WHERE dedupe_key = 'linkedin:100:2000'")
+    ).rows[0];
+    assert.equal(updatedReceipt.dedupe_key, "linkedin:100:2000");
 
     // Notification without notificationId uses deterministic fallback
     const fallbackPayload = {

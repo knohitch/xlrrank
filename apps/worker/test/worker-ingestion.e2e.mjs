@@ -22,6 +22,7 @@ const activeWorkers = new Set();
 
 async function setup() {
   if (pool) return;
+  process.env.NODE_ENV = "test";
   process.env.ENCRYPTION_MASTER_KEY ??= "worker-e2e-master-key-32-bytes-minimum";
   database = await import("@xlrrank/database");
   shared = await import("@xlrrank/shared");
@@ -34,7 +35,7 @@ async function reset() {
   await setup();
   process.env.QUEUE_PREFIX = `xlrrank-worker-e2e-${process.pid}-${Date.now()}-${Math.random()}`;
   await pool.query(
-    "TRUNCATE webhook_receipts, provider_event_subscriptions, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
+    "TRUNCATE provider_retention_sweep_claims, webhook_receipts, provider_event_subscriptions, provider_authorization_assets, provider_authorizations, oauth_authorization_transactions, provider_app_configurations, job_dead_letters, worker_heartbeats, social_sync_schedules, social_sync_leases, job_outbox, jobs, audit_logs, social_content_metrics, social_interaction_observations, social_interactions, social_content_observations, social_content_items, social_account_observations, social_ingestion_runs, social_connections, social_account_handles, social_external_accounts, social_accounts, data_scopes, organization_member_permissions, organization_members, organizations, platforms, users RESTART IDENTITY CASCADE",
   );
 }
 
@@ -1896,6 +1897,66 @@ test(
 );
 
 test(
+  "Social webhook worker e2e: receipt platform boundary prevents cross-provider object ID collision",
+  { skip },
+  async () => {
+    await reset();
+    const fixture = createLinkedInWorkerFixtureServer();
+    const baseUrl = await fixture.start();
+    let worker;
+    try {
+      const linkedIn = await createLinkedInConnection("12345");
+      const facebook = await createMetaConnection("facebook", "12345");
+      await createLinkedInProviderConfig(linkedIn.platformId);
+      await createMetaProviderConfig(facebook.platformId, "facebook");
+
+      const { PlatformsService } = await import("../../api/dist/platforms/platforms.service.js");
+      const service = new PlatformsService({ record: async () => undefined });
+      const payload = {
+        organization: "urn:li:organization:12345",
+        action: "ORGANIZATION_SOCIAL_ACTION",
+        notificationId: "notif-platform-boundary",
+        lastModifiedAt: 1000,
+      };
+      const rawBody = JSON.stringify(payload);
+      const signature = createHmac("sha256", "synthetic-linkedin-client-secret")
+        .update(`hmacsha256=${rawBody}`, "utf8")
+        .digest("hex");
+      const received = await service.receiveLinkedInWebhook(
+        linkedIn.platformId,
+        signature,
+        payload,
+        rawBody,
+      );
+
+      worker = await startWorker({ LINKEDIN_REST_BASE_URL: `${baseUrl}/rest` });
+      await waitFor(async () => {
+        const result = await pool.query("SELECT status FROM webhook_receipts WHERE id = $1", [
+          received.receiptId,
+        ]);
+        return result.rows[0]?.status === "PROCESSED";
+      }, 30_000);
+
+      const syncJobs = await pool.query(
+        `
+          SELECT payload->>'connectionId' AS connection_id, count(*)::int AS count
+          FROM jobs
+          WHERE type = $1
+          GROUP BY payload->>'connectionId'
+        `,
+        [queue.JOB_TYPES.socialConnectionSync],
+      );
+      const counts = new Map(syncJobs.rows.map((row) => [row.connection_id, row.count]));
+      assert.equal(counts.get(linkedIn.connectionId), 1);
+      assert.equal(counts.get(facebook.connectionId) ?? 0, 0);
+    } finally {
+      if (worker) await stopWorker(worker);
+      await fixture.stop();
+    }
+  },
+);
+
+test(
   "Data retention: record-level LinkedIn categories purge member comments and preserve lawful org content",
   { skip },
   async () => {
@@ -2131,6 +2192,77 @@ test(
   },
 );
 
+test("Provider retention runtime: two actors claim one window and runtime startup executes sweep", { skip }, async () => {
+  await reset();
+  const { runProviderRetentionSweepOnce } = await import("../dist/provider-retention-sweep.js");
+  const conn = await createLinkedInConnection("retention-runtime-org");
+  const expiredAccountId = randomUUID();
+  await pool.query(
+    `
+      INSERT INTO social_external_accounts (
+        id, platform_id, external_id, current_handle, display_name,
+        provider_data_category, last_observed_at
+      )
+      VALUES ($1, $2, 'runtime-expired-org', 'runtime-handle', 'Runtime Expired',
+        'organization_profile', now() - interval '9 weeks')
+    `,
+    [expiredAccountId, conn.platformId],
+  );
+  await Promise.all([
+    runProviderRetentionSweepOnce("retention-actor-a"),
+    runProviderRetentionSweepOnce("retention-actor-b"),
+  ]);
+  const claims = await pool.query(
+    "SELECT claimed_by, status FROM provider_retention_sweep_claims WHERE provider_family = 'linkedin'",
+  );
+  assert.equal(claims.rows.length, 1);
+  assert.equal(claims.rows[0].status, "COMPLETED");
+  const expired = (
+    await pool.query("SELECT current_handle, display_name FROM social_external_accounts WHERE id = $1", [
+      expiredAccountId,
+    ])
+  ).rows[0];
+  assert.equal(expired.current_handle, null);
+  assert.equal(expired.display_name, null);
+
+  await reset();
+  const startupConn = await createLinkedInConnection("retention-startup-org");
+  const startupExpiredId = randomUUID();
+  await pool.query(
+    `
+      INSERT INTO social_external_accounts (
+        id, platform_id, external_id, current_handle, display_name,
+        provider_data_category, last_observed_at
+      )
+      VALUES ($1, $2, 'startup-expired-org', 'startup-handle', 'Startup Expired',
+        'organization_profile', now() - interval '9 weeks')
+    `,
+    [startupExpiredId, startupConn.platformId],
+  );
+  let worker;
+  try {
+    worker = await startWorker({
+      PROVIDER_RETENTION_SWEEP_INTERVAL_MS: "60000",
+      PROVIDER_RETENTION_SWEEP_TIMEOUT_MS: "5000",
+    });
+    await waitFor(async () => {
+      const result = await pool.query(
+        "SELECT count(*)::int AS count FROM provider_retention_sweep_claims WHERE provider_family = 'linkedin' AND status = 'COMPLETED'",
+      );
+      return result.rows[0]?.count === 1;
+    }, 10_000);
+    const startupExpired = (
+      await pool.query("SELECT current_handle, display_name FROM social_external_accounts WHERE id = $1", [
+        startupExpiredId,
+      ])
+    ).rows[0];
+    assert.equal(startupExpired.current_handle, null);
+    assert.equal(startupExpired.display_name, null);
+  } finally {
+    if (worker) await stopWorker(worker);
+  }
+});
+
 test(
   "Data retention: canonical profile retention, redaction, cross-scope preservation, and authorization asset minimization",
   { skip },
@@ -2195,6 +2327,15 @@ test(
       `,
       [org9wId, platformId],
     );
+    await pool.query(
+      `
+        INSERT INTO social_account_handles (
+          external_account_id, handle, provider_data_category, provider_retention_basis, last_seen_at
+        )
+        VALUES ($1, 'org-9w', 'organization_profile', 'AUTHENTICATED_ORGANIZATION_ASSET', now() - interval '9 weeks')
+      `,
+      [org9wId],
+    );
 
     // 4. Cross-scope organization profile:
     // Shared external account observed by Scope A (9 weeks ago, expired) and Scope B (1 week ago, lawful)
@@ -2207,6 +2348,25 @@ test(
         VALUES ($1, $2, 'org-shared', 'org-shared', 'Org Shared', 'organization_profile', now() - interval '1 week')
       `,
       [orgSharedId, platformId],
+    );
+    await pool.query(
+      `
+        INSERT INTO social_account_handles (
+          external_account_id, handle, provider_data_category, provider_retention_basis, last_seen_at
+        )
+        VALUES ($1, 'org-shared', 'organization_profile', 'AUTHENTICATED_ORGANIZATION_ASSET', now() - interval '9 weeks')
+      `,
+      [orgSharedId],
+    );
+    await pool.query(
+      `
+        UPDATE social_connections
+        SET external_account_id = $3,
+            verified_handle = 'org-shared',
+            provider_metadata = COALESCE(provider_metadata, '{}'::jsonb) || '{"displayName":"Org Shared","handle":"org-shared"}'::jsonb
+        WHERE id IN ($1, $2)
+      `,
+      [connA.connectionId, connB.connectionId, orgSharedId],
     );
     const saoExpiredA = randomUUID();
     await pool.query(
@@ -2251,16 +2411,41 @@ test(
         )
         VALUES ($1, $2, $3, 'LINKEDIN_ORGANIZATION', '99999',
           'Org 9w Decorative Name', 'org-9w-handle', 'USER', 'organization_profile',
-          '{"organizationUrn":"urn:li:organization:99999","roles":["ADMINISTRATOR"],"primaryRole":"ADMINISTRATOR"}'::jsonb,
-          now() - interval '9 weeks')
+          '{
+             "organizationUrn":"urn:li:organization:99999",
+             "roles":["ADMINISTRATOR"],
+             "primaryRole":"ADMINISTRATOR",
+             "roleProviderDataCategory":"organization_admin_reporting",
+             "roleObservedAt":"2025-01-01T00:00:00.000Z"
+           }'::jsonb,
+          now() - interval '13 months')
       `,
       [asset9wId, authId, platformId],
+    );
+    await pool.query(
+      `
+        UPDATE social_connections
+        SET provider_metadata = COALESCE(provider_metadata, '{}'::jsonb) || $2::jsonb
+        WHERE id = $1
+      `,
+      [
+        connA.connectionId,
+        JSON.stringify({
+          providerAuthorizationAssetId: asset9wId,
+          roles: ["ADMINISTRATOR"],
+          primaryRole: "ADMINISTRATOR",
+          grantedCapabilities: { content: "AVAILABLE" },
+        }),
+      ],
     );
 
     // Execute purge
     const result = await database.purgeExpiredProviderData({ providerFamily: "linkedin" });
     assert.ok(result.accountProfilesSanitized >= 2);
+    assert.ok(result.accountHandlesPurged >= 1);
+    assert.ok(result.connectionProfileCachesSanitized >= 1);
     assert.ok(result.authorizationAssetsSanitized >= 1);
+    assert.ok(result.authorizationAssetRolesExpired >= 1);
 
     // Assertions:
     // 1. Authenticated member profile remains untouched
@@ -2285,14 +2470,24 @@ test(
     assert.equal(org9w.display_name, null);
     assert.equal(org9w.current_handle, null);
     assert.equal(org9w.external_id, "org-9w"); // stable ID remains!
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM social_account_handles WHERE external_account_id = $1", [org9wId])).rows[0].count),
+      0,
+    );
 
-    // 4. Cross-scope: Scope A observation purged, Scope B observation remains; canonical profile remains
+    // 4. Cross-scope: Scope A observation/cache purged, Scope B observation/cache remains; canonical profile remains
     const obsA = await pool.query("SELECT * FROM social_account_observations WHERE id = $1", [saoExpiredA]);
     assert.equal(obsA.rows.length, 0);
     const obsB = await pool.query("SELECT * FROM social_account_observations WHERE id = $1", [saoLawfulB]);
     assert.equal(obsB.rows.length, 1);
     const orgShared = (await pool.query("SELECT * FROM social_external_accounts WHERE id = $1", [orgSharedId])).rows[0];
     assert.equal(orgShared.display_name, "Org Shared");
+    const cacheA = (await pool.query("SELECT verified_handle, provider_metadata FROM social_connections WHERE id = $1", [connA.connectionId])).rows[0];
+    assert.equal(cacheA.verified_handle, null);
+    assert.equal(cacheA.provider_metadata.displayName, undefined);
+    const cacheB = (await pool.query("SELECT verified_handle, provider_metadata FROM social_connections WHERE id = $1", [connB.connectionId])).rows[0];
+    assert.equal(cacheB.verified_handle, "org-shared");
+    assert.equal(cacheB.provider_metadata.displayName, "Org Shared");
 
     // Age Scope B observation to 9 weeks and purge again -> now canonical profile redacted!
     await pool.query("UPDATE social_account_observations SET observed_at = now() - interval '9 weeks' WHERE id = $1", [saoLawfulB]);
@@ -2301,14 +2496,27 @@ test(
     const orgSharedAfterB = (await pool.query("SELECT * FROM social_external_accounts WHERE id = $1", [orgSharedId])).rows[0];
     assert.equal(orgSharedAfterB.display_name, null);
     assert.equal(orgSharedAfterB.external_id, "org-shared");
+    assert.equal(
+      Number((await pool.query("SELECT count(*) FROM social_account_handles WHERE external_account_id = $1", [orgSharedId])).rows[0].count),
+      0,
+    );
 
-    // 5. Authorization asset: decorative fields sanitized, role/urn preserved
+    // 5. Authorization asset: decorative fields sanitized, role/admin data expired
     const asset9w = (await pool.query("SELECT * FROM provider_authorization_assets WHERE id = $1", [asset9wId])).rows[0];
     assert.equal(asset9w.name, null);
     assert.equal(asset9w.handle, null);
     assert.equal(asset9w.provider_asset_id, "99999");
     assert.equal(asset9w.metadata.organizationUrn, "urn:li:organization:99999");
-    assert.deepEqual(asset9w.metadata.roles, ["ADMINISTRATOR"]);
+    assert.equal(asset9w.metadata.roles, undefined);
+    assert.equal(asset9w.metadata.primaryRole, undefined);
+    assert.equal(asset9w.metadata.accessState, "ACCESS_REQUIRED");
     assert.equal(asset9w.metadata.stableProviderIdentifierRetained, true);
+    const roleExpiredConnection = (
+      await pool.query("SELECT status, provider_metadata, sync_error FROM social_connections WHERE id = $1", [connA.connectionId])
+    ).rows[0];
+    assert.equal(roleExpiredConnection.status, "DEGRADED");
+    assert.equal(roleExpiredConnection.provider_metadata.roles, undefined);
+    assert.equal(roleExpiredConnection.provider_metadata.accessState, "ACCESS_REQUIRED");
+    assert.equal(roleExpiredConnection.sync_error.code, "PROVIDER_ADMIN_ROLE_RETENTION_EXPIRED");
   },
 );

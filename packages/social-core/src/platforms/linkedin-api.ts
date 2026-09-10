@@ -392,7 +392,15 @@ export function linkedInWebhookDedupeKey(
   rawJson?: string,
 ): string {
   if (typeof payload.notificationId === "string" && payload.notificationId.length > 0) {
-    return `linkedin:${payload.notificationId}`;
+    const lastModifiedAt =
+      payload.lastModifiedAt ??
+      payload.modifiedAt ??
+      (payload.lastModified && typeof payload.lastModified === "object"
+        ? (payload.lastModified as Record<string, unknown>).time
+        : undefined);
+    return lastModifiedAt !== undefined && lastModifiedAt !== null
+      ? `linkedin:${payload.notificationId}:${String(lastModifiedAt)}`
+      : `linkedin:${payload.notificationId}`;
   }
   const notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
   const notificationIds = notifications
@@ -400,7 +408,11 @@ export function linkedInWebhookDedupeKey(
       notification &&
       typeof notification === "object" &&
       typeof (notification as { notificationId?: unknown }).notificationId !== "undefined"
-        ? String((notification as { notificationId: unknown }).notificationId)
+        ? `${String((notification as { notificationId: unknown }).notificationId)}:${String(
+            (notification as { lastModifiedAt?: unknown; modifiedAt?: unknown }).lastModifiedAt ??
+              (notification as { modifiedAt?: unknown }).modifiedAt ??
+              "",
+          )}`
         : "",
     )
     .filter(Boolean);

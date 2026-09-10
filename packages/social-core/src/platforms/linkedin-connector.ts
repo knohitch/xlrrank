@@ -19,6 +19,8 @@ import type {
   OAuthTokenRefreshRequest,
   OAuthTokenResult,
   PageResult,
+  ProviderApplicationConfig,
+  ProviderEventSubscriptionRequest,
 } from "../connectors/types.js";
 import {
   NORMALIZATION_VERSION,
@@ -202,6 +204,50 @@ export class LinkedInConnector extends BaseSocialConnector {
 
   override evaluateCapabilities(input: CapabilityEvaluationInput) {
     return evaluateLinkedInCapabilities(input);
+  }
+
+  getProviderFamily(): string {
+    return "linkedin";
+  }
+
+  resolveOAuthDefaultScopes(defaults: string[], providerConfig: ProviderApplicationConfig): string[] {
+    const access =
+      providerConfig.metadata?.access &&
+      typeof providerConfig.metadata.access === "object" &&
+      !Array.isArray(providerConfig.metadata.access)
+        ? (providerConfig.metadata.access as Record<string, unknown>)
+        : {};
+    const scopes = [...defaults];
+    if (access.organizationSocialActionNotifications === true) scopes.push("rw_organization_admin");
+    if (access.restrictedMemberFeed === true) scopes.push("r_organization_social_feed");
+    return [...new Set(scopes)];
+  }
+
+  getWebhookAdapter() {
+    return {
+      extractAssetIds: (payload: Record<string, unknown>) => {
+        const ids = new Set<string>();
+        const addUrn = (value: unknown) => {
+          if (typeof value !== "string" || value.length === 0) return;
+          ids.add(value);
+          ids.add(value.replace(/^urn:li:organization:/, ""));
+        };
+        const notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
+        for (const notification of notifications) {
+          if (!notification || typeof notification !== "object") continue;
+          const record = notification as Record<string, unknown>;
+          addUrn(record.organizationalEntity);
+          addUrn(record.organization);
+          addUrn(record.entityUrn);
+          addUrn(record.assetId);
+        }
+        addUrn(payload.organization);
+        addUrn(payload.entityUrn);
+        addUrn(payload.organizationalEntity);
+        if (typeof payload.assetId === "string") ids.add(payload.assetId);
+        return [...ids].filter(Boolean);
+      },
+    };
   }
 
   getOAuthAdapter(): OAuthProviderAdapter {
@@ -414,6 +460,8 @@ export class LinkedInConnector extends BaseSocialConnector {
             numericId: orgId,
             roles: entry.roles,
             primaryRole,
+            roleObservedAt: new Date().toISOString(),
+            roleProviderDataCategory: "organization_admin_reporting",
             providerDataCategory: "organization_profile",
             providerRetentionBasis: "AUTHENTICATED_ORGANIZATION_ASSET",
           },
@@ -434,6 +482,8 @@ export class LinkedInConnector extends BaseSocialConnector {
             numericId: orgId,
             roles: entry.roles,
             primaryRole: entry.roles[0] ?? "ADMINISTRATOR",
+            roleObservedAt: new Date().toISOString(),
+            roleProviderDataCategory: "organization_admin_reporting",
             providerDataCategory: "organization_profile",
             providerRetentionBasis: "AUTHENTICATED_ORGANIZATION_ASSET",
           },
@@ -442,6 +492,45 @@ export class LinkedInConnector extends BaseSocialConnector {
     }
 
     return assets;
+  }
+
+  listAuthorizationAssets(
+    credentials: ConnectorCredentials,
+    context?: ConnectorOperationContext,
+  ): Promise<LinkedInAsset[]> {
+    return this.listAssets(credentials, context);
+  }
+
+  upsertProviderEventSubscription(
+    input: ProviderEventSubscriptionRequest,
+    context?: ConnectorOperationContext,
+  ): Promise<LinkedInOrganizationNotificationSubscriptionResult> {
+    return this.upsertOrganizationSocialActionSubscription(
+      {
+        developerApplicationUrn: input.developerApplicationUrn,
+        memberUrn: input.memberUrn,
+        organizationUrn: input.organizationUrn,
+        roles: input.roles ?? [],
+        webhookUrl: input.webhookUrl ?? "",
+        eventType: input.eventType,
+      },
+      context,
+    );
+  }
+
+  deleteProviderEventSubscription(
+    input: ProviderEventSubscriptionRequest,
+    context?: ConnectorOperationContext,
+  ): Promise<void> {
+    return this.deleteOrganizationSocialActionSubscription(
+      {
+        developerApplicationUrn: input.developerApplicationUrn,
+        memberUrn: input.memberUrn,
+        organizationUrn: input.organizationUrn,
+        eventType: input.eventType,
+      },
+      context,
+    );
   }
 
   override async authenticate(

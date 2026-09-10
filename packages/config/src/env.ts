@@ -61,6 +61,8 @@ const baseEnvSchema = z.object({
   SOCIAL_SYNC_PAGE_LIMIT: z.coerce.number().int().positive().max(500).default(100),
   SOCIAL_SYNC_DISPATCH_INTERVAL_MS: z.coerce.number().int().positive().default(2_000),
   SOCIAL_SYNC_SCHEDULER_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  PROVIDER_RETENTION_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
+  PROVIDER_RETENTION_SWEEP_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
   SOCIAL_SYNC_SHUTDOWN_GRACE_MS: z.coerce.number().int().positive().default(30_000),
   SOCIAL_SYNC_BULLMQ_LOCK_MS: z.coerce.number().int().positive().default(30_000),
   SOCIAL_SYNC_BULLMQ_STALLED_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
