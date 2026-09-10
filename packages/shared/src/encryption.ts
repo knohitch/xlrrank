@@ -147,3 +147,11 @@ export function providerAuthorizationAssetAssociatedData(input: {
 }): string {
   return `provider-authorization-asset:${input.authorizationAssetId}:${input.authorizationId}:${input.scopeId}:${input.platformSlug}:${input.providerAssetId}:credentials:v1`;
 }
+
+export function providerAuthorizationCleanupAssociatedData(input: {
+  cleanupId: string;
+  scopeId: string;
+  platformSlug: string;
+}): string {
+  return `provider-authorization-cleanup:${input.cleanupId}:${input.scopeId}:${input.platformSlug}:credentials:v1`;
+}

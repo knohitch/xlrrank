@@ -2,52 +2,50 @@
 
 Date: 2026-09-10
 
-## Focused Verification
+## Sprint 09 Closure Repair Verification
 
-Reddit connector contract and regressions:
+Repair verification date: 2026-09-10
 
-```sh
-pnpm --filter @xlrrank/social-core typecheck
-pnpm --filter @xlrrank/social-core build
-pnpm --filter @xlrrank/social-core test
-```
+### 1. Defect 1: Retention Policy Repair & Fail-Closed Enforcement
+- Fixed 30-day default eliminated in migration `0013_approved_use_retention_and_reconciliation.sql` (`max_retention_seconds = NULL`, `retention_mode = 'APPROVED_USE_CASE'`).
+- `loadProviderRetentionPolicies` fails closed in production when unconfigured (`MissingApprovedUseCaseRetentionPolicyError`).
+- Dynamic resolution across policy metadata, app config metadata, and environment variables verified in `packages/database/test/sprint-09-closure-repair.test.mjs`.
 
-Observed: 25/25 passing, including Reddit OAuth, API normalization, capability gating, rate-limit/error mapping, User-Agent enforcement, unsupported follows, and safe host override coverage.
+### 2. Defect 2: Bounded Durable Deletion Reconciliation
+- Official Reddit `/api/info` resource reconciliation verified in `packages/social-core/test/reddit-connector.test.mjs` (mapping deleted content, deleted accounts, and author-deleted content).
+- Database candidate claiming with `FOR UPDATE SKIP LOCKED`, checkpointing, deleted content purging, and author anonymization verified in `packages/database/test/sprint-09-closure-repair.test.mjs`.
+- Bounded maintenance sweep implemented in `apps/worker/src/provider-reconciliation-sweep.ts`.
 
-API OAuth E2E, Reddit-only:
+### 3. Defect 3: Durable Provider-Neutral Data Deletion Requests
+- Outbox job `provider.data.deletion` in `QUEUE_NAMES.ingestion`.
+- Policy-driven deadline calculation dynamically calculates 10-day DPA deadline (`deletionRequestDeadlineSeconds: 864000`) for Reddit, defaulting to 30 days for generic providers.
+- Atomic insertion into `provider_data_deletion_requests`, `jobs`, and `job_outbox` prior to Redis submission.
+- Bounded deletion execution preserving independent multi-provider canonical records verified.
 
-```sh
-DATABASE_URL=postgres://xlrrank@127.0.0.1:5434/xlrrank_x_oauth_e2e \
-X_OAUTH_E2E=1 NODE_ENV=test \
-ENCRYPTION_MASTER_KEY=x-oauth-e2e-master-key-32-bytes-minimum \
-node --test --test-name-pattern "Reddit" apps/api/test/platforms-oauth.e2e.mjs
-```
+### 4. Defect 4: Durable Final-Disconnect Token Revocation
+- Local disconnect succeeds immediately (`DISCONNECTED`), clearing credentials from `social_connections`.
+- 1500ms timeout fallback creates durable `provider.authorization.cleanup` in `provider_authorization_cleanups`.
+- Encrypted snapshot using dedicated `providerAuthorizationCleanupAssociatedData`.
+- Sibling connections sharing the external account remain unaffected.
+- Worker processor `processProviderAuthorizationCleanup` wipes `credentials_encrypted` to `NULL` upon completion or terminal failure.
 
-Observed: 2/2 passing.
-
-Worker E2E, Reddit-only:
-
-```sh
-DATABASE_URL=postgres://xlrrank@127.0.0.1:5434/xlrrank_worker_e2e \
-REDIS_URL=redis://127.0.0.1:6379 QUEUE_URL=redis://127.0.0.1:6379 \
-WORKER_INGESTION_E2E=1 NODE_ENV=test \
-ENCRYPTION_MASTER_KEY=worker-e2e-master-key-32-bytes-minimum \
-node --test --test-name-pattern "Reddit worker" apps/worker/test/worker-ingestion.e2e.mjs
-```
-
-Observed: 1/1 passing.
-
-Targeted package checks:
+### Targeted Repair Test Verification
 
 ```sh
-pnpm --filter @xlrrank/api typecheck
-pnpm --filter @xlrrank/api build
-pnpm --filter @xlrrank/worker typecheck
-pnpm --filter @xlrrank/worker build
-pnpm --filter @xlrrank/database typecheck
+pnpm --filter @xlrrank/queue run test
+pnpm --filter @xlrrank/social-core run test
+pnpm --filter @xlrrank/database run test
+pnpm --filter @xlrrank/worker run test
+pnpm --filter @xlrrank/api run test
 ```
 
-Observed: all passing.
+Observed:
+- `@xlrrank/queue`: 6/6 tests passing.
+- `@xlrrank/social-core`: 26/26 tests passing.
+- `@xlrrank/database`: 19/19 tests passing.
+- `@xlrrank/worker`: 3/3 tests passing.
+- `@xlrrank/api`: 6/6 tests passing.
+
 
 ## Source Verification
 

@@ -289,4 +289,30 @@ export interface SocialConnector {
     limit?: number,
     context?: ConnectorOperationContext,
   ): Promise<NormalizedProfile[]>;
+  reconcileResources?(
+    items: ReconcileResourceItem[],
+    context: ConnectorOperationContext,
+  ): Promise<ReconcileResourcesResult>;
+}
+
+export interface ReconcileResourceItem {
+  id: string;
+  externalId: string;
+  entityType: "CONTENT" | "INTERACTION" | "ACCOUNT";
+  dataCategory?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
+}
+
+export type UpstreamResourceState = "EXISTS" | "DELETED" | "ACCOUNT_DELETED" | "UNKNOWN";
+
+export interface ReconcileResourceStatus {
+  externalId: string;
+  state: UpstreamResourceState;
+  authorDeleted?: boolean | undefined;
+  details?: Record<string, unknown> | undefined;
+}
+
+export interface ReconcileResourcesResult {
+  statuses: ReconcileResourceStatus[];
+  rateLimit?: RateLimitInfo | undefined;
 }

@@ -79,3 +79,51 @@ test("provider subscription cleanup payloads are identifier-only", async () => {
     "provider-subscription-cleanup-11111111-1111-4111-8111-111111111111",
   );
 });
+
+test("provider authorization cleanup payloads are credential-free and versioned", async () => {
+  const m = await import("../dist/index.js");
+  const payload = m.parseProviderAuthorizationCleanupPayload({
+    version: 1,
+    jobRequestId: "11111111-1111-4111-8111-111111111111",
+    cleanupId: "44444444-4444-4444-8444-444444444444",
+  });
+  assert.equal(payload.cleanupId, "44444444-4444-4444-8444-444444444444");
+  assert.throws(
+    () =>
+      m.parseProviderAuthorizationCleanupPayload({
+        version: 1,
+        jobRequestId: "11111111-1111-4111-8111-111111111111",
+        cleanupId: "44444444-4444-4444-8444-444444444444",
+        refreshToken: "secret-token",
+      }),
+    /credential/,
+  );
+  assert.equal(
+    m.providerAuthorizationCleanupBullMqJobId("11111111-1111-4111-8111-111111111111"),
+    "provider-authorization-cleanup-11111111-1111-4111-8111-111111111111",
+  );
+});
+
+test("provider data deletion payloads are credential-free and versioned", async () => {
+  const m = await import("../dist/index.js");
+  const payload = m.parseProviderDataDeletionPayload({
+    version: 1,
+    jobRequestId: "11111111-1111-4111-8111-111111111111",
+    deletionRequestId: "55555555-5555-4555-8555-555555555555",
+  });
+  assert.equal(payload.deletionRequestId, "55555555-5555-4555-8555-555555555555");
+  assert.throws(
+    () =>
+      m.parseProviderDataDeletionPayload({
+        version: 1,
+        jobRequestId: "11111111-1111-4111-8111-111111111111",
+        deletionRequestId: "55555555-5555-4555-8555-555555555555",
+        clientSecret: "forbidden",
+      }),
+    /credential/,
+  );
+  assert.equal(
+    m.providerDataDeletionBullMqJobId("11111111-1111-4111-8111-111111111111"),
+    "provider-data-deletion-11111111-1111-4111-8111-111111111111",
+  );
+});

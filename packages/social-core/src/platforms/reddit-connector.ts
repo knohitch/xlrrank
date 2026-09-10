@@ -20,6 +20,9 @@ import type {
   OAuthTokenResult,
   PageResult,
   ProviderApplicationConfig,
+  ReconcileResourceItem,
+  ReconcileResourcesResult,
+  ReconcileResourceStatus,
 } from "../connectors/types.js";
 import {
   NORMALIZATION_VERSION,
@@ -496,6 +499,124 @@ export class RedditConnector extends BaseSocialConnector {
     const profile = normalizeProfile(response.body, context, REDDIT_PROFILE_CATEGORY);
     validateNormalizedProfile(profile);
     return profile;
+  }
+
+  async reconcileResources(
+    items: ReconcileResourceItem[],
+    context: ConnectorOperationContext,
+  ): Promise<ReconcileResourcesResult> {
+    if (!items.length) return { statuses: [] };
+    const credentials = this.requireAuth(context);
+
+    // Bounded batch of max 100 items per call (Reddit API limit)
+    const batch = items.slice(0, 100);
+
+    const fullnames: string[] = [];
+    const itemMap = new Map<string, ReconcileResourceItem>();
+
+    for (const item of batch) {
+      let fullname = item.externalId;
+      if (!fullname.includes("_")) {
+        if (item.entityType === "CONTENT") fullname = `t3_${item.externalId}`;
+        else if (item.entityType === "INTERACTION") fullname = `t1_${item.externalId}`;
+        else if (item.entityType === "ACCOUNT") fullname = `t2_${item.externalId}`;
+      }
+      fullnames.push(fullname);
+      itemMap.set(fullname, item);
+      itemMap.set(item.externalId, item);
+    }
+
+    const query = new URLSearchParams();
+    query.set("id", fullnames.join(","));
+    query.set("raw_json", "1");
+
+    const response = await this.client.get<RedditListing<RedditThing & RedditUser>>(
+      "/api/info",
+      token(credentials),
+      redditUserAgent(credentials),
+      query,
+      context.signal,
+    );
+
+    const children = listingChildren(response.body);
+    const seenFullnames = new Map<string, RedditThing & RedditUser>();
+
+    for (const data of children) {
+      if (!data) continue;
+      const name = stringOrUndefined(data.name);
+      const id = stringOrUndefined(data.id);
+      if (name) seenFullnames.set(name, data);
+      if (id) seenFullnames.set(id, data);
+    }
+
+    const statuses: ReconcileResourceStatus[] = [];
+
+    for (const item of batch) {
+      let candidateFullname = item.externalId;
+      if (!candidateFullname.includes("_")) {
+        if (item.entityType === "CONTENT") candidateFullname = `t3_${item.externalId}`;
+        else if (item.entityType === "INTERACTION") candidateFullname = `t1_${item.externalId}`;
+        else if (item.entityType === "ACCOUNT") candidateFullname = `t2_${item.externalId}`;
+      }
+
+      const found = seenFullnames.get(candidateFullname) ?? seenFullnames.get(item.externalId);
+
+      if (!found) {
+        statuses.push({
+          externalId: item.externalId,
+          state: item.entityType === "ACCOUNT" ? "ACCOUNT_DELETED" : "DELETED",
+        });
+        continue;
+      }
+
+      if (item.entityType === "ACCOUNT") {
+        if (found.is_suspended === true || found.name === "[deleted]") {
+          statuses.push({
+            externalId: item.externalId,
+            state: "ACCOUNT_DELETED",
+          });
+        } else {
+          statuses.push({
+            externalId: item.externalId,
+            state: "EXISTS",
+          });
+        }
+        continue;
+      }
+
+      const selftext = typeof found.selftext === "string" ? found.selftext : "";
+      const body = typeof found.body === "string" ? found.body : "";
+      const removedBy = found.removed_by_category;
+      const author = typeof found.author === "string" ? found.author : "";
+
+      if (
+        selftext === "[deleted]" ||
+        selftext === "[removed]" ||
+        body === "[deleted]" ||
+        body === "[removed]" ||
+        removedBy === "deleted" ||
+        removedBy === "moderator" ||
+        removedBy === "author" ||
+        removedBy === "automod_filtered"
+      ) {
+        statuses.push({
+          externalId: item.externalId,
+          state: "DELETED",
+        });
+      } else {
+        const authorDeleted = author === "[deleted]" || author === "";
+        statuses.push({
+          externalId: item.externalId,
+          state: "EXISTS",
+          authorDeleted,
+        });
+      }
+    }
+
+    return {
+      statuses,
+      rateLimit: response.rateLimit,
+    };
   }
 
   private assertCapabilityAvailable(

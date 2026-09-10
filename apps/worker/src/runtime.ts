@@ -21,18 +21,25 @@ import {
   getQueue,
   JOB_TYPES,
   QUEUE_NAMES,
+  parseProviderAuthorizationCleanupPayload,
+  parseProviderDataDeletionPayload,
   parseProviderSubscriptionCleanupPayload,
   parseSocialConnectionSyncPayload,
   parseSocialWebhookProcessPayload,
+  providerAuthorizationCleanupBullMqJobId,
+  providerDataDeletionBullMqJobId,
   providerSubscriptionCleanupBullMqJobId,
   socialSyncBullMqJobId,
   socialWebhookBullMqJobId,
 } from "@xlrrank/queue";
+import { processProviderAuthorizationCleanup } from "./provider-authorization-cleanup-processor.js";
+import { processProviderDataDeletion } from "./provider-data-deletion-processor.js";
 import { processProviderSubscriptionCleanup } from "./provider-subscription-cleanup-processor.js";
 import {
   loadProviderRetentionSweepCadenceMs,
   runProviderRetentionSweepOnce,
 } from "./provider-retention-sweep.js";
+import { runProviderReconciliationSweepOnce } from "./provider-reconciliation-sweep.js";
 import { processSocialConnectionSync, socialSyncJobOptions } from "./social-sync-processor.js";
 import { processSocialWebhook } from "./social-webhook-processor.js";
 
@@ -53,6 +60,7 @@ export interface WorkerRuntime {
   dispatchOutboxOnce(): Promise<number>;
   scheduleDueSyncsOnce(): Promise<number>;
   runRetentionSweepOnce(): Promise<unknown>;
+  runReconciliationSweepOnce(): Promise<unknown>;
 }
 
 export async function checkWorkerReadiness(): Promise<boolean> {
@@ -75,14 +83,22 @@ export async function dispatchOutboxOnce(dispatcherId: string): Promise<number> 
           ? parseSocialWebhookProcessPayload(entry.payload)
           : entry.jobType === JOB_TYPES.providerSubscriptionCleanup
             ? parseProviderSubscriptionCleanupPayload(entry.payload)
-            : parseSocialConnectionSyncPayload(entry.payload);
+            : entry.jobType === JOB_TYPES.providerAuthorizationCleanup
+              ? parseProviderAuthorizationCleanupPayload(entry.payload)
+              : entry.jobType === JOB_TYPES.providerDataDeletion
+                ? parseProviderDataDeletionPayload(entry.payload)
+                : parseSocialConnectionSyncPayload(entry.payload);
       const queue = getQueue(QUEUE_NAMES.ingestion);
       const bullmqJobId =
         entry.jobType === JOB_TYPES.socialWebhookProcess
           ? socialWebhookBullMqJobId(entry.jobId)
           : entry.jobType === JOB_TYPES.providerSubscriptionCleanup
             ? providerSubscriptionCleanupBullMqJobId(entry.jobId)
-            : socialSyncBullMqJobId(entry.jobId);
+            : entry.jobType === JOB_TYPES.providerAuthorizationCleanup
+              ? providerAuthorizationCleanupBullMqJobId(entry.jobId)
+              : entry.jobType === JOB_TYPES.providerDataDeletion
+                ? providerDataDeletionBullMqJobId(entry.jobId)
+                : socialSyncBullMqJobId(entry.jobId);
       await queue.add(entry.jobType, payload, {
         ...socialSyncJobOptions(),
         jobId: bullmqJobId,
@@ -169,6 +185,12 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
         if (job.name === JOB_TYPES.providerSubscriptionCleanup) {
           return processProviderSubscriptionCleanup(job);
         }
+        if (job.name === JOB_TYPES.providerAuthorizationCleanup) {
+          return processProviderAuthorizationCleanup(job);
+        }
+        if (job.name === JOB_TYPES.providerDataDeletion) {
+          return processProviderDataDeletion(job);
+        }
         logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented ingestion job");
         throw new UnimplementedJobProcessorError(QUEUE_NAMES.ingestion, job.name);
       },
@@ -203,6 +225,17 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     }
   };
   const retentionTimer = setInterval(runRetentionMaintenance, retentionSweepIntervalMs);
+  const runReconciliationMaintenance = () => {
+    if (!stopping) {
+      runProviderReconciliationSweepOnce(workerId).catch((err) =>
+        logger.error({ err }, "Provider reconciliation sweep failed"),
+      );
+    }
+  };
+  const reconciliationTimer = setInterval(
+    runReconciliationMaintenance,
+    env.PROVIDER_RECONCILIATION_SWEEP_INTERVAL_MS,
+  );
   const heartbeatTimer = setInterval(
     () => {
       if (!stopping) {
@@ -223,15 +256,21 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     workerId,
     kind: "worker",
     status: "READY",
-    metadata: { queuePrefix: env.QUEUE_PREFIX, retentionSweepIntervalMs },
+    metadata: {
+      queuePrefix: env.QUEUE_PREFIX,
+      retentionSweepIntervalMs,
+      reconciliationSweepIntervalMs: env.PROVIDER_RECONCILIATION_SWEEP_INTERVAL_MS,
+    },
   });
   runRetentionMaintenance();
+  runReconciliationMaintenance();
   logger.info(
     {
       workerId,
       ingestionConcurrency: env.INGESTION_WORKER_CONCURRENCY,
       queuePrefix: env.QUEUE_PREFIX,
       retentionSweepIntervalMs,
+      reconciliationSweepIntervalMs: env.PROVIDER_RECONCILIATION_SWEEP_INTERVAL_MS,
     },
     "Worker runtime ready",
   );
@@ -242,11 +281,13 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     dispatchOutboxOnce: () => dispatchOutboxOnce(workerId),
     scheduleDueSyncsOnce: () => scheduleDueSyncsOnce(workerId),
     runRetentionSweepOnce: () => runProviderRetentionSweepOnce(workerId),
+    runReconciliationSweepOnce: () => runProviderReconciliationSweepOnce(workerId),
     async stop() {
       stopping = true;
       clearInterval(dispatcherTimer);
       clearInterval(schedulerTimer);
       clearInterval(retentionTimer);
+      clearInterval(reconciliationTimer);
       clearInterval(heartbeatTimer);
       await touchWorkerHeartbeat({
         workerId,

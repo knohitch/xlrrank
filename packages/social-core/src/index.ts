@@ -35,6 +35,10 @@ export type {
   ConnectorOperationContext,
   PageResult,
   RetryClassification,
+  ReconcileResourceItem,
+  ReconcileResourceStatus,
+  ReconcileResourcesResult,
+  UpstreamResourceState,
 } from "./connectors/types.js";
 
 export { BaseSocialConnector } from "./connectors/base.js";

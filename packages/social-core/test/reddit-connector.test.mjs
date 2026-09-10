@@ -171,6 +171,44 @@ async function startRedditFixture() {
         );
         return;
       }
+      if (url.pathname === "/api/info") {
+        const ids = (url.searchParams.get("id") ?? "").split(",");
+        const children = [];
+        if (ids.includes("t3_post1")) {
+          children.push({ kind: "t3", data: postOne });
+        }
+        if (ids.includes("t3_post_removed")) {
+          children.push({
+            kind: "t3",
+            data: { ...postOne, id: "post_removed", name: "t3_post_removed", selftext: "[removed]" },
+          });
+        }
+        if (ids.includes("t1_comment1")) {
+          children.push({ kind: "t1", data: comment });
+        }
+        if (ids.includes("t1_author_deleted")) {
+          children.push({
+            kind: "t1",
+            data: {
+              ...comment,
+              id: "comment_author_deleted",
+              name: "t1_author_deleted",
+              author: "[deleted]",
+            },
+          });
+        }
+        if (ids.includes("t2_user1")) {
+          children.push({ kind: "t2", data: user });
+        }
+        if (ids.includes("t2_suspended")) {
+          children.push({
+            kind: "t2",
+            data: { ...user, id: "t2_suspended", name: "suspended_user", is_suspended: true },
+          });
+        }
+        res.end(JSON.stringify({ kind: "Listing", data: { children } }));
+        return;
+      }
 
       res.writeHead(404, { "content-type": "application/json" });
       res.end(JSON.stringify({ message: "not found" }));
@@ -393,6 +431,45 @@ test("Reddit connector maps errors, rejects missing User-Agent, and disallows un
     );
     if (original === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = original;
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Reddit connector reconcileResources queries /api/info and maps deleted, author-deleted, and missing resources", async () => {
+  const { RedditConnector } = await import("../dist/index.js");
+  const fixture = await startRedditFixture();
+  try {
+    const connector = new RedditConnector({ baseUrl: fixture.baseUrl, tokenBaseUrl: fixture.baseUrl });
+    const ctx = context();
+    const result = await connector.reconcileResources(
+      [
+        { id: "1", externalId: "t3_post1", entityType: "CONTENT" },
+        { id: "2", externalId: "t3_post_removed", entityType: "CONTENT" },
+        { id: "3", externalId: "t3_completely_missing", entityType: "CONTENT" },
+        { id: "4", externalId: "t1_comment1", entityType: "INTERACTION" },
+        { id: "5", externalId: "t1_author_deleted", entityType: "INTERACTION" },
+        { id: "6", externalId: "t2_user1", entityType: "ACCOUNT" },
+        { id: "7", externalId: "t2_suspended", entityType: "ACCOUNT" },
+        { id: "8", externalId: "t2_missing_account", entityType: "ACCOUNT" },
+      ],
+      ctx,
+    );
+
+    const statuses = new Map(result.statuses.map((s) => [s.externalId, s]));
+    assert.equal(statuses.get("t3_post1")?.state, "EXISTS");
+    assert.equal(statuses.get("t3_post1")?.authorDeleted, false);
+
+    assert.equal(statuses.get("t3_post_removed")?.state, "DELETED");
+    assert.equal(statuses.get("t3_completely_missing")?.state, "DELETED");
+
+    assert.equal(statuses.get("t1_comment1")?.state, "EXISTS");
+    assert.equal(statuses.get("t1_author_deleted")?.state, "EXISTS");
+    assert.equal(statuses.get("t1_author_deleted")?.authorDeleted, true);
+
+    assert.equal(statuses.get("t2_user1")?.state, "EXISTS");
+    assert.equal(statuses.get("t2_suspended")?.state, "ACCOUNT_DELETED");
+    assert.equal(statuses.get("t2_missing_account")?.state, "ACCOUNT_DELETED");
   } finally {
     await fixture.close();
   }

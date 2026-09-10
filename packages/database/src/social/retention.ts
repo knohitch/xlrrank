@@ -44,9 +44,23 @@ export interface PurgeRetentionResult {
   dryRun: boolean;
 }
 
+export class MissingApprovedUseCaseRetentionPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingApprovedUseCaseRetentionPolicyError";
+  }
+}
+
+export interface LoadRetentionPoliciesOptions {
+  resolveConfig?: boolean;
+  failClosedOnMissing?: boolean;
+  environment?: string;
+}
+
 export async function loadProviderRetentionPolicies(
   providerFamily = "linkedin",
   executor: QueryExecutor = getPool(),
+  options: LoadRetentionPoliciesOptions = {},
 ): Promise<ProviderRetentionPolicy[]> {
   const res = await executor.query<{
     id: string;
@@ -68,16 +82,95 @@ export async function loadProviderRetentionPolicies(
     [providerFamily],
   );
 
-  return res.rows.map((row) => ({
-    id: row.id,
-    providerFamily: row.provider_family,
-    dataCategory: row.data_category,
-    retentionClass: row.retention_class,
-    retentionMode: row.retention_mode,
-    maxRetentionSeconds: row.max_retention_seconds,
-    description: row.description,
-    metadata: row.metadata,
-  }));
+  const resolveConfig = options.resolveConfig !== false;
+  const isProduction = process.env.NODE_ENV === "production";
+  const failClosed = options.failClosedOnMissing ?? isProduction;
+
+  let appConfigMetadata: Record<string, unknown> | null = null;
+  if (resolveConfig) {
+    const envFilter = options.environment ? "AND pac.environment = $2" : "";
+    const params: unknown[] = [providerFamily];
+    if (options.environment) params.push(options.environment);
+    const configRes = await executor
+      .query<{ metadata: Record<string, unknown> | null }>(
+        `
+          SELECT pac.metadata
+          FROM provider_app_configurations pac
+          JOIN platforms p ON p.id = pac.platform_id
+          WHERE COALESCE(p.provider_family, p.slug) = $1
+            AND pac.enabled = true
+          ORDER BY pac.created_at DESC
+          LIMIT 1
+        `,
+        params,
+      )
+      .catch(() => ({ rows: [] }));
+    if (configRes.rows[0]?.metadata) {
+      appConfigMetadata = configRes.rows[0].metadata;
+    }
+  }
+
+  const policies: ProviderRetentionPolicy[] = [];
+  for (const row of res.rows) {
+    let maxSeconds = row.max_retention_seconds;
+    const isApprovedUseCase =
+      row.retention_mode === "APPROVED_USE_CASE" ||
+      row.metadata?.approvedUseCaseRequired === true;
+
+    if (isApprovedUseCase && resolveConfig) {
+      if (maxSeconds === null) {
+        if (typeof row.metadata?.approvedUseCaseRetentionSeconds === "number") {
+          maxSeconds = row.metadata.approvedUseCaseRetentionSeconds;
+        }
+        if (maxSeconds === null && appConfigMetadata) {
+          const retentionMeta = appConfigMetadata.retention as Record<string, unknown> | undefined;
+          const accessMeta = appConfigMetadata.access as Record<string, unknown> | undefined;
+          const catMeta = retentionMeta?.[row.data_category] as Record<string, unknown> | undefined;
+          if (typeof retentionMeta?.approvedUseCaseRetentionSeconds === "number") {
+            maxSeconds = retentionMeta.approvedUseCaseRetentionSeconds;
+          } else if (typeof retentionMeta?.[row.data_category] === "number") {
+            maxSeconds = retentionMeta[row.data_category] as number;
+          } else if (typeof catMeta?.retentionSeconds === "number") {
+            maxSeconds = catMeta.retentionSeconds as number;
+          } else if (typeof accessMeta?.approvedUseCaseRetentionSeconds === "number") {
+            maxSeconds = accessMeta.approvedUseCaseRetentionSeconds;
+          }
+        }
+        if (maxSeconds === null) {
+          const upperFamily = providerFamily.toUpperCase().replaceAll("-", "_");
+          const envVal =
+            process.env[`PROVIDER_APPROVED_USE_CASE_RETENTION_SECONDS_${upperFamily}`] ??
+            process.env[`${upperFamily}_APPROVED_USE_CASE_RETENTION_SECONDS`] ??
+            process.env[`${upperFamily}_APPROVED_USE_RETENTION_SECONDS`];
+          if (envVal) {
+            const parsed = parseInt(envVal, 10);
+            if (!Number.isNaN(parsed) && parsed > 0) {
+              maxSeconds = parsed;
+            }
+          }
+        }
+      }
+
+      if (maxSeconds === null && failClosed) {
+        throw new MissingApprovedUseCaseRetentionPolicyError(
+          `Provider family '${providerFamily}' category '${row.data_category}' requires an approved-use-case retention duration to be configured in production`,
+        );
+      }
+    }
+
+    policies.push({
+      id: row.id,
+      providerFamily: row.provider_family,
+      dataCategory: row.data_category,
+      retentionClass: row.retention_class,
+      retentionMode: row.retention_mode,
+      maxRetentionSeconds: maxSeconds,
+      description: row.description,
+      metadata: row.metadata,
+    });
+  }
+
+  return policies;
 }
 
 export async function purgeExpiredProviderData(

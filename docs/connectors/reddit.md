@@ -61,9 +61,9 @@ Listings cap `limit` at Reddit's maximum of 100 and use opaque `after` cursors. 
 
 The connector normalizes Reddit profiles, submissions, comments, and search results into the existing profile/content/interaction contracts. Provider metadata includes retention category, retention basis, and a source policy that blocks model training, fine-tuning, benchmark, and seed-data use by default.
 
-## Retention
+## Retention & Approved Use Case Enforcement
 
-Reddit retention is data-policy-driven through `provider_data_retention_policies` migration `0012_reddit_retention_policies.sql`.
+Reddit retention is strictly approved-use-case-driven through `provider_data_retention_policies` (migration `0013_approved_use_retention_and_reconciliation.sql`). The previous fixed 30-day default has been eliminated.
 
 Default categories:
 - `reddit_authenticated_user_profile`
@@ -71,16 +71,42 @@ Default categories:
 - `reddit_user_content`
 - `reddit_comment`
 
-The default local maximum is 30 days absent a stricter configured approved-use-case rule. The production retention runtime discovers these categories generically through the existing Sprint 08 provider retention sweep.
+Retention rules:
+- `retention_mode = 'APPROVED_USE_CASE'` with `max_retention_seconds = NULL` in database schema.
+- In production, retention loading fails closed with `MissingApprovedUseCaseRetentionPolicyError` if no approved use-case retention duration is configured.
+- Effective retention duration is resolved dynamically from:
+  1. Policy metadata (`approvedUseCaseRetentionSeconds`)
+  2. Provider application config metadata (`retention.approvedUseCaseRetentionSeconds` or category-level retention)
+  3. Environment variable (`PROVIDER_APPROVED_USE_CASE_RETENTION_SECONDS_REDDIT` or `REDDIT_APPROVED_USE_CASE_RETENTION_SECONDS`)
+- The retention sweep runtime generically processes providers configured with `APPROVED_USE_CASE` retention mode.
 
-## Webhooks And Disconnect
+## Upstream Deletion Reconciliation
 
-No Reddit webhook support is implemented because no official Reddit Data API webhook capability was verified.
+Reddit deletion reconciliation revalidates persisted content and accounts against official Reddit `/api/info` in accordance with Reddit Developer Terms:
+- Endpoints: `GET /api/info` using `id` parameter with prefixed fullnames (`t3_` for submissions, `t1_` for comments, `t2_` for user accounts) in bounded batches (up to 100 items).
+- Safe claiming: Database candidates are claimed with `FOR UPDATE SKIP LOCKED` and durable cursor tracking in `provider_reconciliation_checkpoints`.
+- Upstream removal: Items missing from the `/api/info` response or marked with `removed_by_category`, `[deleted]`, or `[removed]` have their observations purged. Orphan canonical items and interactions are removed only if no observation from another provider references them (preserving multi-provider provenance).
+- Author account deletion: Items where `author === "[deleted]"` or user accounts marked suspended/deleted trigger author anonymization (`author_handle = '[deleted]'`, `author_external_id = NULL`, removal of author fullname from metadata) across stored posts and interactions.
 
-Local disconnect uses the existing local-first connection lifecycle. Reddit has no provider event subscription cleanup row; disconnect returns after local state is marked `DISCONNECTED`, sync scheduling is disabled, and encrypted connection credentials are removed. Provider revocation is exposed by the connector adapter for bounded future cleanup flows, but local disconnect does not wait on provider network availability.
+## Provider Data Deletion Requests (DPA Compliance)
+
+Reddit Developer Terms and Data Protection Addendum (DPA) require deletion of Personal Data and derivatives within 10 days of request:
+- Queue: `QUEUE_NAMES.ingestion`, job type `JOB_TYPES.providerDataDeletion` (`provider.data.deletion`).
+- Deadline calculation: `calculateProviderDataDeletionDeadline` dynamically evaluates provider retention policy metadata (`deletionRequestDeadlineSeconds: 864000`, exactly 10 days for Reddit).
+- Durability: Requests, domain jobs, and outbox entries are committed atomically in the database within a single transaction prior to Redis transport.
+- Execution: `executeProviderDataDeletion` safely purges observations, orphaned canonical records, and content metrics, recording execution evidence.
+
+## Disconnect & Durable Token Revocation
+
+Disconnect maintains local-first availability while ensuring reliable remote token revocation:
+- Local disconnect: Immediately marks connection `DISCONNECTED` and clears credentials from `social_connections`.
+- Immediate revocation: Connector attempts remote revocation against `https://www.reddit.com/api/v1/revoke_token` with a 1500ms timeout.
+- Sibling connection safety: Sibling connections in the same scope sharing the verified external account remain active and are not revoked.
+- Durable fallback: If remote revocation times out or fails with a retryable error, a durable cleanup record is created in `provider_authorization_cleanups` along with an outbox job `provider.authorization.cleanup`. The credentials snapshot is encrypted using dedicated associated data.
+- Secret hygiene: Upon successful remote revocation or terminal failure in `processProviderAuthorizationCleanup`, `credentials_encrypted` is wiped to `NULL` to prevent credential leakage.
 
 ## Live Gate
 
 `REDDIT LIVE PROVIDER GATE: BLOCKED_EXTERNAL`
 
-No live Reddit client credentials, Data API approval, commercial/use-case approval, or production User-Agent registration were supplied for this sprint.
+No live Reddit client credentials, Data API approval, commercial/use-case approval, or production User-Agent registration were supplied for this sprint. All verification relies on official documentation, contract tests, and local integration fixtures.

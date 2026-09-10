@@ -42,7 +42,7 @@ export async function runProviderRetentionSweepOnce(workerId: string): Promise<P
     `
       SELECT provider_family, min(max_retention_seconds) AS shortest_seconds
       FROM provider_data_retention_policies
-      WHERE max_retention_seconds IS NOT NULL
+      WHERE (max_retention_seconds IS NOT NULL OR retention_mode = 'APPROVED_USE_CASE')
         AND retention_class <> 'SUPERSEDED_BY_0008'
       GROUP BY provider_family
       ORDER BY provider_family

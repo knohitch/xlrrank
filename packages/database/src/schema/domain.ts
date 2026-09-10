@@ -1301,3 +1301,96 @@ export const providerRetentionSweepClaims = pgTable(
     index("provider_retention_sweep_claim_status_idx").on(t.status, t.claimedAt),
   ],
 );
+
+export const providerDataDeletionRequests = pgTable(
+  "provider_data_deletion_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerFamily: text("provider_family").notNull(),
+    scopeId: uuid("scope_id").references(() => dataScopes.id, { onDelete: "set null" }),
+    connectionId: uuid("connection_id").references(() => socialConnections.id, {
+      onDelete: "set null",
+    }),
+    providerAuthorizationId: uuid("provider_authorization_id").references(
+      () => providerAuthorizations.id,
+      { onDelete: "set null" },
+    ),
+    reason: text("reason").notNull(),
+    source: text("source").notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    deadlineAt: timestamp("deadline_at", { withTimezone: true }).notNull(),
+    status: text("status").notNull().default("PENDING_DISPATCH"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    claimedBy: text("claimed_by"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    failureEvidence: jsonb("failure_evidence"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    completionEvidence: jsonb("completion_evidence"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("provider_data_deletion_family_status_idx").on(t.providerFamily, t.status),
+    index("provider_data_deletion_scope_idx").on(t.scopeId),
+  ],
+);
+
+export const providerAuthorizationCleanups = pgTable(
+  "provider_authorization_cleanups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id").references(() => socialConnections.id, {
+      onDelete: "set null",
+    }),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    platformId: uuid("platform_id")
+      .notNull()
+      .references(() => platforms.id, { onDelete: "cascade" }),
+    providerFamily: text("provider_family").notNull(),
+    credentialsEncrypted: text("credentials_encrypted"),
+    status: text("status").notNull().default("PENDING"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    lastError: jsonb("last_error"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("provider_auth_cleanup_status_idx").on(t.status),
+    index("provider_auth_cleanup_family_idx").on(t.providerFamily),
+  ],
+);
+
+export const providerReconciliationCheckpoints = pgTable(
+  "provider_reconciliation_checkpoints",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => socialConnections.id, { onDelete: "cascade" }),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    providerFamily: text("provider_family").notNull(),
+    entityType: text("entity_type").notNull(),
+    lastProcessedId: uuid("last_processed_id"),
+    lastReconciledAt: timestamp("last_reconciled_at", { withTimezone: true }),
+    status: text("status").notNull().default("IDLE"),
+    claimedBy: text("claimed_by"),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("provider_reconciliation_conn_entity_unique").on(t.connectionId, t.entityType),
+    index("provider_reconciliation_family_idx").on(t.providerFamily, t.status),
+  ],
+);

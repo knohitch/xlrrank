@@ -4,6 +4,7 @@ export {
   maskSecret,
   providerAuthorizationAssetAssociatedData,
   providerAuthorizationAssociatedData,
+  providerAuthorizationCleanupAssociatedData,
   providerAppSecretAssociatedData,
   redactSensitive,
   socialCredentialAssociatedData,

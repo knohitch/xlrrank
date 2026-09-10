@@ -10,6 +10,7 @@ import { eq } from "drizzle-orm";
 import {
   authorizeConnection,
   authorizeScope,
+  createProviderAuthorizationCleanupRequestTx,
   createProviderSubscriptionCleanupRequestTx,
   createSocialConnectionSyncRequest,
   createSocialWebhookProcessRequest,
@@ -50,6 +51,7 @@ import {
   encryptSecret,
   providerAuthorizationAssetAssociatedData,
   providerAuthorizationAssociatedData,
+  providerAuthorizationCleanupAssociatedData,
   providerAppSecretAssociatedData,
   socialCredentialAssociatedData,
 } from "../common/encryption.js";
@@ -62,6 +64,7 @@ interface ConnectionRow {
   status: string;
   verified_external_id: string | null;
   verified_handle: string | null;
+  credentials_encrypted?: string | null;
   last_sync_at: Date | null;
   last_sync_attempt_at: Date | null;
   rate_limit_remaining: number | null;
@@ -877,9 +880,9 @@ export class PlatformsService {
     if (!scope) throw new NotFoundException("Connection not found.");
     const pool = getPool();
     const connection = (
-      await pool.query<ConnectionRow & { platform_slug: string }>(
+      await pool.query<ConnectionRow & { platform_slug: string; provider_family?: string }>(
         `
-          SELECT sc.*, p.slug AS platform_slug
+          SELECT sc.*, p.slug AS platform_slug, COALESCE(p.provider_family, p.slug) AS provider_family
           FROM social_connections sc
           JOIN platforms p ON p.id = sc.platform_id
           WHERE sc.id = $1
@@ -892,7 +895,7 @@ export class PlatformsService {
       throw new NotFoundException("Connection not found.");
     }
     const providerCleanup = await this.markConnectionLocallyDisconnected({
-      connectionId: connection.id,
+      connection,
       scopeId: scope.scopeId,
     });
     await this.audit.record({
@@ -911,14 +914,115 @@ export class PlatformsService {
   }
 
   private async markConnectionLocallyDisconnected(input: {
-    connectionId: string;
+    connection: ConnectionRow & { platform_slug: string; provider_family?: string };
     scopeId: string;
   }): Promise<Record<string, unknown>> {
     const pool = getPool();
+    const connection = input.connection;
+    const providerFamily = connection.provider_family ?? connection.platform_slug;
+
+    // Check if another active connection in the same scope shares this verified_external_id
+    let siblingActive = false;
+    if (connection.verified_external_id) {
+      const siblingCheck = await pool.query<{ id: string }>(
+        `
+          SELECT id
+          FROM social_connections
+          WHERE scope_id = $1
+            AND platform_id = $2
+            AND verified_external_id = $3
+            AND id <> $4
+            AND status = 'CONNECTED'
+          LIMIT 1
+        `,
+        [input.scopeId, connection.platform_id, connection.verified_external_id, connection.id],
+      );
+      siblingActive = (siblingCheck.rowCount ?? 0) > 0;
+    }
+
+    let immediateRevoked = false;
+    let plaintextCredentials: string | null = null;
+    let parsedCredentials: ConnectorCredentials | null = null;
+
+    if (!siblingActive && connection.credentials_encrypted) {
+      try {
+        plaintextCredentials = decryptSecret(
+          connection.credentials_encrypted,
+          undefined,
+          socialCredentialAssociatedData({
+            connectionId: connection.id,
+            scopeId: input.scopeId,
+            platformSlug: connection.platform_slug,
+          }),
+        );
+        parsedCredentials = JSON.parse(plaintextCredentials) as ConnectorCredentials;
+      } catch {
+        plaintextCredentials = null;
+      }
+    }
+
+    if (!siblingActive && parsedCredentials) {
+      this.ensureConnectors();
+      const connector = connectorRegistry.create(connection.platform_slug);
+      const oauth = (connector as OAuthCapableConnector | undefined)?.getOAuthAdapter?.();
+      if (typeof oauth?.revoke === "function") {
+        try {
+          const providerConfig = await this.loadProviderAppConfig({
+            id: connection.platform_id,
+            slug: connection.platform_slug,
+          } as PlatformRow);
+          const revokeResult = await oauth.revoke(
+            parsedCredentials,
+            providerConfig,
+            AbortSignal.timeout(1500),
+          );
+          if (revokeResult?.providerRevoked) {
+            immediateRevoked = true;
+          }
+        } catch {
+          immediateRevoked = false;
+        }
+      }
+    }
+
     const client = await pool.connect();
     const subscriptionIds: string[] = [];
+    let cleanupJobId: string | null = null;
+
     try {
       await client.query("BEGIN");
+
+      if (!siblingActive && !immediateRevoked && plaintextCredentials) {
+        this.ensureConnectors();
+        const connector = connectorRegistry.create(connection.platform_slug);
+        const oauth = (connector as OAuthCapableConnector | undefined)?.getOAuthAdapter?.();
+        if (typeof oauth?.revoke === "function") {
+          const cleanupId = randomUUID();
+          const cleanupEncrypted = encryptSecret(
+            plaintextCredentials,
+            undefined,
+            providerAuthorizationCleanupAssociatedData({
+              cleanupId,
+              scopeId: input.scopeId,
+              platformSlug: connection.platform_slug,
+            }),
+          );
+          const cleanupJob = await createProviderAuthorizationCleanupRequestTx(client, {
+            connectionId: connection.id,
+            scopeId: input.scopeId,
+            platformId: connection.platform_id,
+            providerFamily,
+            credentialsEncrypted: cleanupEncrypted,
+            metadata: {
+              connectionId: connection.id,
+              platformSlug: connection.platform_slug,
+              verifiedExternalId: connection.verified_external_id,
+            },
+          });
+          cleanupJobId = cleanupJob.jobId;
+        }
+      }
+
       await client.query(
         `
           UPDATE social_connections
@@ -931,8 +1035,9 @@ export class PlatformsService {
               updated_at = now()
           WHERE id = $1 AND scope_id = $2
         `,
-        [input.connectionId, input.scopeId],
+        [connection.id, input.scopeId],
       );
+
       const subscriptions = await client.query<{ id: string; provider_status: string }>(
         `
           UPDATE provider_event_subscriptions
@@ -954,19 +1059,36 @@ export class PlatformsService {
           WHERE social_connection_id = $1
           RETURNING id, provider_status
         `,
-        [input.connectionId],
+        [connection.id],
       );
+
       subscriptionIds.push(
         ...subscriptions.rows
           .filter((row) => row.provider_status === "PENDING_PROVIDER_DELETE")
           .map((row) => row.id),
       );
+
       const cleanupJobIds: string[] = [];
       for (const subscriptionId of subscriptionIds) {
         const cleanupJob = await createProviderSubscriptionCleanupRequestTx(client, { subscriptionId });
         cleanupJobIds.push(cleanupJob.jobId);
       }
+
       await client.query("COMMIT");
+
+      if (siblingActive) {
+        return { status: "SIBLING_ACTIVE", providerRevoked: false };
+      }
+      if (immediateRevoked) {
+        return { status: "REVOKED", providerRevoked: true };
+      }
+      if (cleanupJobId) {
+        return {
+          status: "PENDING_PROVIDER_REVOCATION",
+          cleanupJobId,
+          providerRevoked: false,
+        };
+      }
       return subscriptionIds.length
         ? {
             status: "PENDING_PROVIDER_DELETE",

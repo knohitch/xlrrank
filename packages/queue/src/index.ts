@@ -16,6 +16,8 @@ export const JOB_TYPES = {
   socialConnectionSync: "social.connection.sync",
   socialWebhookProcess: "social.webhook.process",
   providerSubscriptionCleanup: "provider.subscription.cleanup",
+  providerAuthorizationCleanup: "provider.authorization.cleanup",
+  providerDataDeletion: "provider.data.deletion",
 } as const;
 
 export type JobType = (typeof JOB_TYPES)[keyof typeof JOB_TYPES];
@@ -23,6 +25,8 @@ export type JobType = (typeof JOB_TYPES)[keyof typeof JOB_TYPES];
 export const SOCIAL_SYNC_PAYLOAD_VERSION = 1 as const;
 export const SOCIAL_WEBHOOK_PROCESS_PAYLOAD_VERSION = 1 as const;
 export const PROVIDER_SUBSCRIPTION_CLEANUP_PAYLOAD_VERSION = 1 as const;
+export const PROVIDER_AUTHORIZATION_CLEANUP_PAYLOAD_VERSION = 1 as const;
+export const PROVIDER_DATA_DELETION_PAYLOAD_VERSION = 1 as const;
 
 export const SOCIAL_SYNC_REASONS = ["MANUAL", "SCHEDULED", "RETRY"] as const;
 export type SocialSyncReason = (typeof SOCIAL_SYNC_REASONS)[number];
@@ -51,6 +55,22 @@ export interface ProviderSubscriptionCleanupPayloadV1 {
 }
 
 export type ProviderSubscriptionCleanupPayload = ProviderSubscriptionCleanupPayloadV1;
+
+export interface ProviderAuthorizationCleanupPayloadV1 {
+  version: typeof PROVIDER_AUTHORIZATION_CLEANUP_PAYLOAD_VERSION;
+  jobRequestId: string;
+  cleanupId: string;
+}
+
+export type ProviderAuthorizationCleanupPayload = ProviderAuthorizationCleanupPayloadV1;
+
+export interface ProviderDataDeletionPayloadV1 {
+  version: typeof PROVIDER_DATA_DELETION_PAYLOAD_VERSION;
+  jobRequestId: string;
+  deletionRequestId: string;
+}
+
+export type ProviderDataDeletionPayload = ProviderDataDeletionPayloadV1;
 
 export const JOB_STATUSES = [
   "PENDING_DISPATCH",
@@ -215,6 +235,54 @@ export function parseProviderSubscriptionCleanupPayload(
   };
 }
 
+export function parseProviderAuthorizationCleanupPayload(
+  payload: unknown,
+): ProviderAuthorizationCleanupPayload {
+  assertNoCredentialsInPayload(payload);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new InvalidJobPayloadError("Provider authorization cleanup payload must be an object");
+  }
+  const item = payload as Record<string, unknown>;
+  if (item.version !== PROVIDER_AUTHORIZATION_CLEANUP_PAYLOAD_VERSION) {
+    throw new InvalidJobPayloadError("Unsupported provider authorization cleanup payload version");
+  }
+  if (typeof item.jobRequestId !== "string" || !UUID_RE.test(item.jobRequestId)) {
+    throw new InvalidJobPayloadError("Provider authorization cleanup payload jobRequestId must be a UUID");
+  }
+  if (typeof item.cleanupId !== "string" || !UUID_RE.test(item.cleanupId)) {
+    throw new InvalidJobPayloadError("Provider authorization cleanup payload cleanupId must be a UUID");
+  }
+  return {
+    version: PROVIDER_AUTHORIZATION_CLEANUP_PAYLOAD_VERSION,
+    jobRequestId: item.jobRequestId,
+    cleanupId: item.cleanupId,
+  };
+}
+
+export function parseProviderDataDeletionPayload(
+  payload: unknown,
+): ProviderDataDeletionPayload {
+  assertNoCredentialsInPayload(payload);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new InvalidJobPayloadError("Provider data deletion payload must be an object");
+  }
+  const item = payload as Record<string, unknown>;
+  if (item.version !== PROVIDER_DATA_DELETION_PAYLOAD_VERSION) {
+    throw new InvalidJobPayloadError("Unsupported provider data deletion payload version");
+  }
+  if (typeof item.jobRequestId !== "string" || !UUID_RE.test(item.jobRequestId)) {
+    throw new InvalidJobPayloadError("Provider data deletion payload jobRequestId must be a UUID");
+  }
+  if (typeof item.deletionRequestId !== "string" || !UUID_RE.test(item.deletionRequestId)) {
+    throw new InvalidJobPayloadError("Provider data deletion payload deletionRequestId must be a UUID");
+  }
+  return {
+    version: PROVIDER_DATA_DELETION_PAYLOAD_VERSION,
+    jobRequestId: item.jobRequestId,
+    deletionRequestId: item.deletionRequestId,
+  };
+}
+
 export function socialSyncBullMqJobId(jobRequestId: string): string {
   return `${JOB_TYPES.socialConnectionSync.replaceAll(".", "-")}-${jobRequestId}`;
 }
@@ -225,6 +293,14 @@ export function socialWebhookBullMqJobId(jobRequestId: string): string {
 
 export function providerSubscriptionCleanupBullMqJobId(jobRequestId: string): string {
   return `${JOB_TYPES.providerSubscriptionCleanup.replaceAll(".", "-")}-${jobRequestId}`;
+}
+
+export function providerAuthorizationCleanupBullMqJobId(jobRequestId: string): string {
+  return `${JOB_TYPES.providerAuthorizationCleanup.replaceAll(".", "-")}-${jobRequestId}`;
+}
+
+export function providerDataDeletionBullMqJobId(jobRequestId: string): string {
+  return `${JOB_TYPES.providerDataDeletion.replaceAll(".", "-")}-${jobRequestId}`;
 }
 
 export function defaultSocialSyncJobOptions(): JobsOptions {

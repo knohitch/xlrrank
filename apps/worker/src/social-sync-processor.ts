@@ -184,7 +184,7 @@ function tokenNeedsRefresh(credentials: ConnectorCredentials): boolean {
   return expiresAt <= Date.now() + 60_000;
 }
 
-async function loadProviderConfigForWorker(
+export async function loadProviderConfigForWorker(
   platformSlug: string,
 ): Promise<ProviderApplicationConfig> {
   const result = await getPool().query<{

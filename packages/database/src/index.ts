@@ -61,9 +61,45 @@ export type {
 export {
   loadProviderRetentionPolicies,
   purgeExpiredProviderData,
+  MissingApprovedUseCaseRetentionPolicyError,
 } from "./social/retention.js";
 export type {
   ProviderRetentionPolicy,
   PurgeRetentionOptions,
   PurgeRetentionResult,
+  LoadRetentionPoliciesOptions,
 } from "./social/retention.js";
+export {
+  calculateProviderDataDeletionDeadline,
+  createProviderDataDeletionRequest,
+  executeProviderDataDeletion,
+} from "./social/deletion-requests.js";
+export type {
+  CreateProviderDataDeletionInput,
+  CreateProviderDataDeletionResult,
+  ProviderDataDeletionExecutionResult,
+  ProviderDataDeletionRequestRecord,
+} from "./social/deletion-requests.js";
+export {
+  createProviderAuthorizationCleanupRequest,
+  createProviderAuthorizationCleanupRequestTx,
+  markAuthorizationCleanupCompleted,
+  markAuthorizationCleanupTerminal,
+} from "./social/authorization-cleanup.js";
+export type {
+  CreateProviderAuthorizationCleanupInput,
+  DurableProviderAuthorizationCleanupRequest,
+} from "./social/authorization-cleanup.js";
+export {
+  claimReconciliationCandidates,
+  advanceReconciliationCheckpoint,
+  recordReconciliationFailure,
+  applyDeletedContentReconciliation,
+  applyDeletedInteractionReconciliation,
+  applyDeletedAccountAuthorScrubbing,
+} from "./social/reconciliation.js";
+export type {
+  ReconciliationCandidate,
+  ClaimReconciliationCandidatesInput,
+  ClaimReconciliationCandidatesResult,
+} from "./social/reconciliation.js";
