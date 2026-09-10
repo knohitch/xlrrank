@@ -55,3 +55,27 @@ test("social sync BullMQ job IDs are deterministic and BullMQ-safe", async () =>
   assert.equal(jobId, "social-connection-sync-11111111-1111-4111-8111-111111111111");
   assert.equal(jobId.includes(":"), false);
 });
+
+test("provider subscription cleanup payloads are identifier-only", async () => {
+  const m = await import("../dist/index.js");
+  const payload = m.parseProviderSubscriptionCleanupPayload({
+    version: 1,
+    jobRequestId: "11111111-1111-4111-8111-111111111111",
+    subscriptionId: "33333333-3333-4333-8333-333333333333",
+  });
+  assert.equal(payload.subscriptionId, "33333333-3333-4333-8333-333333333333");
+  assert.throws(
+    () =>
+      m.parseProviderSubscriptionCleanupPayload({
+        version: 1,
+        jobRequestId: "11111111-1111-4111-8111-111111111111",
+        subscriptionId: "33333333-3333-4333-8333-333333333333",
+        accessToken: "secret",
+      }),
+    /credential/,
+  );
+  assert.equal(
+    m.providerSubscriptionCleanupBullMqJobId("11111111-1111-4111-8111-111111111111"),
+    "provider-subscription-cleanup-11111111-1111-4111-8111-111111111111",
+  );
+});

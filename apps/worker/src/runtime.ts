@@ -21,11 +21,14 @@ import {
   getQueue,
   JOB_TYPES,
   QUEUE_NAMES,
+  parseProviderSubscriptionCleanupPayload,
   parseSocialConnectionSyncPayload,
   parseSocialWebhookProcessPayload,
+  providerSubscriptionCleanupBullMqJobId,
   socialSyncBullMqJobId,
   socialWebhookBullMqJobId,
 } from "@xlrrank/queue";
+import { processProviderSubscriptionCleanup } from "./provider-subscription-cleanup-processor.js";
 import { processSocialConnectionSync, socialSyncJobOptions } from "./social-sync-processor.js";
 import { processSocialWebhook } from "./social-webhook-processor.js";
 
@@ -65,12 +68,16 @@ export async function dispatchOutboxOnce(dispatcherId: string): Promise<number> 
       const payload =
         entry.jobType === JOB_TYPES.socialWebhookProcess
           ? parseSocialWebhookProcessPayload(entry.payload)
-          : parseSocialConnectionSyncPayload(entry.payload);
+          : entry.jobType === JOB_TYPES.providerSubscriptionCleanup
+            ? parseProviderSubscriptionCleanupPayload(entry.payload)
+            : parseSocialConnectionSyncPayload(entry.payload);
       const queue = getQueue(QUEUE_NAMES.ingestion);
       const bullmqJobId =
         entry.jobType === JOB_TYPES.socialWebhookProcess
           ? socialWebhookBullMqJobId(entry.jobId)
-          : socialSyncBullMqJobId(entry.jobId);
+          : entry.jobType === JOB_TYPES.providerSubscriptionCleanup
+            ? providerSubscriptionCleanupBullMqJobId(entry.jobId)
+            : socialSyncBullMqJobId(entry.jobId);
       await queue.add(entry.jobType, payload, {
         ...socialSyncJobOptions(),
         jobId: bullmqJobId,
@@ -147,6 +154,9 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
         }
         if (job.name === JOB_TYPES.socialWebhookProcess) {
           return processSocialWebhook(job);
+        }
+        if (job.name === JOB_TYPES.providerSubscriptionCleanup) {
+          return processProviderSubscriptionCleanup(job);
         }
         logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented ingestion job");
         throw new UnimplementedJobProcessorError(QUEUE_NAMES.ingestion, job.name);

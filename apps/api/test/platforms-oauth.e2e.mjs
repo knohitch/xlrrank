@@ -15,6 +15,8 @@ let instagramLoginTokenCalls = 0;
 let metaRequests = [];
 let linkedInTokenCalls = 0;
 let linkedInRequests = [];
+let linkedInOrgRoles = {};
+let linkedInDeleteStatusByEntity = {};
 const originalFetch = globalThis.fetch;
 
 async function setup() {
@@ -36,6 +38,8 @@ async function reset() {
   metaRequests = [];
   linkedInTokenCalls = 0;
   linkedInRequests = [];
+  linkedInOrgRoles = { "12345": "ADMINISTRATOR", "67890": "ANALYST" };
+  linkedInDeleteStatusByEntity = {};
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input));
     if (url.hostname === "graph.facebook.com") return metaJson(url);
@@ -220,13 +224,13 @@ function linkedInJson(url, init = {}) {
     return json({
       elements: [
         {
-          role: "ADMINISTRATOR",
+          role: linkedInOrgRoles["12345"] ?? "ADMINISTRATOR",
           organization: "urn:li:organization:12345",
           state: "APPROVED",
           roleAssignee: "urn:li:person:li-member-sub-123",
         },
         {
-          role: "ANALYST",
+          role: linkedInOrgRoles["67890"] ?? "ANALYST",
           organization: "urn:li:organization:67890",
           state: "APPROVED",
           roleAssignee: "urn:li:person:li-member-sub-123",
@@ -260,13 +264,27 @@ function linkedInJson(url, init = {}) {
   }
 
   if (url.pathname.startsWith("/rest/eventSubscriptions/") && method === "PUT") {
+    const decoded = decodeURIComponent(url.pathname);
+    const entity = decoded.includes("entity:urn:li:organization:67890")
+      ? "urn:li:organization:67890"
+      : "urn:li:organization:12345";
     return json({
-      entity: "urn:li:organization:12345",
+      entity,
       eventType: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
       user: "urn:li:person:li-member-sub-123",
       expiresAt: "1790000000000",
       webhook: "https://app.example.test/platforms/linkedin/webhook",
     });
+  }
+
+  if (url.pathname.startsWith("/rest/eventSubscriptions/") && method === "DELETE") {
+    const decoded = decodeURIComponent(url.pathname);
+    const entity = decoded.includes("entity:urn:li:organization:67890")
+      ? "urn:li:organization:67890"
+      : "urn:li:organization:12345";
+    const status = linkedInDeleteStatusByEntity[entity];
+    if (status) return json({ message: `delete status ${status}`, status }, status);
+    return json({ deleted: true, entity });
   }
 
   return json({ message: `not found: ${url.pathname}` }, 404);
@@ -623,6 +641,18 @@ test("Meta OAuth E2E: shared grant, multi-asset selection, AAD, and IDOR", { ski
     ["ig-a", "page-a", "page-b"],
   );
   assert.equal(JSON.stringify(connections.rows).includes("meta-page-token"), false);
+  await service.disconnectConnection(connectedB.connectionId, userA);
+  const postDisconnectConnections = await pool.query(
+    "SELECT verified_external_id, status, credentials_encrypted FROM social_connections ORDER BY verified_external_id",
+  );
+  assert.deepEqual(
+    postDisconnectConnections.rows.map((row) => [row.verified_external_id, row.status, row.credentials_encrypted === null]),
+    [
+      ["ig-a", "CONNECTED", false],
+      ["page-a", "CONNECTED", false],
+      ["page-b", "DISCONNECTED", true],
+    ],
+  );
 
   const grant = (
     await pool.query(
@@ -1150,7 +1180,127 @@ test(
         [connected.connectionId],
       )
     ).rows[0];
-    assert.equal(disconnectedSub.provider_status, "LOCAL_CONNECTION_DISCONNECTED");
+    assert.equal(disconnectedSub.provider_status, "PROVIDER_DELETED");
+    assert.equal(Number((await pool.query("SELECT count(*) FROM provider_authorizations")).rows[0].count), 1);
+  },
+);
+
+test(
+  "Connection-specific disconnect: LinkedIn multi-org deletes only the exact provider subscription",
+  { skip },
+  async () => {
+    await reset();
+    linkedInOrgRoles = { "12345": "ADMINISTRATOR", "67890": "ADMINISTRATOR" };
+    const userA = await user("linkedin-disconnect-user-a@example.test");
+    const userB = await user("linkedin-disconnect-user-b@example.test");
+    const platformId = await linkedinPlatform();
+    await linkedinProviderConfig(platformId, {
+      access: {
+        communityManagement: true,
+        organizationSocialActionNotifications: true,
+        developerApplicationId: "999",
+        webhookUrl: "https://app.example.test/platforms/linkedin/webhook",
+      },
+    });
+
+    const start = await service.startOAuth("linkedin", userA, {
+      scopeType: "PERSONAL",
+      requestedScopes: ["openid", "profile", "email", "r_organization_social", "r_organization_admin", "rw_organization_admin"],
+    });
+    const callback = await service.handleOAuthCallback("linkedin", userA, {
+      state: stateFrom(start),
+      code: "linkedin-disconnect-code",
+    });
+    const assetList = await service.listAuthorizationAssets(callback.authorizationId, userA);
+    const orgAAsset = assetList.assets.find((asset) => asset.providerAssetId === "12345");
+    const orgBAsset = assetList.assets.find((asset) => asset.providerAssetId === "67890");
+    assert.ok(orgAAsset);
+    assert.ok(orgBAsset);
+    const orgA = await service.connectAuthorizationAsset(callback.authorizationId, orgAAsset.id, userA);
+    const orgB = await service.connectAuthorizationAsset(callback.authorizationId, orgBAsset.id, userA);
+    linkedInRequests = [];
+
+    await assert.rejects(() => service.disconnectConnection(orgB.connectionId, userB), /not found/i);
+    const result = await service.disconnectConnection(orgB.connectionId, userA);
+    assert.equal(result.status, "DISCONNECTED");
+    assert.equal(result.connectionId, orgB.connectionId);
+    assert.equal(result.providerCleanup.status, "PROVIDER_DELETED");
+
+    const connections = await pool.query(
+      "SELECT id, verified_external_id, status, credentials_encrypted FROM social_connections ORDER BY verified_external_id",
+    );
+    assert.deepEqual(
+      connections.rows.map((row) => [row.verified_external_id, row.status, row.credentials_encrypted === null]),
+      [
+        ["12345", "CONNECTED", false],
+        ["67890", "DISCONNECTED", true],
+      ],
+    );
+
+    const subscriptions = await pool.query(
+      "SELECT provider_asset_id, provider_status FROM provider_event_subscriptions ORDER BY provider_asset_id",
+    );
+    assert.deepEqual(
+      subscriptions.rows.map((row) => [row.provider_asset_id, row.provider_status]),
+      [
+        ["12345", "ACTIVE"],
+        ["67890", "PROVIDER_DELETED"],
+      ],
+    );
+    const deleteRequests = linkedInRequests.filter((request) => request.method === "DELETE");
+    assert.equal(deleteRequests.length, 1);
+    assert.equal(decodeURIComponent(deleteRequests[0].path).includes("entity:urn:li:organization:67890"), true);
+    assert.equal(Number((await pool.query("SELECT count(*) FROM provider_authorizations")).rows[0].count), 1);
+  },
+);
+
+test(
+  "Connection-specific disconnect: LinkedIn provider DELETE temporary failure disconnects locally and queues cleanup",
+  { skip },
+  async () => {
+    await reset();
+    linkedInOrgRoles = { "12345": "ADMINISTRATOR", "67890": "ADMINISTRATOR" };
+    linkedInDeleteStatusByEntity = { "urn:li:organization:67890": 500 };
+    const userA = await user("linkedin-disconnect-temp@example.test");
+    const platformId = await linkedinPlatform();
+    await linkedinProviderConfig(platformId, {
+      access: {
+        communityManagement: true,
+        organizationSocialActionNotifications: true,
+        developerApplicationId: "999",
+        webhookUrl: "https://app.example.test/platforms/linkedin/webhook",
+      },
+    });
+
+    const start = await service.startOAuth("linkedin", userA, {
+      scopeType: "PERSONAL",
+      requestedScopes: ["openid", "profile", "email", "r_organization_social", "r_organization_admin", "rw_organization_admin"],
+    });
+    const callback = await service.handleOAuthCallback("linkedin", userA, {
+      state: stateFrom(start),
+      code: "linkedin-disconnect-temp-code",
+    });
+    const assetList = await service.listAuthorizationAssets(callback.authorizationId, userA);
+    const orgBAsset = assetList.assets.find((asset) => asset.providerAssetId === "67890");
+    const orgB = await service.connectAuthorizationAsset(callback.authorizationId, orgBAsset.id, userA);
+    linkedInRequests = [];
+
+    const result = await service.disconnectConnection(orgB.connectionId, userA);
+    assert.equal(result.providerCleanup.status, "PENDING_PROVIDER_DELETE");
+    assert.ok(result.providerCleanup.cleanupJobId);
+    const connection = (
+      await pool.query("SELECT status, credentials_encrypted FROM social_connections WHERE id = $1", [orgB.connectionId])
+    ).rows[0];
+    assert.equal(connection.status, "DISCONNECTED");
+    assert.equal(connection.credentials_encrypted, null);
+    const subscription = (
+      await pool.query("SELECT id, provider_status FROM provider_event_subscriptions WHERE social_connection_id = $1", [orgB.connectionId])
+    ).rows[0];
+    assert.equal(subscription.provider_status, "PENDING_PROVIDER_DELETE");
+    const outbox = await pool.query("SELECT job_type, payload FROM job_outbox");
+    assert.equal(outbox.rows.length, 1);
+    assert.equal(outbox.rows[0].job_type, "provider.subscription.cleanup");
+    assert.equal(outbox.rows[0].payload.subscriptionId, subscription.id);
     assert.equal(Number((await pool.query("SELECT count(*) FROM provider_authorizations")).rows[0].count), 1);
   },
 );
@@ -1180,5 +1330,114 @@ test(
     const adminAsset = assetList.assets.find((asset) => asset.providerAssetId === "12345");
     await service.connectAuthorizationAsset(callback.authorizationId, adminAsset.id, userA);
     assert.equal(Number((await pool.query("SELECT count(*) FROM provider_event_subscriptions")).rows[0].count), 0);
+  },
+);
+
+test(
+  "LinkedIn notification webhook deduplication: batches [100, 200] and [200, 300] accept 3 logical events, reject duplicates, handle reordering and standalone delivery",
+  { skip },
+  async () => {
+    await reset();
+    const platformId = await linkedinPlatform();
+    await linkedinProviderConfig(platformId, {
+      clientSecret: "synthetic-linkedin-client-secret",
+    });
+
+    const sendWebhook = async (payload) => {
+      const rawBody = JSON.stringify(payload);
+      const signature = createHmac("sha256", "synthetic-linkedin-client-secret")
+        .update(`hmacsha256=${rawBody}`)
+        .digest("hex");
+      return service.receiveLinkedInWebhook(platformId, signature, payload, rawBody);
+    };
+
+    // Delivery A: [100, 200]
+    const batchA = {
+      type: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
+      notifications: [
+        { notificationId: "100", organizationalEntity: "urn:li:organization:12345", action: "COMMENT" },
+        { notificationId: "200", organizationalEntity: "urn:li:organization:12345", action: "LIKE" },
+      ],
+    };
+    const resultA = await sendWebhook(batchA);
+    assert.equal(resultA.acceptedCount, 2);
+    assert.equal(resultA.duplicateCount, 0);
+    assert.equal(resultA.duplicate, false);
+    assert.equal(resultA.receipts.length, 2);
+
+    // Delivery B: [200, 300] -> 200 is duplicate, 300 is accepted
+    const batchB = {
+      type: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
+      notifications: [
+        { notificationId: "200", organizationalEntity: "urn:li:organization:12345", action: "LIKE" },
+        { notificationId: "300", organizationalEntity: "urn:li:organization:12345", action: "SHARE" },
+      ],
+    };
+    const resultB = await sendWebhook(batchB);
+    assert.equal(resultB.acceptedCount, 1);
+    assert.equal(resultB.duplicateCount, 1);
+    assert.equal(resultB.duplicate, false);
+    assert.equal(resultB.receipts.length, 2);
+    assert.equal(resultB.receipts[0].notificationId, "200");
+    assert.equal(resultB.receipts[0].duplicate, true);
+    assert.equal(resultB.receipts[1].notificationId, "300");
+    assert.equal(resultB.receipts[1].duplicate, false);
+
+    // Total distinct receipts and outbox jobs must be 3 (100, 200, 300), NOT 4!
+    const receipts = await pool.query(
+      "SELECT object_id, dedupe_key FROM webhook_receipts WHERE object_id IS NOT NULL ORDER BY object_id",
+    );
+    assert.deepEqual(
+      receipts.rows.map((r) => [r.object_id, r.dedupe_key]),
+      [
+        ["100", "linkedin:100"],
+        ["200", "linkedin:200"],
+        ["300", "linkedin:300"],
+      ],
+    );
+    const outboxJobs = await pool.query("SELECT count(*) FROM job_outbox");
+    assert.equal(Number(outboxJobs.rows[0].count), 3);
+
+    // Standalone delivery of previously seen notification 100 -> duplicate
+    const standalone100 = {
+      notificationId: "100",
+      organization: "urn:li:organization:12345",
+      action: "COMMENT",
+    };
+    const resultStandalone = await sendWebhook(standalone100);
+    assert.equal(resultStandalone.duplicate, true);
+    assert.equal(resultStandalone.acceptedCount, 0);
+    assert.equal(resultStandalone.duplicateCount, 1);
+
+    // Reordered batch [200, 100] -> all duplicates
+    const reorderedBatch = {
+      type: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
+      notifications: [
+        { notificationId: "200", organizationalEntity: "urn:li:organization:12345", action: "LIKE" },
+        { notificationId: "100", organizationalEntity: "urn:li:organization:12345", action: "COMMENT" },
+      ],
+    };
+    const resultReordered = await sendWebhook(reorderedBatch);
+    assert.equal(resultReordered.duplicate, true);
+    assert.equal(resultReordered.acceptedCount, 0);
+    assert.equal(resultReordered.duplicateCount, 2);
+
+    // Outbox count remains exactly 3
+    const outboxStill3 = await pool.query("SELECT count(*) FROM job_outbox");
+    assert.equal(Number(outboxStill3.rows[0].count), 3);
+
+    // Notification without notificationId uses deterministic fallback
+    const fallbackPayload = {
+      type: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
+      organization: "urn:li:organization:12345",
+      action: "REACTION",
+    };
+    const resultFallback = await sendWebhook(fallbackPayload);
+    assert.equal(resultFallback.acceptedCount, 1);
+    const fallbackReceipt = (
+      await pool.query("SELECT dedupe_key, metadata FROM webhook_receipts WHERE object_id IS NULL")
+    ).rows[0];
+    assert.ok(fallbackReceipt);
+    assert.equal(fallbackReceipt.metadata.dedupeFallback, true);
   },
 );

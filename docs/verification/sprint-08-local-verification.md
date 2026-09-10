@@ -79,19 +79,22 @@ pnpm --filter @xlrrank/social-core test
 ```text
 DATABASE_URL=postgres://xlrrank@127.0.0.1:5434/xlrrank_x_oauth_e2e X_OAUTH_E2E=1 NODE_ENV=test ENCRYPTION_MASTER_KEY=x-oauth-e2e-master-key-32-bytes-minimum node --test apps/api/test/platforms-oauth.e2e.mjs
 ```
-**Result**: focused LinkedIn gate passed, 0 failed.
+**Result**: 11 passed, 0 failed.
 - X OAuth E2E: PASS.
 - X Organization scope binding: PASS.
 - Meta webhook E2E: PASS.
 - Meta OAuth E2E: PASS.
 - Instagram Login OAuth E2E: PASS.
-- LinkedIn OAuth E2E: PASS (Start OAuth, state digest, callback code exchange, OIDC identity, organization ACL discovery, multi-organization assets in `provider_authorization_assets`, asset selection by UUID, tenant isolation, User A/B IDOR rejection, idempotent reconnect, webhook challenge GET, raw-body webhook POST delivery, no-write missing/invalid signatures, minimized receipt, subscription product-access/role/scope gating, active subscription upsert, disconnect deactivation).
+- LinkedIn OAuth E2E: PASS (Start OAuth, state digest, callback code exchange, OIDC identity, organization ACL discovery, multi-organization assets in `provider_authorization_assets`, asset selection by UUID, tenant isolation, User A/B IDOR rejection, idempotent reconnect, webhook challenge GET, raw-body webhook POST delivery, no-write missing/invalid signatures, minimized receipt).
+- Connection-specific disconnect (`DELETE /platforms/connections/:connectionId`): PASS (multi-asset connection support, does not destroy sibling connections or authorizations, verifies exact LinkedIn subscription deletion).
+- Disconnect temporary failure outbox: PASS (marks `PENDING_PROVIDER_DELETE` and dispatches `provider.subscription.cleanup` to outbox).
+- LinkedIn notification webhook deduplication: PASS (batches `[100, 200]` and `[200, 300]` accept 3 logical events, reject duplicate notifications, handle reordering and standalone delivery).
 
 ### 4. Worker BullMQ Ingestion, Webhooks, and Retention E2E
 ```text
 DATABASE_URL=postgres://xlrrank@127.0.0.1:5434/xlrrank_worker_e2e REDIS_URL=redis://127.0.0.1:6379 QUEUE_URL=redis://127.0.0.1:6379 WORKER_INGESTION_E2E=1 NODE_ENV=test ENCRYPTION_MASTER_KEY=worker-e2e-master-key-32-bytes-minimum node --test apps/worker/test/worker-ingestion.e2e.mjs
 ```
-**Result**: focused LinkedIn + retention gate passed, 0 failed.
+**Result**: 18 passed, 0 failed.
 - Real child worker processes + BullMQ + Redis 5.0.14.1 + PostgreSQL 18.
 - Outbox to BullMQ to real worker persists across multiple pages.
 - Crash recovery, mid-sync disconnects, lease renewals, concurrency locks.
@@ -101,7 +104,9 @@ DATABASE_URL=postgres://xlrrank@127.0.0.1:5434/xlrrank_worker_e2e REDIS_URL=redi
 - Meta webhook worker receipt resolution & dispatch: PASS.
 - LinkedIn worker ingestion (organization posts, 2-page pagination, comments, networkSizes metrics, token secrecy): PASS.
 - LinkedIn webhook worker (receipt outbox, multi-scope connection resolution, sync dispatch, deduplication): PASS.
-- Data retention (`purgeExpiredProviderData`): record-level categories, member comment on organization post purged after member social activity limit, authenticated organization post retained, interaction purge, operational webhook receipt purge, multi-tenant cross-scope isolation, shared canonical preservation: PASS.
+- Provider subscription cleanup worker: PASS (processes pending cleanup job, invokes LinkedIn DELETE against Rest.li compound key, transitions to `PROVIDER_DELETED`).
+- Data retention (`purgeExpiredProviderData`): record-level LinkedIn categories, member comment on organization post purged after member social activity limit, authenticated organization post retained, interaction purge, operational webhook receipt purge, multi-tenant cross-scope isolation: PASS.
+- Canonical profile retention & asset minimization: PASS (`authenticated_member_profile` unlimited, `other_member_profile` 24h, `organization_profile` 8w, restricted fields redacted while preserving stable external ID, cross-scope multi-tenant lawful preservation, and `provider_authorization_assets` decorative field minimization/purge).
 
 ### 5. Monorepo Quality Matrix
 ```text
@@ -111,7 +116,7 @@ pnpm build                       # PASS (17/17 successful across all packages)
 pnpm typecheck --concurrency=2   # PASS (26/26 tasks successful)
 pnpm lint --concurrency=2        # PASS (12/12 tasks successful, 0 errors)
 pnpm audit --prod                # PASS (0 vulnerabilities found)
-pnpm test --concurrency=2        # PASS (all unit/integration tests pass)
+pnpm test --concurrency=2        # PASS (all unit/integration tests pass across 27 tasks)
 ```
 
 ---

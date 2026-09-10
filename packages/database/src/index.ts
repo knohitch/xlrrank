@@ -32,6 +32,7 @@ export {
   claimDueSocialSyncSchedules,
   claimPendingOutboxEntries,
   createDeadLetter,
+  createProviderSubscriptionCleanupRequest,
   createSocialConnectionSyncRequest,
   createSocialWebhookProcessRequest,
   enableSocialSyncSchedule,

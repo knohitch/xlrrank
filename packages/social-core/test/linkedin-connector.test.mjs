@@ -162,6 +162,14 @@ async function startLinkedInFixture() {
       return;
     }
 
+    if (url.pathname.startsWith("/eventSubscriptions/") && req.method === "DELETE") {
+      assert.ok(decodeURIComponent(url.pathname).includes("developerApplication:urn:li:developerApplication:999"));
+      assert.ok(decodeURIComponent(url.pathname).includes("user:urn:li:person:member-12345"));
+      assert.ok(decodeURIComponent(url.pathname).includes("entity:urn:li:organization:1001"));
+      res.end(JSON.stringify({ deleted: true }));
+      return;
+    }
+
     // 4. Organization lookup
     if (url.pathname.startsWith("/organizations/")) {
       const orgId = url.pathname.replace("/organizations/", "");
@@ -709,6 +717,18 @@ test("LinkedIn Event Subscription API: creates Rest.li compound-key subscription
     assert.equal(result.eventType, "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS");
     assert.equal(
       fixture.requests.some((request) => request.method === "PUT" && request.path.startsWith("/eventSubscriptions/")),
+      true,
+    );
+    await connector.deleteOrganizationSocialActionSubscription(
+      {
+        developerApplicationUrn: "urn:li:developerApplication:999",
+        memberUrn: "urn:li:person:member-12345",
+        organizationUrn: "urn:li:organization:1001",
+      },
+      context,
+    );
+    assert.equal(
+      fixture.requests.some((request) => request.method === "DELETE" && request.path.startsWith("/eventSubscriptions/")),
       true,
     );
 

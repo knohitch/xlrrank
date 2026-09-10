@@ -392,11 +392,11 @@ function createLinkedInWorkerFixtureServer() {
   const requests = [];
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    requests.push({ path: url.pathname, params: Object.fromEntries(url.searchParams) });
+    requests.push({ method: req.method, url: req.url, path: url.pathname, params: Object.fromEntries(url.searchParams) });
     res.setHeader("content-type", "application/json");
 
     const auth = req.headers.authorization ?? "";
-    if (!auth.startsWith("Bearer li-access-worker")) {
+    if (!auth.startsWith("Bearer li-access-")) {
       res.writeHead(401);
       res.end(JSON.stringify({ status: 401, message: "Unauthorized token" }));
       return;
@@ -514,6 +514,11 @@ function createLinkedInWorkerFixtureServer() {
           elements: [{ shareCounts: 12 }],
         }),
       );
+      return;
+    }
+
+    if (url.pathname.startsWith("/rest/eventSubscriptions/") && req.method === "DELETE") {
+      res.end(JSON.stringify({ deleted: true }));
       return;
     }
 
@@ -2034,5 +2039,276 @@ test(
 
     const checkReceipt = await pool.query("SELECT * FROM webhook_receipts WHERE id = $1", [receiptId]);
     assert.equal(checkReceipt.rows.length, 0);
+  },
+);
+
+test(
+  "Provider subscription cleanup worker e2e: processes pending cleanup job, invokes LinkedIn DELETE, marks PROVIDER_DELETED",
+  { skip },
+  async () => {
+    await reset();
+    const fixture = createLinkedInWorkerFixtureServer();
+    const baseUrl = await fixture.start();
+    let worker;
+    try {
+      const conn = await createLinkedInConnection("12345");
+      const platformId = conn.platformId;
+      const authId = randomUUID();
+      const credentials = {
+        accessToken: "li-access-cleanup-test",
+        metadata: {
+          fixtureBaseUrl: `${baseUrl}/rest`,
+        },
+      };
+      const credentialsEncrypted = shared.encryptSecret(
+        JSON.stringify(credentials),
+        undefined,
+        shared.providerAuthorizationAssociatedData({
+          authorizationId: authId,
+          scopeId: conn.scope.scopeId,
+          providerFamily: "linkedin",
+        }),
+      );
+      await pool.query(
+        `
+          INSERT INTO provider_authorizations (
+            id, scope_id, provider_family, provider_user_id, status, credentials_encrypted, granted_scopes
+          )
+          VALUES ($1, $2, 'linkedin', 'urn:li:person:cleanup-member', 'ACTIVE', $3,
+            '["openid", "profile", "r_organization_social", "r_organization_admin", "rw_organization_admin"]'::jsonb)
+        `,
+        [authId, conn.scope.scopeId, credentialsEncrypted],
+      );
+
+      const assetId = randomUUID();
+      await pool.query(
+        `
+          INSERT INTO provider_authorization_assets (
+            id, provider_authorization_id, platform_id, asset_type, provider_asset_id,
+            token_kind, provider_data_category
+          )
+          VALUES ($1, $2, $3, 'LINKEDIN_ORGANIZATION', '12345', 'USER', 'organization_profile')
+        `,
+        [assetId, authId, platformId],
+      );
+
+      const subscriptionId = randomUUID();
+      await pool.query(
+        `
+          INSERT INTO provider_event_subscriptions (
+            id, provider_family, scope_id, platform_id, provider_authorization_id,
+            provider_authorization_asset_id, social_connection_id, provider_user_id,
+            provider_asset_id, developer_application_urn, member_urn, entity_urn,
+            event_type, webhook_url, provider_status
+          )
+          VALUES ($1, 'linkedin', $2, $3, $4, $5, $6, 'urn:li:person:cleanup-member',
+            '12345', 'urn:li:developerApplication:999', 'urn:li:person:cleanup-member',
+            'urn:li:organization:12345', 'ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS',
+            'https://app.example.test/platforms/linkedin/webhook', 'PENDING_PROVIDER_DELETE')
+        `,
+        [subscriptionId, conn.scope.scopeId, platformId, authId, assetId, conn.connectionId],
+      );
+
+      const cleanupRequest = await database.createProviderSubscriptionCleanupRequest({ subscriptionId });
+      assert.ok(cleanupRequest.jobId);
+
+      worker = await startWorker({ LINKEDIN_REST_BASE_URL: `${baseUrl}/rest` });
+      await waitForJob(cleanupRequest.jobId, ["COMPLETED"], 30_000);
+
+      const updatedSub = (
+        await pool.query(
+          "SELECT provider_status, metadata FROM provider_event_subscriptions WHERE id = $1",
+          [subscriptionId],
+        )
+      ).rows[0];
+      assert.equal(updatedSub.provider_status, "PROVIDER_DELETED");
+      assert.equal(updatedSub.metadata.cleanupRetryCompleted, true);
+      assert.ok(fixture.requests.some((r) => r.method === "DELETE" && r.url.includes("/rest/eventSubscriptions/")));
+    } finally {
+      if (worker) await stopWorker(worker);
+      await fixture.stop();
+    }
+  },
+);
+
+test(
+  "Data retention: canonical profile retention, redaction, cross-scope preservation, and authorization asset minimization",
+  { skip },
+  async () => {
+    await reset();
+    const connA = await createLinkedInConnection("org-a");
+    const connB = await createLinkedInConnection("org-b");
+    const platformId = connA.platformId;
+
+    // 1. Authenticated member profile: NO_PROVIDER_DURATION_LIMIT (10 weeks old)
+    const authMemberId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_external_accounts (
+          id, platform_id, external_id, current_handle, display_name, bio, provider_data_category, last_observed_at
+        )
+        VALUES ($1, $2, 'auth-member-1', 'auth-handle', 'Auth Member', 'Auth bio', 'authenticated_member_profile', now() - interval '10 weeks')
+      `,
+      [authMemberId, platformId],
+    );
+
+    // 2. Other member profile: 23h old (< 24h) vs 25h old (> 24h)
+    const otherMember23hId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_external_accounts (
+          id, platform_id, external_id, current_handle, display_name, bio, provider_data_category, last_observed_at
+        )
+        VALUES ($1, $2, 'other-member-23h', 'other-23h', 'Other 23h', 'Bio 23h', 'other_member_profile', now() - interval '23 hours')
+      `,
+      [otherMember23hId, platformId],
+    );
+    const otherMember25hId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_external_accounts (
+          id, platform_id, external_id, current_handle, display_name, bio, provider_data_category, last_observed_at
+        )
+        VALUES ($1, $2, 'other-member-25h', 'other-25h', 'Other 25h', 'Bio 25h', 'other_member_profile', now() - interval '25 hours')
+      `,
+      [otherMember25hId, platformId],
+    );
+
+    // 3. Organization profile within 8 weeks (3 weeks) vs expired (9 weeks)
+    const org3wId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_external_accounts (
+          id, platform_id, external_id, current_handle, display_name, provider_data_category, last_observed_at
+        )
+        VALUES ($1, $2, 'org-3w', 'org-3w', 'Org 3w', 'organization_profile', now() - interval '3 weeks')
+      `,
+      [org3wId, platformId],
+    );
+    const org9wId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_external_accounts (
+          id, platform_id, external_id, current_handle, display_name, provider_data_category, last_observed_at
+        )
+        VALUES ($1, $2, 'org-9w', 'org-9w', 'Org 9w', 'organization_profile', now() - interval '9 weeks')
+      `,
+      [org9wId, platformId],
+    );
+
+    // 4. Cross-scope organization profile:
+    // Shared external account observed by Scope A (9 weeks ago, expired) and Scope B (1 week ago, lawful)
+    const orgSharedId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_external_accounts (
+          id, platform_id, external_id, current_handle, display_name, provider_data_category, last_observed_at
+        )
+        VALUES ($1, $2, 'org-shared', 'org-shared', 'Org Shared', 'organization_profile', now() - interval '1 week')
+      `,
+      [orgSharedId, platformId],
+    );
+    const saoExpiredA = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_account_observations (
+          id, scope_id, connection_id, external_account_id, observed_at, provider_data_category,
+          normalization_version, adapter_version
+        )
+        VALUES ($1, $2, $3, $4, now() - interval '9 weeks', 'organization_profile', '1', '1')
+      `,
+      [saoExpiredA, connA.scope.scopeId, connA.connectionId, orgSharedId],
+    );
+    const saoLawfulB = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_account_observations (
+          id, scope_id, connection_id, external_account_id, observed_at, provider_data_category,
+          normalization_version, adapter_version
+        )
+        VALUES ($1, $2, $3, $4, now() - interval '1 week', 'organization_profile', '1', '1')
+      `,
+      [saoLawfulB, connB.scope.scopeId, connB.connectionId, orgSharedId],
+    );
+
+    // 5. Authorization asset minimization and retention
+    const authId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO provider_authorizations (
+          id, scope_id, provider_family, provider_user_id, status, granted_scopes
+        )
+        VALUES ($1, $2, 'linkedin', 'urn:li:person:auth-user', 'ACTIVE', '["openid"]'::jsonb)
+      `,
+      [authId, connA.scope.scopeId],
+    );
+    const asset9wId = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO provider_authorization_assets (
+          id, provider_authorization_id, platform_id, asset_type, provider_asset_id,
+          name, handle, token_kind, provider_data_category, metadata, updated_at
+        )
+        VALUES ($1, $2, $3, 'LINKEDIN_ORGANIZATION', '99999',
+          'Org 9w Decorative Name', 'org-9w-handle', 'USER', 'organization_profile',
+          '{"organizationUrn":"urn:li:organization:99999","roles":["ADMINISTRATOR"],"primaryRole":"ADMINISTRATOR"}'::jsonb,
+          now() - interval '9 weeks')
+      `,
+      [asset9wId, authId, platformId],
+    );
+
+    // Execute purge
+    const result = await database.purgeExpiredProviderData({ providerFamily: "linkedin" });
+    assert.ok(result.accountProfilesSanitized >= 2);
+    assert.ok(result.authorizationAssetsSanitized >= 1);
+
+    // Assertions:
+    // 1. Authenticated member profile remains untouched
+    const authMember = (await pool.query("SELECT * FROM social_external_accounts WHERE id = $1", [authMemberId])).rows[0];
+    assert.equal(authMember.display_name, "Auth Member");
+    assert.equal(authMember.bio, "Auth bio");
+
+    // 2. Other member 23h remains; 25h redacted
+    const other23h = (await pool.query("SELECT * FROM social_external_accounts WHERE id = $1", [otherMember23hId])).rows[0];
+    assert.equal(other23h.display_name, "Other 23h");
+    const other25h = (await pool.query("SELECT * FROM social_external_accounts WHERE id = $1", [otherMember25hId])).rows[0];
+    assert.equal(other25h.display_name, null);
+    assert.equal(other25h.bio, null);
+    assert.equal(other25h.current_handle, null);
+    assert.equal(other25h.external_id, "other-member-25h"); // stable ID remains!
+    assert.equal(other25h.metadata.stableProviderIdentifierRetained, true);
+
+    // 3. Org 3w remains; Org 9w redacted
+    const org3w = (await pool.query("SELECT * FROM social_external_accounts WHERE id = $1", [org3wId])).rows[0];
+    assert.equal(org3w.display_name, "Org 3w");
+    const org9w = (await pool.query("SELECT * FROM social_external_accounts WHERE id = $1", [org9wId])).rows[0];
+    assert.equal(org9w.display_name, null);
+    assert.equal(org9w.current_handle, null);
+    assert.equal(org9w.external_id, "org-9w"); // stable ID remains!
+
+    // 4. Cross-scope: Scope A observation purged, Scope B observation remains; canonical profile remains
+    const obsA = await pool.query("SELECT * FROM social_account_observations WHERE id = $1", [saoExpiredA]);
+    assert.equal(obsA.rows.length, 0);
+    const obsB = await pool.query("SELECT * FROM social_account_observations WHERE id = $1", [saoLawfulB]);
+    assert.equal(obsB.rows.length, 1);
+    const orgShared = (await pool.query("SELECT * FROM social_external_accounts WHERE id = $1", [orgSharedId])).rows[0];
+    assert.equal(orgShared.display_name, "Org Shared");
+
+    // Age Scope B observation to 9 weeks and purge again -> now canonical profile redacted!
+    await pool.query("UPDATE social_account_observations SET observed_at = now() - interval '9 weeks' WHERE id = $1", [saoLawfulB]);
+    await pool.query("UPDATE social_external_accounts SET last_observed_at = now() - interval '9 weeks' WHERE id = $1", [orgSharedId]);
+    await database.purgeExpiredProviderData({ providerFamily: "linkedin" });
+    const orgSharedAfterB = (await pool.query("SELECT * FROM social_external_accounts WHERE id = $1", [orgSharedId])).rows[0];
+    assert.equal(orgSharedAfterB.display_name, null);
+    assert.equal(orgSharedAfterB.external_id, "org-shared");
+
+    // 5. Authorization asset: decorative fields sanitized, role/urn preserved
+    const asset9w = (await pool.query("SELECT * FROM provider_authorization_assets WHERE id = $1", [asset9wId])).rows[0];
+    assert.equal(asset9w.name, null);
+    assert.equal(asset9w.handle, null);
+    assert.equal(asset9w.provider_asset_id, "99999");
+    assert.equal(asset9w.metadata.organizationUrn, "urn:li:organization:99999");
+    assert.deepEqual(asset9w.metadata.roles, ["ADMINISTRATOR"]);
+    assert.equal(asset9w.metadata.stableProviderIdentifierRetained, true);
   },
 );

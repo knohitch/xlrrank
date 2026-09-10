@@ -10,6 +10,7 @@ import { eq } from "drizzle-orm";
 import {
   authorizeConnection,
   authorizeScope,
+  createProviderSubscriptionCleanupRequest,
   createSocialConnectionSyncRequest,
   createSocialWebhookProcessRequest,
   ensureOrganizationScope,
@@ -24,7 +25,12 @@ import {
   FacebookConnector,
   InstagramConnector,
   LinkedInConnector,
+  AuthenticationError,
+  AuthorizationError,
+  PermanentProviderError,
+  RateLimitError,
   RedditConnector,
+  TemporaryProviderError,
   XConnector,
 } from "@xlrrank/social-core";
 import type {
@@ -613,37 +619,51 @@ export class PlatformsService {
       throw new ForbiddenException("LinkedIn webhook signature verification failed.");
     }
     const minimalPayload = minimalLinkedInWebhookPayload(payload);
-    const payloadJson = JSON.stringify(minimalPayload);
     const rawJson = typeof rawBody === "string" ? rawBody : rawBody.toString("utf8");
-    const dedupeKey = linkedInWebhookDedupeKey(minimalPayload, rawJson);
-    const result = await getPool().query<{ id: string; inserted: boolean }>(
-      `
-        INSERT INTO webhook_receipts (
-          provider_family, platform_id, object_id, dedupe_key, signature_valid,
-          status, payload, provider_data_category, metadata
-        )
-        VALUES ('linkedin', $1, $2, $3, true, 'RECEIVED', $4::jsonb, 'webhook_operational_receipt', $5::jsonb)
-        ON CONFLICT (provider_family, dedupe_key) DO UPDATE SET
-          metadata = webhook_receipts.metadata || jsonb_build_object('duplicateSeenAt', now())
-        RETURNING id, (xmax = 0) AS inserted
-      `,
-      [
-        platform.id,
-        firstLinkedInNotificationId(minimalPayload),
-        dedupeKey,
-        payloadJson,
-        JSON.stringify({
-          platformSlug: platform.slug,
-          signatureHeader: "x-li-signature",
-          providerDataCategory: "webhook_operational_receipt",
-          retentionBasis: "XLRRANK_OPERATIONAL_RETENTION",
-        }),
-      ],
-    );
-    const receiptId = result.rows[0]?.id;
-    const inserted = result.rows[0]?.inserted === true;
-    const job = receiptId && inserted ? await createSocialWebhookProcessRequest({ receiptId }) : null;
-    return { status: "received", receiptId, duplicate: !inserted, job };
+    const logicalPayloads = linkedInLogicalWebhookPayloads(minimalPayload, rawJson);
+    const receipts: Array<{ receiptId: string; notificationId: string | null; duplicate: boolean; job: unknown }> = [];
+    for (const logical of logicalPayloads) {
+      const result = await getPool().query<{ id: string; inserted: boolean }>(
+        `
+          INSERT INTO webhook_receipts (
+            provider_family, platform_id, object_id, dedupe_key, signature_valid,
+            status, payload, provider_data_category, metadata
+          )
+          VALUES ('linkedin', $1, $2, $3, true, 'RECEIVED', $4::jsonb, 'webhook_operational_receipt', $5::jsonb)
+          ON CONFLICT (provider_family, dedupe_key) DO UPDATE SET
+            metadata = webhook_receipts.metadata || jsonb_build_object('duplicateSeenAt', now())
+          RETURNING id, (xmax = 0) AS inserted
+        `,
+        [
+          platform.id,
+          logical.notificationId,
+          logical.dedupeKey,
+          JSON.stringify(logical.payload),
+          JSON.stringify({
+            platformSlug: platform.slug,
+            signatureHeader: "x-li-signature",
+            providerDataCategory: "webhook_operational_receipt",
+            retentionBasis: "XLRRANK_OPERATIONAL_RETENTION",
+            notificationId: logical.notificationId,
+            dedupeFallback: logical.dedupeFallback,
+          }),
+        ],
+      );
+      const receiptId = result.rows[0]?.id;
+      const inserted = result.rows[0]?.inserted === true;
+      const job = receiptId && inserted ? await createSocialWebhookProcessRequest({ receiptId }) : null;
+      if (receiptId) receipts.push({ receiptId, notificationId: logical.notificationId, duplicate: !inserted, job });
+    }
+    return {
+      status: "received",
+      receiptId: receipts[0]?.receiptId,
+      receiptIds: receipts.map((receipt) => receipt.receiptId),
+      duplicate: receipts.length > 0 && receipts.every((receipt) => receipt.duplicate),
+      acceptedCount: receipts.filter((receipt) => !receipt.duplicate).length,
+      duplicateCount: receipts.filter((receipt) => receipt.duplicate).length,
+      receipts,
+      job: receipts.find((receipt) => receipt.job)?.job ?? null,
+    };
   }
 
   async listAuthorizationAssets(authorizationId: string, userId: string) {
@@ -839,6 +859,33 @@ export class PlatformsService {
     if (account.scope_id !== scope.scopeId)
       throw new ForbiddenException("Connection scope denied.");
 
+    return this.disconnectConnection(account.id, userId);
+  }
+
+  async disconnectConnection(connectionId: string, userId: string) {
+    if (!isUuid(connectionId)) throw new NotFoundException("Connection not found.");
+    const scope = await authorizeConnection(userId, connectionId, "MANAGE_SOCIAL_CONNECTIONS");
+    if (!scope) throw new NotFoundException("Connection not found.");
+    const pool = getPool();
+    const connection = (
+      await pool.query<ConnectionRow & { platform_slug: string }>(
+        `
+          SELECT sc.*, p.slug AS platform_slug
+          FROM social_connections sc
+          JOIN platforms p ON p.id = sc.platform_id
+          WHERE sc.id = $1
+          LIMIT 1
+        `,
+        [connectionId],
+      )
+    ).rows[0];
+    if (!connection || connection.scope_id !== scope.scopeId) {
+      throw new NotFoundException("Connection not found.");
+    }
+    const providerCleanup =
+      connection.platform_slug === "linkedin"
+        ? await this.cleanupLinkedInSubscriptionForDisconnect(connection.id)
+        : { status: "NOT_APPLICABLE" };
     await pool.query(
       `
         UPDATE social_connections
@@ -849,26 +896,21 @@ export class PlatformsService {
             updated_at = now()
         WHERE id = $1 AND scope_id = $2
       `,
-      [account.id, scope.scopeId],
-    );
-    await pool.query(
-      `
-        UPDATE provider_event_subscriptions
-        SET provider_status = 'LOCAL_CONNECTION_DISCONNECTED',
-            deactivated_at = now(),
-            updated_at = now()
-        WHERE social_connection_id = $1
-      `,
-      [account.id],
+      [connection.id, scope.scopeId],
     );
     await this.audit.record({
       actorUserId: userId,
       action: "social.connection.disconnected",
       entityType: "social_connection",
-      entityId: account.id,
-      metadata: { platformId, scopeId: scope.scopeId },
+      entityId: connection.id,
+      metadata: { platformId: connection.platform_id, scopeId: scope.scopeId, providerCleanup },
     });
-    return { status: "DISCONNECTED", message: "Platform disconnected." };
+    return {
+      status: "DISCONNECTED",
+      connectionId: connection.id,
+      providerCleanup,
+      message: "Connection disconnected.",
+    };
   }
 
   private async persistConnectedConnection(input: {
@@ -1101,14 +1143,15 @@ export class PlatformsService {
           INSERT INTO provider_authorization_assets (
             id, provider_authorization_id, platform_id, asset_type, provider_asset_id,
             parent_provider_asset_id, name, handle, token_kind,
-            credentials_encrypted, metadata
+            credentials_encrypted, provider_data_category, metadata
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
           ON CONFLICT (provider_authorization_id, platform_id, provider_asset_id) DO UPDATE SET
             name = EXCLUDED.name,
             handle = EXCLUDED.handle,
             token_kind = EXCLUDED.token_kind,
             credentials_encrypted = EXCLUDED.credentials_encrypted,
+            provider_data_category = EXCLUDED.provider_data_category,
             metadata = EXCLUDED.metadata,
             updated_at = now()
           RETURNING id
@@ -1124,6 +1167,7 @@ export class PlatformsService {
           asset.handle ?? null,
           asset.tokenKind,
           assetCredentialsEncrypted,
+          providerDataCategoryFromMetadata(asset.metadata),
           JSON.stringify({ ...(asset.metadata ?? {}), access: providerAccess }),
         ],
       );
@@ -1337,6 +1381,132 @@ export class PlatformsService {
         parseProviderTimestamp(input.expiresAt),
         input.lastError ? JSON.stringify(input.lastError) : null,
         JSON.stringify(input.metadata ?? {}),
+      ],
+    );
+  }
+
+  private async cleanupLinkedInSubscriptionForDisconnect(connectionId: string): Promise<Record<string, unknown>> {
+    this.ensureConnectors();
+    const pool = getPool();
+    const subscription = (
+      await pool.query<{
+        id: string;
+        provider_status: string;
+        provider_family: string;
+        provider_authorization_id: string;
+        provider_authorization_asset_id: string;
+        scope_id: string;
+        developer_application_urn: string;
+        member_urn: string;
+        entity_urn: string;
+        event_type: string;
+        credentials_encrypted: string | null;
+      }>(
+        `
+          SELECT pes.id, pes.provider_status, pes.provider_family,
+                 pes.provider_authorization_id, pes.provider_authorization_asset_id,
+                 pa.scope_id, pes.developer_application_urn, pes.member_urn,
+                 pes.entity_urn, pes.event_type, pa.credentials_encrypted
+          FROM provider_event_subscriptions pes
+          JOIN provider_authorizations pa ON pa.id = pes.provider_authorization_id
+          WHERE pes.social_connection_id = $1
+          ORDER BY pes.created_at ASC
+          LIMIT 1
+        `,
+        [connectionId],
+      )
+    ).rows[0];
+    if (!subscription) return { status: "NO_SUBSCRIPTION" };
+    if (subscription.provider_status !== "ACTIVE") {
+      await this.markProviderSubscriptionDisconnected(subscription.id, "LOCAL_CONNECTION_DISCONNECTED");
+      return { status: "LOCAL_CONNECTION_DISCONNECTED", subscriptionId: subscription.id };
+    }
+
+    const connector = connectorRegistry.create("linkedin") as
+      | {
+          deleteOrganizationSocialActionSubscription?: (
+            request: {
+              developerApplicationUrn: string;
+              memberUrn: string;
+              organizationUrn: string;
+              eventType: string;
+            },
+            context: { scopeId: string; connectionId: string; credentials: ConnectorCredentials },
+          ) => Promise<void>;
+        }
+      | undefined;
+    if (!connector?.deleteOrganizationSocialActionSubscription) {
+      await this.markProviderSubscriptionDisconnected(subscription.id, "PENDING_PROVIDER_DELETE", {
+        message: "LinkedIn connector does not expose subscription delete",
+      });
+      const cleanupJob = await createProviderSubscriptionCleanupRequest({ subscriptionId: subscription.id });
+      return { status: "PENDING_PROVIDER_DELETE", subscriptionId: subscription.id, cleanupJobId: cleanupJob.jobId };
+    }
+    if (!subscription.credentials_encrypted) {
+      await this.markProviderSubscriptionDisconnected(subscription.id, "PROVIDER_DELETE_TERMINAL", {
+        message: "LinkedIn provider authorization credentials are unavailable",
+      });
+      return { status: "PROVIDER_DELETE_TERMINAL", subscriptionId: subscription.id };
+    }
+
+    const credentials = JSON.parse(
+      decryptSecret(
+        subscription.credentials_encrypted,
+        undefined,
+        providerAuthorizationAssociatedData({
+          authorizationId: subscription.provider_authorization_id,
+          scopeId: subscription.scope_id,
+          providerFamily: subscription.provider_family,
+        }),
+      ),
+    ) as ConnectorCredentials;
+
+    try {
+      await connector.deleteOrganizationSocialActionSubscription(
+        {
+          developerApplicationUrn: subscription.developer_application_urn,
+          memberUrn: subscription.member_urn,
+          organizationUrn: subscription.entity_urn,
+          eventType: subscription.event_type,
+        },
+        { scopeId: subscription.scope_id, connectionId, credentials },
+      );
+      await this.markProviderSubscriptionDisconnected(subscription.id, "PROVIDER_DELETED");
+      return { status: "PROVIDER_DELETED", subscriptionId: subscription.id };
+    } catch (err) {
+      if (isTemporaryProviderDeleteFailure(err)) {
+        await this.markProviderSubscriptionDisconnected(subscription.id, "PENDING_PROVIDER_DELETE", safeProviderDeleteError(err));
+        const cleanupJob = await createProviderSubscriptionCleanupRequest({ subscriptionId: subscription.id });
+        return { status: "PENDING_PROVIDER_DELETE", subscriptionId: subscription.id, cleanupJobId: cleanupJob.jobId };
+      }
+      const terminalStatus = isAlreadyAbsentProviderDelete(err)
+        ? "PROVIDER_ALREADY_ABSENT"
+        : "PROVIDER_DELETE_TERMINAL";
+      await this.markProviderSubscriptionDisconnected(subscription.id, terminalStatus, safeProviderDeleteError(err));
+      return { status: terminalStatus, subscriptionId: subscription.id };
+    }
+  }
+
+  private async markProviderSubscriptionDisconnected(
+    subscriptionId: string,
+    providerStatus: string,
+    lastError?: Record<string, unknown>,
+  ): Promise<void> {
+    await getPool().query(
+      `
+        UPDATE provider_event_subscriptions
+        SET provider_status = $2,
+            deactivated_at = COALESCE(deactivated_at, now()),
+            last_error = $3::jsonb,
+            metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
+            updated_at = now()
+        WHERE id = $1
+      `,
+      [
+        subscriptionId,
+        providerStatus,
+        lastError ? JSON.stringify(lastError) : null,
+        JSON.stringify({ disconnectCleanupStatus: providerStatus }),
       ],
     );
   }
@@ -1791,11 +1961,86 @@ function firstLinkedInNotificationId(payload: Record<string, unknown>): string |
   return null;
 }
 
+function linkedInLogicalWebhookPayloads(
+  payload: Record<string, unknown>,
+  rawJson: string,
+): Array<{
+  payload: Record<string, unknown>;
+  notificationId: string | null;
+  dedupeKey: string;
+  dedupeFallback: boolean;
+}> {
+  const notifications = Array.isArray(payload.notifications)
+    ? payload.notifications.filter((item): item is Record<string, unknown> => !!item && typeof item === "object")
+    : [];
+  if (notifications.length === 0) {
+    const notificationId = firstLinkedInNotificationId(payload);
+    const dedupeKey = notificationId
+      ? `linkedin:${notificationId}`
+      : linkedInWebhookDedupeKey(payload, rawJson);
+    return [{ payload, notificationId, dedupeKey, dedupeFallback: !notificationId }];
+  }
+  return notifications.map((notification, index) => {
+    const notificationId =
+      typeof notification.notificationId !== "undefined" && notification.notificationId !== null
+        ? String(notification.notificationId)
+        : null;
+    const logicalPayload = {
+      type: payload.type,
+      notificationId,
+      notifications: [notification],
+    };
+    const dedupeKey = notificationId
+      ? `linkedin:${notificationId}`
+      : linkedInWebhookDedupeKey({ ...notification, batchIndex: index }, rawJson);
+    return {
+      payload: logicalPayload,
+      notificationId,
+      dedupeKey,
+      dedupeFallback: !notificationId,
+    };
+  });
+}
+
 function linkedInDeveloperApplicationUrn(access: Record<string, unknown>): string | null {
   const urn = stringFromMetadata(access, "developerApplicationUrn");
   if (urn) return urn;
   const id = stringFromMetadata(access, "developerApplicationId");
   return id ? `urn:li:developerApplication:${id}` : null;
+}
+
+function providerDataCategoryFromMetadata(metadata: Record<string, unknown> | undefined): string | null {
+  const category = metadata?.providerDataCategory;
+  return typeof category === "string" && category.length > 0 ? category : null;
+}
+
+function isTemporaryProviderDeleteFailure(err: unknown): boolean {
+  return err instanceof TemporaryProviderError || err instanceof RateLimitError;
+}
+
+function isAlreadyAbsentProviderDelete(err: unknown): boolean {
+  return err instanceof PermanentProviderError && /not found|404/i.test(err.message);
+}
+
+function safeProviderDeleteError(err: unknown): Record<string, unknown> {
+  if (err instanceof AuthenticationError) {
+    return { code: "AUTHENTICATION", retryClassification: err.retryClassification, message: err.message };
+  }
+  if (err instanceof AuthorizationError) {
+    return { code: "AUTHORIZATION", retryClassification: err.retryClassification, message: err.message };
+  }
+  if (err instanceof RateLimitError) {
+    return {
+      code: "RATE_LIMIT",
+      retryClassification: err.retryClassification,
+      retryAfterSeconds: err.retryAfterSeconds,
+      message: err.message,
+    };
+  }
+  if (err instanceof TemporaryProviderError || err instanceof PermanentProviderError) {
+    return { code: err.code, retryClassification: err.retryClassification, message: err.message };
+  }
+  return { code: "UNKNOWN", message: err instanceof Error ? err.message : String(err) };
 }
 
 function providerDefaultScopesForConfig(

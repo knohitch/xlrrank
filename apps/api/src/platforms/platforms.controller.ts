@@ -150,6 +150,14 @@ export class PlatformsController {
     return this.platformsService.connectAuthorizationAsset(authorizationId, assetId, auth.userId);
   }
 
+  @Delete("connections/:connectionId")
+  async disconnectConnection(
+    @Param("connectionId") connectionId: string,
+    @CurrentUser() auth: AuthContext,
+  ) {
+    return this.platformsService.disconnectConnection(connectionId, auth.userId);
+  }
+
   @Delete(":id/disconnect")
   async disconnect(@Param("id") id: string, @CurrentUser() auth: AuthContext) {
     return this.platformsService.disconnectPlatform(id, auth.userId);

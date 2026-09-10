@@ -908,6 +908,7 @@ export const providerAuthorizationAssets = pgTable(
     handle: text("handle"),
     tokenKind: text("token_kind").notNull(),
     credentialsEncrypted: text("credentials_encrypted"),
+    providerDataCategory: text("provider_data_category"),
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -920,6 +921,7 @@ export const providerAuthorizationAssets = pgTable(
     ),
     index("provider_authorization_assets_platform_asset_idx").on(t.platformId, t.providerAssetId),
     index("provider_authorization_assets_parent_idx").on(t.parentProviderAssetId),
+    index("provider_authorization_assets_provider_category_idx").on(t.providerDataCategory, t.updatedAt),
   ],
 );
 

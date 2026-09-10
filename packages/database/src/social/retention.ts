@@ -23,6 +23,8 @@ export interface PurgeRetentionResult {
   providerFamily: string;
   policiesEvaluated: number;
   accountObservationsPurged: number;
+  accountProfilesSanitized: number;
+  authorizationAssetsSanitized: number;
   contentObservationsPurged: number;
   interactionsPurged: number;
   canonicalItemsPurged: number;
@@ -77,6 +79,8 @@ export async function purgeExpiredProviderData(
 
   const policies = await loadProviderRetentionPolicies(providerFamily);
   let accountObservationsPurged = 0;
+  let accountProfilesSanitized = 0;
+  let authorizationAssetsSanitized = 0;
   let contentObservationsPurged = 0;
   let interactionsPurged = 0;
   let canonicalItemsPurged = 0;
@@ -192,6 +196,128 @@ export async function purgeExpiredProviderData(
           params,
         );
         accountObservationsPurged += delObsRes.rowCount ?? 0;
+      }
+    }
+
+    {
+      const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
+      if (dryRun) {
+        const countRes = await pool.query<{ count: string }>(
+          `
+            SELECT count(*) AS count
+            FROM social_external_accounts sea
+            JOIN platforms p ON p.id = sea.platform_id
+            WHERE sea.last_observed_at < $1
+              AND p.slug = $2
+              AND sea.provider_data_category = $3
+              AND NOT EXISTS (
+                SELECT 1
+                FROM social_account_observations sao
+                WHERE sao.external_account_id = sea.id
+              )
+              AND (
+                sea.current_handle IS NOT NULL
+                OR sea.display_name IS NOT NULL
+                OR sea.profile_url IS NOT NULL
+                OR sea.profile_image_url IS NOT NULL
+                OR sea.bio IS NOT NULL
+                OR sea.location IS NOT NULL
+                OR sea.website IS NOT NULL
+                OR sea.follower_count IS NOT NULL
+                OR sea.following_count IS NOT NULL
+                OR COALESCE(sea.metadata, '{}'::jsonb) <> '{}'::jsonb
+              )
+          `,
+          params,
+        );
+        accountProfilesSanitized += Number(countRes.rows[0]?.count ?? 0);
+      } else {
+        const sanitizeRes = await pool.query(
+          `
+            UPDATE social_external_accounts sea
+            SET current_handle = NULL,
+                display_name = NULL,
+                profile_url = NULL,
+                profile_image_url = NULL,
+                bio = NULL,
+                location = NULL,
+                website = NULL,
+                follower_count = NULL,
+                following_count = NULL,
+                metadata = jsonb_build_object(
+                  'retentionRedactedAt', now(),
+                  'retentionRedactionCategory', $3,
+                  'stableProviderIdentifierRetained', true
+                ),
+                updated_at = now()
+            FROM platforms p
+            WHERE p.id = sea.platform_id
+              AND sea.last_observed_at < $1
+              AND p.slug = $2
+              AND sea.provider_data_category = $3
+              AND NOT EXISTS (
+                SELECT 1
+                FROM social_account_observations sao
+                WHERE sao.external_account_id = sea.id
+              )
+          `,
+          params,
+        );
+        accountProfilesSanitized += sanitizeRes.rowCount ?? 0;
+      }
+    }
+
+    {
+      const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
+      if (dryRun) {
+        const countRes = await pool.query<{ count: string }>(
+          `
+            SELECT count(*) AS count
+            FROM provider_authorization_assets paa
+            JOIN provider_authorizations pa ON pa.id = paa.provider_authorization_id
+            WHERE paa.updated_at < $1
+              AND pa.provider_family = $2
+              AND paa.provider_data_category = $3
+              AND (
+                paa.name IS NOT NULL
+                OR paa.handle IS NOT NULL
+                OR (COALESCE(paa.metadata, '{}'::jsonb) - 'organizationUrn' - 'memberUrn'
+                    - 'numericId' - 'roles' - 'primaryRole' - 'access' - 'providerDataCategory'
+                    - 'providerRetentionBasis' - 'profileDecorationExpiresAt') <> '{}'::jsonb
+              )
+          `,
+          params,
+        );
+        authorizationAssetsSanitized += Number(countRes.rows[0]?.count ?? 0);
+      } else {
+        const sanitizeRes = await pool.query(
+          `
+            UPDATE provider_authorization_assets paa
+            SET name = NULL,
+                handle = NULL,
+                metadata = jsonb_strip_nulls(jsonb_build_object(
+                  'organizationUrn', paa.metadata->'organizationUrn',
+                  'memberUrn', paa.metadata->'memberUrn',
+                  'numericId', paa.metadata->'numericId',
+                  'roles', paa.metadata->'roles',
+                  'primaryRole', paa.metadata->'primaryRole',
+                  'access', paa.metadata->'access',
+                  'providerDataCategory', paa.provider_data_category,
+                  'providerRetentionBasis', paa.metadata->'providerRetentionBasis',
+                  'retentionRedactedAt', now(),
+                  'retentionRedactionCategory', $3,
+                  'stableProviderIdentifierRetained', true
+                )),
+                updated_at = now()
+            FROM provider_authorizations pa
+            WHERE pa.id = paa.provider_authorization_id
+              AND paa.updated_at < $1
+              AND pa.provider_family = $2
+              AND paa.provider_data_category = $3
+          `,
+          params,
+        );
+        authorizationAssetsSanitized += sanitizeRes.rowCount ?? 0;
       }
     }
 
@@ -321,6 +447,8 @@ export async function purgeExpiredProviderData(
     providerFamily,
     policiesEvaluated: policies.length,
     accountObservationsPurged,
+    accountProfilesSanitized,
+    authorizationAssetsSanitized,
     contentObservationsPurged,
     interactionsPurged,
     canonicalItemsPurged,

@@ -412,11 +412,10 @@ export class LinkedInConnector extends BaseSocialConnector {
             organizationUrn: entry.orgUrn,
             memberUrn: entry.roleAssignee,
             numericId: orgId,
-            vanityName,
             roles: entry.roles,
             primaryRole,
-            organizationType: org.primaryOrganizationType,
-            staffCountRange: org.staffCountRange,
+            providerDataCategory: "organization_profile",
+            providerRetentionBasis: "AUTHENTICATED_ORGANIZATION_ASSET",
           },
         });
       } catch (err) {
@@ -435,6 +434,8 @@ export class LinkedInConnector extends BaseSocialConnector {
             numericId: orgId,
             roles: entry.roles,
             primaryRole: entry.roles[0] ?? "ADMINISTRATOR",
+            providerDataCategory: "organization_profile",
+            providerRetentionBasis: "AUTHENTICATED_ORGANIZATION_ASSET",
           },
         });
       }

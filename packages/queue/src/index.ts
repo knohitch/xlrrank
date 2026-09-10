@@ -15,12 +15,14 @@ export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
 export const JOB_TYPES = {
   socialConnectionSync: "social.connection.sync",
   socialWebhookProcess: "social.webhook.process",
+  providerSubscriptionCleanup: "provider.subscription.cleanup",
 } as const;
 
 export type JobType = (typeof JOB_TYPES)[keyof typeof JOB_TYPES];
 
 export const SOCIAL_SYNC_PAYLOAD_VERSION = 1 as const;
 export const SOCIAL_WEBHOOK_PROCESS_PAYLOAD_VERSION = 1 as const;
+export const PROVIDER_SUBSCRIPTION_CLEANUP_PAYLOAD_VERSION = 1 as const;
 
 export const SOCIAL_SYNC_REASONS = ["MANUAL", "SCHEDULED", "RETRY"] as const;
 export type SocialSyncReason = (typeof SOCIAL_SYNC_REASONS)[number];
@@ -41,6 +43,14 @@ export interface SocialWebhookProcessPayloadV1 {
 }
 
 export type SocialWebhookProcessPayload = SocialWebhookProcessPayloadV1;
+
+export interface ProviderSubscriptionCleanupPayloadV1 {
+  version: typeof PROVIDER_SUBSCRIPTION_CLEANUP_PAYLOAD_VERSION;
+  jobRequestId: string;
+  subscriptionId: string;
+}
+
+export type ProviderSubscriptionCleanupPayload = ProviderSubscriptionCleanupPayloadV1;
 
 export const JOB_STATUSES = [
   "PENDING_DISPATCH",
@@ -181,12 +191,40 @@ export function parseSocialWebhookProcessPayload(payload: unknown): SocialWebhoo
   };
 }
 
+export function parseProviderSubscriptionCleanupPayload(
+  payload: unknown,
+): ProviderSubscriptionCleanupPayload {
+  assertNoCredentialsInPayload(payload);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new InvalidJobPayloadError("Provider subscription cleanup payload must be an object");
+  }
+  const item = payload as Record<string, unknown>;
+  if (item.version !== PROVIDER_SUBSCRIPTION_CLEANUP_PAYLOAD_VERSION) {
+    throw new InvalidJobPayloadError("Unsupported provider subscription cleanup payload version");
+  }
+  if (typeof item.jobRequestId !== "string" || !UUID_RE.test(item.jobRequestId)) {
+    throw new InvalidJobPayloadError("Provider subscription cleanup payload jobRequestId must be a UUID");
+  }
+  if (typeof item.subscriptionId !== "string" || !UUID_RE.test(item.subscriptionId)) {
+    throw new InvalidJobPayloadError("Provider subscription cleanup payload subscriptionId must be a UUID");
+  }
+  return {
+    version: PROVIDER_SUBSCRIPTION_CLEANUP_PAYLOAD_VERSION,
+    jobRequestId: item.jobRequestId,
+    subscriptionId: item.subscriptionId,
+  };
+}
+
 export function socialSyncBullMqJobId(jobRequestId: string): string {
   return `${JOB_TYPES.socialConnectionSync.replaceAll(".", "-")}-${jobRequestId}`;
 }
 
 export function socialWebhookBullMqJobId(jobRequestId: string): string {
   return `${JOB_TYPES.socialWebhookProcess.replaceAll(".", "-")}-${jobRequestId}`;
+}
+
+export function providerSubscriptionCleanupBullMqJobId(jobRequestId: string): string {
+  return `${JOB_TYPES.providerSubscriptionCleanup.replaceAll(".", "-")}-${jobRequestId}`;
 }
 
 export function defaultSocialSyncJobOptions(): JobsOptions {
