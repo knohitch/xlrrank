@@ -172,12 +172,25 @@ Tracking completion of each prompt from the Build Prompt Pack.
 - **Live provider state**: `LINKEDIN LIVE PROVIDER GATE: BLOCKED_EXTERNAL` because no real LinkedIn Developer Application credentials or Partner Program approvals were supplied.
 - **Production Ready**: NO.
 
+## Audit Sprint 09 Results
+
+- **Reddit Connector**: Implementation DONE for official API-only read ingestion.
+- **OAuth & Identity**: Generic OAuth framework now supports Reddit authorization-code OAuth with `duration=permanent`, Basic-auth token exchange/refresh/revoke adapter support, no PKCE parameters, and minimized default scopes (`identity`, `read`, `history`).
+- **Access Truthfulness**: Reddit capability evaluation is driven by admin-controlled provider app metadata for Data API approval, commercial/use-case authorization, granted OAuth scopes, and unsupported capabilities. User OAuth input cannot forge provider approval state.
+- **HTTP Safety**: Reddit Data API calls require a configured truthful User-Agent, reject spoofed/missing User-Agent values, use only official production hosts, and allow localhost overrides only outside production tests.
+- **Worker & Ingestion**: Reddit runs through the existing registry-driven `social.connection.sync` worker path and persists normalized authenticated profile, submissions, comment history, pagination cursors, provider data categories, and source-policy provenance.
+- **Data Governance**: Migration `0012_reddit_retention_policies.sql` adds Reddit provider retention categories for authenticated profiles, public profiles, user content, and comments. Deleted/removed placeholders are minimized at normalization. Reddit-derived data carries source policy blocking model training, fine-tuning, benchmark, and seed-data use by default.
+- **Disconnect**: Reddit disconnect remains local-first through the existing generic lifecycle; no meaningless provider subscription cleanup rows are created for Reddit.
+- **Verification**: Social-core connector suite 25/25 pass; Reddit API OAuth E2E 2/2 pass; Reddit worker E2E 1/1 pass; targeted typecheck/build for social-core, API, worker, and database pass.
+- **Live provider state**: `REDDIT LIVE PROVIDER GATE: BLOCKED_EXTERNAL` because no real Reddit app credentials, Data API approval, commercial/use-case approval, or production User-Agent registration were supplied.
+- **Production Ready**: NO.
+
 ## Remaining Product Blockers
 
 - Live X provider verification with real X developer app credentials/access
 - Live Meta (Facebook & Instagram) provider verification with real developer app credentials/access
 - Live LinkedIn provider verification with real developer app credentials and Partner Program approvals
-- Live Reddit social connector integration
+- Live Reddit provider verification with real app credentials, Data API approval, use-case authorization, and production User-Agent registration
 - Live third-party social ingestion through production provider APIs
 - Remote CI infrastructure quota exhaustion (`BLOCKED_INFRA`)
 - Worker Docker runtime local daemon availability (`BLOCKED_LOCAL_INFRA`)

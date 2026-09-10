@@ -68,6 +68,7 @@ export const connectorStatusEnum = pgEnum("connector_status", [
   "AVAILABLE",
   "CONFIGURATION_REQUIRED",
   "PERMISSION_REQUIRED",
+  "ACCESS_REQUIRED",
   "APP_REVIEW_REQUIRED",
   "UNAVAILABLE",
 ]);

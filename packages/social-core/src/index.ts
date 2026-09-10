@@ -103,4 +103,5 @@ export {
   mapLinkedInError,
   parseLinkedInRateLimit,
 } from "./platforms/linkedin-api.js";
-export { RedditConnector } from "./platforms/reddit-connector.js";
+export { RedditConnector, evaluateRedditCapabilities } from "./platforms/reddit-connector.js";
+export { RedditHttpClient, redditRateLimitFrom, validateRedditUserAgent } from "./platforms/reddit-api.js";

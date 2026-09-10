@@ -17,6 +17,8 @@ let linkedInTokenCalls = 0;
 let linkedInRequests = [];
 let linkedInOrgRoles = {};
 let linkedInDeleteStatusByEntity = {};
+let redditTokenCalls = 0;
+let redditRequests = [];
 const originalFetch = globalThis.fetch;
 
 async function setup() {
@@ -40,12 +42,15 @@ async function reset() {
   linkedInRequests = [];
   linkedInOrgRoles = { "12345": "ADMINISTRATOR", "67890": "ANALYST" };
   linkedInDeleteStatusByEntity = {};
+  redditTokenCalls = 0;
+  redditRequests = [];
   globalThis.fetch = async (input, init = {}) => {
     const url = new URL(String(input));
     if (url.hostname === "graph.facebook.com") return metaJson(url);
     if (url.hostname === "graph.instagram.com") return instagramGraphJson(url);
     if (url.hostname === "api.instagram.com") return instagramTokenJson(url, init);
     if (url.hostname === "api.linkedin.com" || url.hostname === "www.linkedin.com") return linkedInJson(url, init);
+    if (url.hostname === "oauth.reddit.com" || url.hostname === "www.reddit.com") return redditJson(url, init);
     if (url.hostname !== "api.x.com") throw new Error(`Unexpected outbound fetch: ${url}`);
     if (url.pathname === "/2/oauth2/token") {
       tokenCalls += 1;
@@ -290,6 +295,104 @@ function linkedInJson(url, init = {}) {
   return json({ message: `not found: ${url.pathname}` }, 404);
 }
 
+function redditJson(url, init = {}) {
+  const method = init.method ?? "GET";
+  const headers = new Headers(init.headers);
+  const body = init.body instanceof URLSearchParams
+    ? Object.fromEntries(init.body)
+    : Object.fromEntries(new URLSearchParams(String(init.body ?? "")));
+  redditRequests.push({
+    host: url.hostname,
+    method,
+    path: url.pathname,
+    params: Object.fromEntries(url.searchParams),
+    body,
+    authorization: headers.get("authorization"),
+    userAgent: headers.get("user-agent"),
+  });
+  if (url.hostname === "www.reddit.com" && url.pathname === "/api/v1/access_token" && method === "POST") {
+    redditTokenCalls += 1;
+    return json({
+      token_type: "bearer",
+      access_token: `synthetic-reddit-access-${redditTokenCalls}`,
+      refresh_token: redditTokenCalls === 1 ? "synthetic-reddit-refresh-1" : undefined,
+      expires_in: 3600,
+      scope: "identity read history",
+    });
+  }
+  if (url.hostname === "www.reddit.com" && url.pathname === "/api/v1/revoke_token") {
+    return new Promise(() => undefined);
+  }
+  const auth = headers.get("authorization") ?? "";
+  if (!auth.startsWith("Bearer synthetic-reddit-access-")) {
+    return json({ message: "Unauthorized" }, 401);
+  }
+  if (headers.get("user-agent") !== "xlrrank-test/1.0 by platform-team") {
+    return json({ message: "Missing User-Agent" }, 403);
+  }
+  if (url.hostname === "oauth.reddit.com" && url.pathname === "/api/v1/me") {
+    return json({
+      id: "t2_reddit_user",
+      name: "xlr_reddit",
+      icon_img: "https://example.test/reddit.png",
+      link_karma: 11,
+      comment_karma: 5,
+      created_utc: 1704067200,
+      verified: true,
+      subreddit: { public_description: "Synthetic Reddit profile", subscribers: 3 },
+    });
+  }
+  if (url.hostname === "oauth.reddit.com" && url.pathname === "/user/xlr_reddit/submitted.json") {
+    return json({
+      kind: "Listing",
+      data: {
+        after: null,
+        children: [
+          {
+            kind: "t3",
+            data: {
+              id: "reddit-post-1",
+              name: "t3_reddit-post-1",
+              author_fullname: "t2_reddit_user",
+              author: "xlr_reddit",
+              title: "Reddit fixture post",
+              selftext: "Reddit fixture body",
+              created_utc: 1704067300,
+              subreddit: "testing",
+              score: 4,
+              num_comments: 1,
+            },
+          },
+        ],
+      },
+    });
+  }
+  if (url.hostname === "oauth.reddit.com" && url.pathname === "/user/xlr_reddit/comments.json") {
+    return json({
+      kind: "Listing",
+      data: {
+        after: null,
+        children: [
+          {
+            kind: "t1",
+            data: {
+              id: "reddit-comment-1",
+              name: "t1_reddit-comment-1",
+              author_fullname: "t2_reddit_user",
+              author: "xlr_reddit",
+              body: "Reddit fixture comment",
+              created_utc: 1704067400,
+              subreddit: "testing",
+              score: 2,
+            },
+          },
+        ],
+      },
+    });
+  }
+  return json({ message: `not found: ${url}` }, 404);
+}
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -400,6 +503,47 @@ async function linkedinProviderConfig(platformId, metadata = {}) {
     `,
     [configId, platformId, encrypted, JSON.stringify({ access: { fullArchiveSearch: false }, ...metadata })],
   );
+}
+
+async function redditPlatform() {
+  const result = await pool.query(
+    "INSERT INTO platforms (slug, display_name, enabled) VALUES ('reddit', 'Reddit', true) RETURNING id",
+  );
+  return result.rows[0].id;
+}
+
+async function redditProviderConfig(platformId, metadata = {}) {
+  const configId = randomUUID();
+  const encrypted = shared.encryptSecret(
+    "synthetic-reddit-client-secret",
+    undefined,
+    shared.providerAppSecretAssociatedData({
+      providerConfigId: configId,
+      platformSlug: "reddit",
+      secretName: "clientSecret",
+    }),
+  );
+  await pool.query(
+    `
+      INSERT INTO provider_app_configurations (
+        id, platform_id, environment, client_id, client_secret_encrypted,
+        redirect_uri, enabled, metadata
+      )
+      VALUES ($1, $2, 'test', 'synthetic-reddit-client-id', $3,
+        'https://app.example.test/platforms/reddit/oauth/callback', true,
+        $4::jsonb)
+    `,
+    [
+      configId,
+      platformId,
+      encrypted,
+      JSON.stringify({
+        userAgent: "xlrrank-test/1.0 by platform-team",
+        ...metadata,
+      }),
+    ],
+  );
+  return configId;
 }
 
 async function organizationWithManager(userId, name) {
@@ -531,6 +675,146 @@ test(
     ).rows[0].scope_id;
     assert.equal(connectionScope, scopeA);
     assert.notEqual(connectionScope, scopeB);
+  },
+);
+
+test(
+  "Reddit OAuth E2E: generic OAuth uses provider config approvals and persists safe metadata",
+  { skip },
+  async () => {
+    await reset();
+    const userA = await user("reddit@example.test");
+    const platformId = await redditPlatform();
+    await redditProviderConfig(platformId, {
+      access: {
+        redditDataApiApproved: false,
+        commercialApprovalRequired: true,
+        redditCommercialApproved: false,
+      },
+    });
+
+    await assert.rejects(
+      () => service.startOAuth("reddit", userA, { requestedScopes: ["identity", "submit"] }),
+      /not allowed/,
+    );
+    const listedBeforeApproval = await service.listPlatforms(userA);
+    const redditBeforeApproval = listedBeforeApproval.find((platform) => platform.slug === "reddit");
+    assert.equal(redditBeforeApproval.capabilities.profiles, "APP_REVIEW_REQUIRED");
+
+    const blockedStart = await service.startOAuth("reddit", userA, { redirectTo: "/platforms/reddit" });
+    const blockedUrl = new URL(blockedStart.authorizationUrl);
+    assert.equal(blockedUrl.hostname, "www.reddit.com");
+    assert.equal(blockedUrl.pathname, "/api/v1/authorize");
+    assert.equal(blockedUrl.searchParams.get("duration"), "permanent");
+    assert.equal(blockedUrl.searchParams.get("scope"), "identity,read,history");
+    assert.equal(blockedUrl.searchParams.has("code_challenge"), false);
+    await assert.rejects(
+      () => service.handleOAuthCallback("reddit", userA, { state: stateFrom(blockedStart), code: "blocked" }),
+      /not ready/,
+    );
+    const blockedConnections = await pool.query("SELECT id FROM social_connections WHERE platform_id = $1", [platformId]);
+    assert.equal(blockedConnections.rowCount, 0);
+
+    await pool.query(
+      `
+        UPDATE provider_app_configurations
+        SET metadata = jsonb_set(
+          metadata,
+          '{access}',
+          '{"redditDataApiApproved":true,"commercialApprovalRequired":true,"redditCommercialApproved":true}'::jsonb
+        )
+        WHERE platform_id = $1
+      `,
+      [platformId],
+    );
+    const listedAfterApproval = await service.listPlatforms(userA);
+    const redditAfterApproval = listedAfterApproval.find((platform) => platform.slug === "reddit");
+    assert.equal(redditAfterApproval.capabilities.profiles, "PERMISSION_REQUIRED");
+
+    const start = await service.startOAuth("reddit", userA, { redirectTo: "/platforms/reddit" });
+    const callback = await service.handleOAuthCallback("reddit", userA, {
+      state: stateFrom(start),
+      code: "approved",
+    });
+    assert.equal(callback.status, "CONNECTED");
+    assert.equal(callback.handle, "xlr_reddit");
+    assert.equal(redditTokenCalls, 2);
+    assert.equal(
+      redditRequests.some((request) => request.host === "oauth.reddit.com" && request.path === "/api/v1/me"),
+      true,
+    );
+    assert.equal(
+      redditRequests
+        .filter((request) => request.host === "oauth.reddit.com")
+        .every((request) => request.userAgent === "xlrrank-test/1.0 by platform-team"),
+      true,
+    );
+
+    const connection = (
+      await pool.query(
+        "SELECT id, scope_id, credentials_encrypted, provider_metadata FROM social_connections WHERE platform_id = $1",
+        [platformId],
+      )
+    ).rows[0];
+    assert.equal(connection.provider_metadata.grantedCapabilities.profiles, "AVAILABLE");
+    assert.equal(connection.provider_metadata.access.redditDataApiApproved, true);
+    assert.equal(connection.credentials_encrypted.includes("synthetic-reddit-access"), false);
+    const plaintext = shared.decryptSecret(
+      connection.credentials_encrypted,
+      undefined,
+      shared.socialCredentialAssociatedData({
+        connectionId: connection.id,
+        scopeId: connection.scope_id,
+        platformSlug: "reddit",
+      }),
+    );
+    const credentials = JSON.parse(plaintext);
+    assert.equal(credentials.metadata.userAgent, "xlrrank-test/1.0 by platform-team");
+    assert.equal(credentials.metadata.sourcePolicy.modelTrainingAllowed, false);
+
+    const syncJob = await pool.query("SELECT id FROM jobs WHERE type = 'social.connection.sync'");
+    assert.equal(syncJob.rowCount, 1);
+  },
+);
+
+test(
+  "Reddit disconnect remains local-first when provider revoke would hang",
+  { skip },
+  async () => {
+    await reset();
+    const userA = await user("reddit-disconnect@example.test");
+    const platformId = await redditPlatform();
+    await redditProviderConfig(platformId, {
+      access: {
+        redditDataApiApproved: true,
+        commercialApprovalRequired: false,
+      },
+    });
+    const start = await service.startOAuth("reddit", userA, {});
+    const callback = await service.handleOAuthCallback("reddit", userA, {
+      state: stateFrom(start),
+      code: "disconnect",
+    });
+
+    const before = Date.now();
+    const result = await Promise.race([
+      service.disconnectConnection(callback.connectionId, userA),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("disconnect timed out")), 250)),
+    ]);
+    assert.equal(result.status, "DISCONNECTED");
+    assert.equal(result.providerCleanup.status, "NO_SUBSCRIPTION");
+    assert.ok(Date.now() - before < 250);
+    assert.equal(
+      redditRequests.some((request) => request.path === "/api/v1/revoke_token"),
+      false,
+    );
+    const connection = (
+      await pool.query("SELECT status, credentials_encrypted FROM social_connections WHERE id = $1", [
+        callback.connectionId,
+      ])
+    ).rows[0];
+    assert.equal(connection.status, "DISCONNECTED");
+    assert.equal(connection.credentials_encrypted, null);
   },
 );
 

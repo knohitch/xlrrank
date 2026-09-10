@@ -274,6 +274,104 @@ function createXFixtureServer() {
   };
 }
 
+function createRedditFixtureServer() {
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const authorization = String(req.headers.authorization ?? "");
+    const userAgent = String(req.headers["user-agent"] ?? "");
+    requests.push({ authorization, userAgent, url: url.pathname + url.search });
+    res.setHeader("content-type", "application/json");
+    if (!authorization.startsWith("Bearer reddit-access-worker")) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ message: "Unauthorized" }));
+      return;
+    }
+    if (userAgent !== "xlrrank-worker-test/1.0 by platform-team") {
+      res.writeHead(403);
+      res.end(JSON.stringify({ message: "Missing User-Agent" }));
+      return;
+    }
+    res.setHeader("x-ratelimit-used", "1");
+    res.setHeader("x-ratelimit-remaining", "99.5");
+    res.setHeader("x-ratelimit-reset", "60");
+    if (url.pathname === "/api/v1/me") {
+      res.end(JSON.stringify({
+        id: "t2_worker",
+        name: "xlr_worker_reddit",
+        created_utc: 1704067200,
+        link_karma: 5,
+        comment_karma: 4,
+        subreddit: { public_description: "Worker Reddit profile", subscribers: 9 },
+      }));
+      return;
+    }
+    if (url.pathname === "/user/xlr_worker_reddit/submitted.json") {
+      const second = url.searchParams.get("after") === "t3_worker_post_2";
+      res.end(JSON.stringify({
+        kind: "Listing",
+        data: {
+          after: second ? null : "t3_worker_post_2",
+          children: [{
+            kind: "t3",
+            data: {
+              id: second ? "worker_post_2" : "worker_post_1",
+              name: second ? "t3_worker_post_2" : "t3_worker_post_1",
+              author_fullname: "t2_worker",
+              author: "xlr_worker_reddit",
+              title: second ? "Reddit worker page two" : "Reddit worker page one",
+              selftext: second ? "" : "Worker body",
+              created_utc: second ? 1704153600 : 1704067300,
+              subreddit: "testing",
+              score: second ? 2 : 1,
+              num_comments: 1,
+            },
+          }],
+        },
+      }));
+      return;
+    }
+    if (url.pathname === "/user/xlr_worker_reddit/comments.json") {
+      res.end(JSON.stringify({
+        kind: "Listing",
+        data: {
+          after: null,
+          children: [{
+            kind: "t1",
+            data: {
+              id: "worker_comment_1",
+              name: "t1_worker_comment_1",
+              author_fullname: "t2_worker",
+              author: "xlr_worker_reddit",
+              body: "Reddit worker comment",
+              created_utc: 1704067400,
+              subreddit: "testing",
+              score: 3,
+            },
+          }],
+        },
+      }));
+      return;
+    }
+    res.writeHead(404);
+    res.end(JSON.stringify({ message: "not found" }));
+  });
+  return {
+    requests,
+    async start() {
+      await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Reddit fixture server did not bind");
+      return `http://127.0.0.1:${address.port}`;
+    },
+    async stop() {
+      server.closeIdleConnections?.();
+      server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
+
 function createMetaFixtureServer() {
   const requests = [];
   const server = http.createServer((req, res) => {
@@ -659,6 +757,65 @@ async function createXConnection(name, refreshToken) {
       VALUES ($1, $2, $3, 'CONNECTED', $4, '9001', 'xlr_x_fixture')
     `,
     [connectionId, scope.scopeId, platform.rows[0].id, encrypted],
+  );
+  return { userId: user.rows[0].id, platformId: platform.rows[0].id, scope, connectionId };
+}
+
+async function createRedditConnection(name) {
+  const user = await pool.query(
+    "INSERT INTO users (email, password_hash, display_name, status) VALUES ($1, 'hash', $2, 'ACTIVE') RETURNING id",
+    [`${name}-${randomUUID()}@example.test`, name],
+  );
+  const platform = await pool.query(
+    "INSERT INTO platforms (slug, display_name, enabled) VALUES ('reddit', 'Reddit', true) ON CONFLICT (slug) DO UPDATE SET enabled = true RETURNING id",
+  );
+  const scope = await database.ensurePersonalScope(user.rows[0].id);
+  const connectionId = randomUUID();
+  const credentials = {
+    accessToken: "reddit-access-worker",
+    refreshToken: "reddit-refresh-worker",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+    scopes: ["identity", "read", "history"],
+    metadata: {
+      providerUsername: "xlr_worker_reddit",
+      userAgent: "xlrrank-worker-test/1.0 by platform-team",
+      access: { redditDataApiApproved: true, commercialApprovalRequired: false },
+      sourcePolicy: {
+        provider: "reddit",
+        modelTrainingAllowed: false,
+        fineTuningAllowed: false,
+        seedDataAllowed: false,
+      },
+    },
+  };
+  const encrypted = shared.encryptSecret(
+    JSON.stringify(credentials),
+    undefined,
+    shared.socialCredentialAssociatedData({
+      connectionId,
+      scopeId: scope.scopeId,
+      platformSlug: "reddit",
+    }),
+  );
+  await pool.query(
+    `
+      INSERT INTO social_connections (
+        id, scope_id, platform_id, status, credentials_encrypted,
+        verified_external_id, verified_handle, provider_metadata
+      )
+      VALUES ($1, $2, $3, 'CONNECTED', $4, 't2_worker', 'xlr_worker_reddit', $5::jsonb)
+    `,
+    [
+      connectionId,
+      scope.scopeId,
+      platform.rows[0].id,
+      encrypted,
+      JSON.stringify({
+        providerUserId: "t2_worker",
+        grantedScopes: credentials.scopes,
+        access: credentials.metadata.access,
+      }),
+    ],
   );
   return { userId: user.rows[0].id, platformId: platform.rows[0].id, scope, connectionId };
 }
@@ -1424,6 +1581,60 @@ test(
       assert.ok(scopedRows.rows.every((row) => row.scope_id === null || Number(row.count) <= 2));
       assert.ok(fixture.tokenLog.some((entry) => entry.url.startsWith("/2/oauth2/token")));
       assert.ok(fixture.tokenLog.some((entry) => entry.url.startsWith("/2/users/9001/tweets")));
+    } finally {
+      if (worker) await stopWorker(worker);
+      await fixture.stop();
+    }
+  },
+);
+
+test(
+  "Reddit worker ingestion e2e: generic sync persists profile, submissions, comments, pagination, and provenance",
+  { skip },
+  async () => {
+    await reset();
+    const fixture = createRedditFixtureServer();
+    const baseUrl = await fixture.start();
+    let worker;
+    try {
+      const reddit = await createRedditConnection("reddit-worker");
+      const request = await database.createSocialConnectionSyncRequest({
+        connectionId: reddit.connectionId,
+        reason: "MANUAL",
+      });
+      worker = await startWorker({
+        REDDIT_API_BASE_URL: baseUrl,
+        REDDIT_TOKEN_BASE_URL: baseUrl,
+      });
+      await waitForJob(request.jobId, ["COMPLETED"], 30_000);
+      assert.equal(
+        Number((await pool.query("SELECT count(*) FROM social_content_items WHERE platform_id = $1", [reddit.platformId])).rows[0].count),
+        2,
+      );
+      assert.equal(
+        Number((await pool.query("SELECT count(*) FROM social_interactions WHERE platform_id = $1", [reddit.platformId])).rows[0].count),
+        1,
+      );
+      const profile = (
+        await pool.query(
+          "SELECT provider_data_category, metadata FROM social_external_accounts WHERE platform_id = $1 AND external_id = 't2_worker'",
+          [reddit.platformId],
+        )
+      ).rows[0];
+      assert.equal(profile.provider_data_category, "reddit_authenticated_user_profile");
+      const observation = (
+        await pool.query(
+          "SELECT metadata FROM social_account_observations WHERE connection_id = $1",
+          [reddit.connectionId],
+        )
+      ).rows[0];
+      assert.equal(observation.metadata.sourcePolicy.modelTrainingAllowed, false);
+      assert.ok(fixture.requests.some((entry) => entry.url.startsWith("/api/v1/me")));
+      assert.ok(fixture.requests.some((entry) => entry.url.includes("after=t3_worker_post_2")));
+      assert.equal(
+        fixture.requests.every((entry) => entry.userAgent === "xlrrank-worker-test/1.0 by platform-team"),
+        true,
+      );
     } finally {
       if (worker) await stopWorker(worker);
       await fixture.stop();

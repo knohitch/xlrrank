@@ -36,7 +36,6 @@ import type {
   OAuthProviderContract,
   ProviderApplicationConfig,
   ProviderAsset,
-  ProviderEventSubscriptionResult,
   SocialConnector,
 } from "@xlrrank/social-core";
 import {
@@ -149,7 +148,7 @@ export class PlatformsService {
     const pool = getPool();
     const scope = await ensurePersonalScope(userId);
     const allPlatforms = await db.select().from(platforms);
-    const configured = await this.configuredPlatformIds();
+    const configured = await this.configuredPlatformMetadata();
     const connections = await pool.query<ConnectionRow>(
       "SELECT * FROM social_connections WHERE scope_id = $1",
       [scope.scopeId],
@@ -172,7 +171,7 @@ export class PlatformsService {
         capabilities: evaluateConnectorCapabilities({
           connector,
           configured: configured.has(p.id),
-          metadata: account?.provider_metadata,
+          metadata: account?.provider_metadata ?? configured.get(p.id),
           grantedScopes,
         }),
         connection: this.toConnectionDto(account),
@@ -192,7 +191,7 @@ export class PlatformsService {
     );
     const account = accounts.rows[0];
     const status = account?.status ?? "DISCONNECTED";
-    const configured = await this.hasProviderAppConfig(platform.id);
+    const configured = await this.providerAppConfigMetadata(platform.id);
     const grantedScopes = stringArrayFromMetadata(account?.provider_metadata, "grantedScopes");
 
     return {
@@ -206,8 +205,8 @@ export class PlatformsService {
       nextSyncAt: account?.next_sync_at ?? null,
       capabilities: evaluateConnectorCapabilities({
         connector: connectorRegistry.getDefinition(platform.slug),
-        configured,
-        metadata: account?.provider_metadata,
+        configured: !!configured,
+        metadata: account?.provider_metadata ?? configured,
         grantedScopes,
       }),
       connection: this.toConnectionDto(account),
@@ -414,7 +413,7 @@ export class PlatformsService {
       scopes: tokenResult.grantedScopes.length
         ? tokenResult.grantedScopes
         : transaction.requestedScopes,
-      metadata: {},
+      metadata: { ...(tokenResult.rawProviderMetadata ?? {}) },
     };
     if (tokenResult.refreshToken) credentials.refreshToken = tokenResult.refreshToken;
     if (tokenResult.expiresAt) credentials.expiresAt = tokenResult.expiresAt;
@@ -440,6 +439,21 @@ export class PlatformsService {
     const access = objectFromMetadata(callbackProviderConfig.metadata, "access");
     if (access) capabilityInput.access = access;
     const capabilities = connector.evaluateCapabilities?.(capabilityInput) ?? {};
+    if (!hasAssetLister(connector) && capabilities.profiles !== "AVAILABLE") {
+      await this.audit.record({
+        actorUserId: userId,
+        action: "social.oauth.access_not_ready",
+        entityType: "platform",
+        entityId: platform.id,
+        metadata: {
+          platformId: platform.id,
+          platformSlug: platform.slug,
+          scopeId: transaction.scopeId,
+          capabilities,
+        },
+      });
+      throw new BadRequestException("Provider authorization is not ready for production access.");
+    }
     if (hasAssetLister(connector)) {
       const snapshot = await this.persistMetaAuthorizationSnapshot({
         scopeId: transaction.scopeId,
@@ -1501,19 +1515,19 @@ export class PlatformsService {
     return { id: row.id, slug: row.slug, displayName: row.display_name, enabled: row.enabled };
   }
 
-  private async configuredPlatformIds(): Promise<Set<string>> {
-    const result = await getPool().query<{ platform_id: string }>(
-      "SELECT platform_id FROM provider_app_configurations WHERE enabled = true",
+  private async configuredPlatformMetadata(): Promise<Map<string, Record<string, unknown>>> {
+    const result = await getPool().query<{ platform_id: string; metadata: Record<string, unknown> | null }>(
+      "SELECT platform_id, metadata FROM provider_app_configurations WHERE enabled = true",
     );
-    return new Set(result.rows.map((row) => row.platform_id));
+    return new Map(result.rows.map((row) => [row.platform_id, row.metadata ?? {}]));
   }
 
-  private async hasProviderAppConfig(platformId: string): Promise<boolean> {
-    const result = await getPool().query(
-      "SELECT 1 FROM provider_app_configurations WHERE platform_id = $1 AND enabled = true LIMIT 1",
+  private async providerAppConfigMetadata(platformId: string): Promise<Record<string, unknown> | null> {
+    const result = await getPool().query<{ metadata: Record<string, unknown> | null }>(
+      "SELECT metadata FROM provider_app_configurations WHERE platform_id = $1 AND enabled = true LIMIT 1",
       [platformId],
     );
-    return result.rowCount === 1;
+    return result.rows[0]?.metadata ?? null;
   }
 
   private async loadProviderAppConfig(platform: PlatformRow): Promise<ProviderApplicationConfig> {
