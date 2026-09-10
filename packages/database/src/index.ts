@@ -33,6 +33,7 @@ export {
   claimPendingOutboxEntries,
   createDeadLetter,
   createProviderSubscriptionCleanupRequest,
+  createProviderSubscriptionCleanupRequestTx,
   createSocialConnectionSyncRequest,
   createSocialWebhookProcessRequest,
   enableSocialSyncSchedule,

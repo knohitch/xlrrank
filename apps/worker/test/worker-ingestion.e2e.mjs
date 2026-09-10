@@ -2104,6 +2104,62 @@ test(
 );
 
 test(
+  "Data retention: provider-family mapping purges all platform slugs in one provider family",
+  { skip },
+  async () => {
+    await reset();
+    await pool.query(
+      `
+        INSERT INTO provider_data_retention_policies (
+          provider_family, data_category, retention_class, retention_mode, max_retention_seconds, description
+        )
+        VALUES ('synthetic-family', 'organization_profile', 'SYNTHETIC_PROFILE_1D', 'FIXED_MAX_AGE', 86400,
+          'Synthetic multi-platform provider-family policy')
+        ON CONFLICT (provider_family, data_category) DO UPDATE SET
+          retention_class = EXCLUDED.retention_class,
+          retention_mode = EXCLUDED.retention_mode,
+          max_retention_seconds = EXCLUDED.max_retention_seconds
+      `,
+    );
+    const platformA = randomUUID();
+    const platformB = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO platforms (id, slug, provider_family, display_name)
+        VALUES ($1, 'synthetic-a', 'synthetic-family', 'Synthetic A'),
+               ($2, 'synthetic-b', 'synthetic-family', 'Synthetic B')
+      `,
+      [platformA, platformB],
+    );
+    const accountA = randomUUID();
+    const accountB = randomUUID();
+    await pool.query(
+      `
+        INSERT INTO social_external_accounts (
+          id, platform_id, external_id, current_handle, display_name,
+          provider_data_category, last_observed_at
+        )
+        VALUES ($1, $2, 'same-family-a', 'a-handle', 'Family A', 'organization_profile', now() - interval '2 days'),
+               ($3, $4, 'same-family-b', 'b-handle', 'Family B', 'organization_profile', now() - interval '2 days')
+      `,
+      [accountA, platformA, accountB, platformB],
+    );
+
+    const result = await database.purgeExpiredProviderData({ providerFamily: "synthetic-family" });
+    assert.ok(result.accountProfilesSanitized >= 2);
+    const rows = await pool.query(
+      "SELECT id, current_handle, display_name FROM social_external_accounts WHERE id = ANY($1::uuid[]) ORDER BY id",
+      [[accountA, accountB]],
+    );
+    assert.equal(rows.rows.length, 2);
+    assert.deepEqual(rows.rows.map((row) => [row.current_handle, row.display_name]), [
+      [null, null],
+      [null, null],
+    ]);
+  },
+);
+
+test(
   "Provider subscription cleanup worker e2e: processes pending cleanup job, invokes LinkedIn DELETE, marks PROVIDER_DELETED",
   { skip },
   async () => {
@@ -2160,11 +2216,13 @@ test(
             id, provider_family, scope_id, platform_id, provider_authorization_id,
             provider_authorization_asset_id, social_connection_id, provider_user_id,
             provider_asset_id, developer_application_urn, member_urn, entity_urn,
-            event_type, webhook_url, provider_status
+            provider_key, event_type, webhook_url, provider_status
           )
           VALUES ($1, 'linkedin', $2, $3, $4, $5, $6, 'urn:li:person:cleanup-member',
             '12345', 'urn:li:developerApplication:999', 'urn:li:person:cleanup-member',
-            'urn:li:organization:12345', 'ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS',
+            'urn:li:organization:12345',
+            '{"applicationKey":"urn:li:developerApplication:999","actorKey":"urn:li:person:cleanup-member","entityKey":"urn:li:organization:12345","eventType":"ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS"}'::jsonb,
+            'ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS',
             'https://app.example.test/platforms/linkedin/webhook', 'PENDING_PROVIDER_DELETE')
         `,
         [subscriptionId, conn.scope.scopeId, platformId, authId, assetId, conn.connectionId],
@@ -2403,14 +2461,36 @@ test(
       [authId, connA.scope.scopeId],
     );
     const asset9wId = randomUUID();
+    const asset9wCredentialsEncrypted = shared.encryptSecret(
+      JSON.stringify({
+        accessToken: "asset-token-retained",
+        metadata: {
+          organizationUrn: "urn:li:organization:99999",
+          memberUrn: "urn:li:person:auth-user",
+          numericId: "99999",
+          roles: ["ADMINISTRATOR"],
+          primaryRole: "ADMINISTRATOR",
+          roleObservedAt: "2025-01-01T00:00:00.000Z",
+          roleProviderDataCategory: "organization_admin_reporting",
+        },
+      }),
+      undefined,
+      shared.providerAuthorizationAssetAssociatedData({
+        authorizationAssetId: asset9wId,
+        authorizationId: authId,
+        scopeId: connA.scope.scopeId,
+        platformSlug: "linkedin",
+        providerAssetId: "99999",
+      }),
+    );
     await pool.query(
       `
         INSERT INTO provider_authorization_assets (
           id, provider_authorization_id, platform_id, asset_type, provider_asset_id,
-          name, handle, token_kind, provider_data_category, metadata, updated_at
+          name, handle, token_kind, credentials_encrypted, provider_data_category, metadata, updated_at
         )
         VALUES ($1, $2, $3, 'LINKEDIN_ORGANIZATION', '99999',
-          'Org 9w Decorative Name', 'org-9w-handle', 'USER', 'organization_profile',
+          'Org 9w Decorative Name', 'org-9w-handle', 'USER', $4, 'organization_profile',
           '{
              "organizationUrn":"urn:li:organization:99999",
              "roles":["ADMINISTRATOR"],
@@ -2420,7 +2500,7 @@ test(
            }'::jsonb,
           now() - interval '13 months')
       `,
-      [asset9wId, authId, platformId],
+      [asset9wId, authId, platformId, asset9wCredentialsEncrypted],
     );
     await pool.query(
       `
@@ -2511,6 +2591,25 @@ test(
     assert.equal(asset9w.metadata.primaryRole, undefined);
     assert.equal(asset9w.metadata.accessState, "ACCESS_REQUIRED");
     assert.equal(asset9w.metadata.stableProviderIdentifierRetained, true);
+    const decryptedAssetCredentials = JSON.parse(
+      shared.decryptSecret(
+        asset9w.credentials_encrypted,
+        undefined,
+        shared.providerAuthorizationAssetAssociatedData({
+          authorizationAssetId: asset9wId,
+          authorizationId: authId,
+          scopeId: connA.scope.scopeId,
+          platformSlug: "linkedin",
+          providerAssetId: "99999",
+        }),
+      ),
+    );
+    assert.equal(decryptedAssetCredentials.accessToken, "asset-token-retained");
+    assert.equal(decryptedAssetCredentials.metadata.organizationUrn, "urn:li:organization:99999");
+    assert.equal(decryptedAssetCredentials.metadata.numericId, "99999");
+    assert.equal(decryptedAssetCredentials.metadata.roles, undefined);
+    assert.equal(decryptedAssetCredentials.metadata.primaryRole, undefined);
+    assert.equal(decryptedAssetCredentials.metadata.accessState, "ACCESS_REQUIRED");
     const roleExpiredConnection = (
       await pool.query("SELECT status, provider_metadata, sync_error FROM social_connections WHERE id = $1", [connA.connectionId])
     ).rows[0];

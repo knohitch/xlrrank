@@ -732,6 +732,37 @@ test("LinkedIn Event Subscription API: creates Rest.li compound-key subscription
       true,
     );
 
+    const genericResult = await connector.upsertProviderEventSubscription(
+      {
+        providerUserId: "member-12345",
+        providerAssetId: "1001",
+        assetMetadata: {
+          organizationUrn: "urn:li:organization:1001",
+          memberUrn: "urn:li:person:member-12345",
+        },
+        access: {
+          organizationSocialActionNotifications: true,
+          developerApplicationId: "999",
+          webhookUrl: "https://app.example.test/platforms/linkedin/webhook",
+        },
+        roles: ["ADMINISTRATOR"],
+      },
+      context,
+    );
+    assert.equal(genericResult.providerStatus, "ACTIVE");
+    assert.deepEqual(genericResult.providerKey, {
+      applicationKey: "urn:li:developerApplication:999",
+      actorKey: "urn:li:person:member-12345",
+      entityKey: "urn:li:organization:1001",
+      eventType: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
+    });
+    await connector.deleteProviderEventSubscription(
+      {
+        providerKey: genericResult.providerKey,
+      },
+      context,
+    );
+
     await assert.rejects(
       () =>
         connector.upsertOrganizationSocialActionSubscription(

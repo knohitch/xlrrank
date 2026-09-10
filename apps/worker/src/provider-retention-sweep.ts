@@ -19,6 +19,22 @@ export interface ProviderRetentionSweepRun {
   results: PurgeRetentionResult[];
 }
 
+export async function loadProviderRetentionSweepCadenceMs(configuredMs: number): Promise<number> {
+  const pool = getPool();
+  const shortest = await pool.query<{ shortest_seconds: number | null }>(
+    `
+      SELECT min(max_retention_seconds) AS shortest_seconds
+      FROM provider_data_retention_policies
+      WHERE max_retention_seconds IS NOT NULL
+        AND retention_class <> 'SUPERSEDED_BY_0008'
+    `,
+  );
+  const shortestMs = shortest.rows[0]?.shortest_seconds
+    ? shortest.rows[0].shortest_seconds * 1000
+    : configuredMs;
+  return Math.min(configuredMs, Math.max(60_000, Math.floor(shortestMs / 4)));
+}
+
 export async function runProviderRetentionSweepOnce(workerId: string): Promise<ProviderRetentionSweepRun> {
   const pool = getPool();
   const env = getEnv();
@@ -65,7 +81,15 @@ export async function runProviderRetentionSweepOnce(workerId: string): Promise<P
             provider_family, window_start, claimed_by, status
           )
           VALUES ($1, $2, $3, 'RUNNING')
-          ON CONFLICT (provider_family, window_start) DO NOTHING
+          ON CONFLICT (provider_family, window_start)
+          DO UPDATE SET
+            claimed_by = EXCLUDED.claimed_by,
+            claimed_at = now(),
+            status = 'RUNNING',
+            completed_at = NULL,
+            metadata = COALESCE(provider_retention_sweep_claims.metadata, '{}'::jsonb)
+              || jsonb_build_object('retryClaimedAt', now(), 'retryClaimedBy', EXCLUDED.claimed_by)
+          WHERE provider_retention_sweep_claims.status = 'FAILED'
           RETURNING id
         `,
         [provider.provider_family, new Date(windowStart), workerId],
@@ -80,9 +104,12 @@ export async function runProviderRetentionSweepOnce(workerId: string): Promise<P
       await client.query("SELECT set_config('statement_timeout', $1, false)", [
         String(env.PROVIDER_RETENTION_SWEEP_TIMEOUT_MS),
       ]);
-      const policies = await loadProviderRetentionPolicies(provider.provider_family);
+      const policies = await loadProviderRetentionPolicies(provider.provider_family, client);
       if (policies.length === 0) continue;
-      const result = await purgeExpiredProviderData({ providerFamily: provider.provider_family });
+      const result = await purgeExpiredProviderData({
+        providerFamily: provider.provider_family,
+        executor: client,
+      });
       run.results.push(result);
       await client.query(
         `
@@ -106,7 +133,8 @@ export async function runProviderRetentionSweepOnce(workerId: string): Promise<P
         "Provider retention sweep completed",
       );
     } catch (err) {
-      await pool
+      await client.query("SELECT set_config('statement_timeout', '0', false)").catch(() => undefined);
+      await client
         .query(
           `
             UPDATE provider_retention_sweep_claims

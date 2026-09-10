@@ -32,9 +32,7 @@ export async function processProviderSubscriptionCleanup(job: Job): Promise<void
       scope_id: string;
       social_connection_id: string;
       platform_slug: string;
-      developer_application_urn: string;
-      member_urn: string;
-      entity_urn: string;
+      provider_key: Record<string, unknown> | null;
       event_type: string;
       credentials_encrypted: string | null;
     }>(
@@ -42,8 +40,7 @@ export async function processProviderSubscriptionCleanup(job: Job): Promise<void
         SELECT pes.id, pes.provider_status, pes.provider_family,
                pes.provider_authorization_id, pa.scope_id, pes.social_connection_id,
                p.slug AS platform_slug,
-               pes.developer_application_urn, pes.member_urn, pes.entity_urn,
-               pes.event_type, pa.credentials_encrypted
+               pes.provider_key, pes.event_type, pa.credentials_encrypted
         FROM provider_event_subscriptions pes
         JOIN provider_authorizations pa ON pa.id = pes.provider_authorization_id
         JOIN platforms p ON p.id = pes.platform_id
@@ -84,11 +81,8 @@ export async function processProviderSubscriptionCleanup(job: Job): Promise<void
     await deleteSubscription.call(
       connector,
       {
-        developerApplicationUrn: subscription.developer_application_urn,
-        memberUrn: subscription.member_urn,
-        organizationUrn: subscription.entity_urn,
-        roles: [],
-        webhookUrl: "",
+        providerFamily: subscription.provider_family,
+        providerKey: subscription.provider_key ?? {},
         eventType: subscription.event_type,
       },
       {

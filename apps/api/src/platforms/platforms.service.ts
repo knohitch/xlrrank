@@ -10,7 +10,7 @@ import { eq } from "drizzle-orm";
 import {
   authorizeConnection,
   authorizeScope,
-  createProviderSubscriptionCleanupRequest,
+  createProviderSubscriptionCleanupRequestTx,
   createSocialConnectionSyncRequest,
   createSocialWebhookProcessRequest,
   ensureOrganizationScope,
@@ -36,6 +36,8 @@ import type {
   OAuthProviderContract,
   ProviderApplicationConfig,
   ProviderAsset,
+  ProviderEventSubscriptionResult,
+  SocialConnector,
 } from "@xlrrank/social-core";
 import {
   linkedInWebhookDedupeKey,
@@ -917,7 +919,7 @@ export class PlatformsService {
         `,
         [input.connectionId, input.scopeId],
       );
-      const subscriptions = await client.query<{ id: string }>(
+      const subscriptions = await client.query<{ id: string; provider_status: string }>(
         `
           UPDATE provider_event_subscriptions
           SET provider_status = CASE
@@ -936,31 +938,34 @@ export class PlatformsService {
               ),
               updated_at = now()
           WHERE social_connection_id = $1
-          RETURNING id
+          RETURNING id, provider_status
         `,
         [input.connectionId],
       );
-      subscriptionIds.push(...subscriptions.rows.map((row) => row.id));
+      subscriptionIds.push(
+        ...subscriptions.rows
+          .filter((row) => row.provider_status === "PENDING_PROVIDER_DELETE")
+          .map((row) => row.id),
+      );
+      const cleanupJobIds: string[] = [];
+      for (const subscriptionId of subscriptionIds) {
+        const cleanupJob = await createProviderSubscriptionCleanupRequestTx(client, { subscriptionId });
+        cleanupJobIds.push(cleanupJob.jobId);
+      }
       await client.query("COMMIT");
+      return subscriptionIds.length
+        ? {
+            status: "PENDING_PROVIDER_DELETE",
+            subscriptionIds,
+            cleanupJobIds,
+          }
+        : { status: "NO_SUBSCRIPTION" };
     } catch (err) {
       await client.query("ROLLBACK");
       throw err;
     } finally {
       client.release();
     }
-
-    const cleanupJobIds: string[] = [];
-    for (const subscriptionId of subscriptionIds) {
-      const cleanupJob = await createProviderSubscriptionCleanupRequest({ subscriptionId });
-      cleanupJobIds.push(cleanupJob.jobId);
-    }
-    return subscriptionIds.length
-      ? {
-          status: "PENDING_PROVIDER_DELETE",
-          subscriptionIds,
-          cleanupJobIds,
-        }
-      : { status: "NO_SUBSCRIPTION" };
   }
 
   private async persistConnectedConnection(input: {
@@ -1222,7 +1227,7 @@ export class PlatformsService {
                 tokenKind: asset.tokenKind,
                 providerUserId: input.providerUserId,
                 access: providerAccess,
-                ...asset.metadata,
+                ...(asset.credentialMetadata ?? {}),
               },
             }),
             undefined,
@@ -1293,7 +1298,7 @@ export class PlatformsService {
   }
 
   private async syncProviderEventSubscription(input: {
-    connector: unknown;
+    connector: SocialConnector;
     auth: {
       id: string;
       provider_family: string;
@@ -1313,79 +1318,33 @@ export class PlatformsService {
     access: Record<string, unknown>;
     roles: string[];
   }): Promise<void> {
-    if (
-      input.access.eventSubscriptionsEnabled !== true &&
-      input.access.organizationSocialActionNotifications !== true
-    ) {
-      return;
-    }
-    const eventType = stringFromMetadata(input.access, "eventType") ?? "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS";
-    const method = (input.connector as {
-      upsertProviderEventSubscription?: (
-        request: {
-          developerApplicationUrn: string;
-          memberUrn: string;
-          organizationUrn: string;
-          roles?: string[];
-          webhookUrl: string;
-          eventType: string;
-        },
-        context: { scopeId: string; connectionId: string; credentials: ConnectorCredentials },
-      ) => Promise<{
-        providerStatus: string;
-        eventType: string;
-        developerApplicationUrn: string;
-        memberUrn: string;
-        organizationUrn: string;
-        webhookUrl: string;
-        expiresAt?: string | undefined;
-          raw: Record<string, unknown>;
-        }>;
-    }).upsertProviderEventSubscription;
+    const method = input.connector.upsertProviderEventSubscription;
     if (typeof method !== "function") return;
 
-    const developerApplicationUrn = linkedInDeveloperApplicationUrn(input.access);
     const webhookUrl = stringFromMetadata(input.access, "webhookUrl");
-    const organizationUrn =
-      stringFromMetadata(input.asset.metadata, "organizationUrn") ??
-      `urn:li:organization:${input.asset.provider_asset_id}`;
-    const memberUrn =
-      stringFromMetadata(input.asset.metadata, "memberUrn") ??
-      `urn:li:person:${input.auth.provider_user_id}`;
+    const eventType = stringFromMetadata(input.access, "eventType");
+    const result = await method.call(
+      input.connector,
+      {
+        providerFamily: input.auth.provider_family,
+        providerUserId: input.auth.provider_user_id,
+        providerAssetId: input.asset.provider_asset_id,
+        assetMetadata: input.asset.metadata,
+        authorizationMetadata: input.auth.metadata,
+        access: input.access,
+        roles: input.roles,
+        ...(webhookUrl ? { webhookUrl } : {}),
+        ...(eventType ? { eventType } : {}),
+      },
+      {
+        scopeId: input.auth.scope_id,
+        connectionId: input.connectionId,
+        credentials: input.credentials,
+      },
+    );
+    if (!result) return;
 
-    if (!developerApplicationUrn || !webhookUrl) {
-      await this.upsertProviderEventSubscriptionRecord({
-        ...input,
-        providerStatus: "CONFIGURATION_REQUIRED",
-        eventType,
-        developerApplicationUrn: developerApplicationUrn ?? "urn:li:developerApplication:unknown",
-        memberUrn,
-        organizationUrn,
-        webhookUrl: webhookUrl ?? "",
-        metadata: {
-          liveRegistrationState: "BLOCKED_EXTERNAL",
-          eventSubscriptionAccessState: "BLOCKED_EXTERNAL",
-        },
-        lastError: { message: "Provider event subscription webhook URL or developer application URN is not configured" },
-      });
-      return;
-    }
-
-    if (!input.roles.includes("ADMINISTRATOR") || !input.credentials.scopes?.includes("rw_organization_admin")) {
-      await this.upsertProviderEventSubscriptionRecord({
-        ...input,
-        providerStatus: "ACCESS_LOST",
-        eventType,
-        developerApplicationUrn,
-        memberUrn,
-        organizationUrn,
-        webhookUrl,
-        metadata: {
-          requiredScope: "rw_organization_admin",
-          requiredRole: "ADMINISTRATOR",
-        },
-        lastError: { message: "LinkedIn notification subscription requires ADMINISTRATOR role and rw_organization_admin" },
-      });
+    if (result.providerStatus === "ACCESS_LOST") {
       await getPool().query(
         `
           UPDATE social_connections
@@ -1396,44 +1355,23 @@ export class PlatformsService {
         `,
         [
           input.connectionId,
-          JSON.stringify({ code: "PROVIDER_EVENT_SUBSCRIPTION_ACCESS_LOST", eventType }),
+          JSON.stringify({ code: "PROVIDER_EVENT_SUBSCRIPTION_ACCESS_LOST", eventType: result.eventType }),
         ],
       );
-      return;
     }
 
-    const result = await method.call(
-      input.connector,
-      {
-        developerApplicationUrn,
-        memberUrn,
-        organizationUrn,
-        roles: input.roles,
-        webhookUrl,
-        eventType,
-      },
-      {
-        scopeId: input.auth.scope_id,
-        connectionId: input.connectionId,
-        credentials: input.credentials,
-      },
-    );
     await this.upsertProviderEventSubscriptionRecord({
       ...input,
       providerStatus: result.providerStatus,
-      eventType,
-      developerApplicationUrn,
-      memberUrn,
-      organizationUrn,
-      webhookUrl,
+      eventType: result.eventType,
+      providerKey: result.providerKey,
+      webhookUrl: result.webhookUrl ?? "",
       expiresAt: result.expiresAt,
       metadata: {
-        requiredScope: "rw_organization_admin",
-        requiredRole: "ADMINISTRATOR",
-        liveRegistrationState: "BLOCKED_EXTERNAL",
-        eventSubscriptionAccessState: "BLOCKED_EXTERNAL",
+        ...(result.metadata ?? {}),
         provider: result.raw,
       },
+      lastError: result.lastError,
     });
   }
 
@@ -1443,9 +1381,7 @@ export class PlatformsService {
     connectionId: string;
     providerStatus: string;
     eventType: string;
-    developerApplicationUrn: string;
-    memberUrn: string;
-    organizationUrn: string;
+    providerKey: Record<string, unknown>;
     webhookUrl: string;
     expiresAt?: string | undefined;
     metadata?: Record<string, unknown> | undefined;
@@ -1457,15 +1393,16 @@ export class PlatformsService {
           provider_family, scope_id, platform_id, provider_authorization_id,
           provider_authorization_asset_id, social_connection_id, provider_user_id,
           provider_asset_id, developer_application_urn, member_urn, entity_urn,
-          event_type, webhook_url, provider_status, last_provider_sync_at,
+          provider_key, event_type, webhook_url, provider_status, last_provider_sync_at,
           expires_at, deactivated_at, last_error, metadata
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-          now(), $15, CASE WHEN $14 = 'ACTIVE' THEN NULL ELSE now() END, $16::jsonb, $17::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15,
+          now(), $16, CASE WHEN $15 = 'ACTIVE' THEN NULL ELSE now() END, $17::jsonb, $18::jsonb)
         ON CONFLICT (provider_family, provider_authorization_id, provider_authorization_asset_id, event_type)
         DO UPDATE SET
           social_connection_id = EXCLUDED.social_connection_id,
           provider_status = EXCLUDED.provider_status,
+          provider_key = EXCLUDED.provider_key,
           webhook_url = EXCLUDED.webhook_url,
           last_provider_sync_at = now(),
           expires_at = EXCLUDED.expires_at,
@@ -1483,9 +1420,10 @@ export class PlatformsService {
         input.connectionId,
         input.auth.provider_user_id,
         input.asset.provider_asset_id,
-        input.developerApplicationUrn,
-        input.memberUrn,
-        input.organizationUrn,
+        providerKeyString(input.providerKey, "applicationKey") ?? "provider:application:unknown",
+        providerKeyString(input.providerKey, "actorKey") ?? input.auth.provider_user_id,
+        providerKeyString(input.providerKey, "entityKey") ?? input.asset.provider_asset_id,
+        JSON.stringify(input.providerKey),
         input.eventType,
         input.webhookUrl,
         input.providerStatus,
@@ -1989,13 +1927,6 @@ function linkedInLogicalWebhookPayloads(
   });
 }
 
-function linkedInDeveloperApplicationUrn(access: Record<string, unknown>): string | null {
-  const urn = stringFromMetadata(access, "developerApplicationUrn");
-  if (urn) return urn;
-  const id = stringFromMetadata(access, "developerApplicationId");
-  return id ? `urn:li:developerApplication:${id}` : null;
-}
-
 function providerDataCategoryFromMetadata(metadata: Record<string, unknown> | undefined): string | null {
   const category = metadata?.providerDataCategory;
   return typeof category === "string" && category.length > 0 ? category : null;
@@ -2058,6 +1989,11 @@ function stringFromMetadata(
 ): string | null {
   const value = metadata?.[key];
   return typeof value === "string" ? value : null;
+}
+
+function providerKeyString(providerKey: Record<string, unknown>, key: string): string | null {
+  const value = providerKey[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function evaluateConnectorCapabilities(input: {

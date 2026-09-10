@@ -953,6 +953,7 @@ export const providerEventSubscriptions = pgTable(
     developerApplicationUrn: text("developer_application_urn").notNull(),
     memberUrn: text("member_urn").notNull(),
     entityUrn: text("entity_urn").notNull(),
+    providerKey: jsonb("provider_key"),
     eventType: text("event_type").notNull(),
     webhookUrl: text("webhook_url").notNull(),
     providerStatus: text("provider_status").notNull(),

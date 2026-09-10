@@ -21,6 +21,7 @@ import type {
   PageResult,
   ProviderApplicationConfig,
   ProviderEventSubscriptionRequest,
+  ProviderEventSubscriptionResult,
 } from "../connectors/types.js";
 import {
   NORMALIZATION_VERSION,
@@ -65,6 +66,7 @@ export interface LinkedInAsset {
   tokenKind: "USER";
   accessToken?: string | undefined;
   metadata: Record<string, unknown>;
+  credentialMetadata?: Record<string, unknown> | undefined;
 }
 
 export const LINKEDIN_CAPABILITY_MATRIX: Record<
@@ -454,6 +456,11 @@ export class LinkedInConnector extends BaseSocialConnector {
           ...(vanityName ? { handle: vanityName } : { handle: orgId }),
           tokenKind: "USER",
           accessToken: token,
+          credentialMetadata: {
+            organizationUrn: entry.orgUrn,
+            memberUrn: entry.roleAssignee,
+            numericId: orgId,
+          },
           metadata: {
             organizationUrn: entry.orgUrn,
             memberUrn: entry.roleAssignee,
@@ -476,6 +483,11 @@ export class LinkedInConnector extends BaseSocialConnector {
           handle: orgId,
           tokenKind: "USER",
           accessToken: token,
+          credentialMetadata: {
+            organizationUrn: entry.orgUrn,
+            memberUrn: entry.roleAssignee,
+            numericId: orgId,
+          },
           metadata: {
             organizationUrn: entry.orgUrn,
             memberUrn: entry.roleAssignee,
@@ -504,30 +516,111 @@ export class LinkedInConnector extends BaseSocialConnector {
   upsertProviderEventSubscription(
     input: ProviderEventSubscriptionRequest,
     context?: ConnectorOperationContext,
-  ): Promise<LinkedInOrganizationNotificationSubscriptionResult> {
+  ): Promise<ProviderEventSubscriptionResult | null> {
+    const access = input.access ?? {};
+    if (access.eventSubscriptionsEnabled !== true && access.organizationSocialActionNotifications !== true) {
+      return Promise.resolve(null);
+    }
+    const eventType = linkedInString(access, "eventType") ?? "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS";
+    const webhookUrl = linkedInString(access, "webhookUrl");
+    const developerApplicationUrn = linkedInDeveloperApplicationUrn(access);
+    const organizationUrn =
+      linkedInString(input.assetMetadata, "organizationUrn") ??
+      `urn:li:organization:${input.providerAssetId ?? ""}`;
+    const memberUrn =
+      linkedInString(input.assetMetadata, "memberUrn") ??
+      `urn:li:person:${input.providerUserId ?? ""}`;
+    const providerKey = {
+      applicationKey: developerApplicationUrn ?? "urn:li:developerApplication:unknown",
+      actorKey: memberUrn,
+      entityKey: organizationUrn,
+      eventType,
+    };
+    if (!developerApplicationUrn || !webhookUrl) {
+      return Promise.resolve({
+        providerStatus: "CONFIGURATION_REQUIRED",
+        eventType,
+        providerKey,
+        webhookUrl: webhookUrl ?? "",
+        metadata: {
+          liveRegistrationState: "BLOCKED_EXTERNAL",
+          eventSubscriptionAccessState: "BLOCKED_EXTERNAL",
+        },
+        lastError: {
+          message: "Provider event subscription webhook URL or developer application URN is not configured",
+        },
+        raw: {},
+      });
+    }
+    const roles = input.roles ?? [];
+    const grantedScopes = context?.credentials.scopes ?? [];
+    if (!roles.includes("ADMINISTRATOR") || !grantedScopes.includes("rw_organization_admin")) {
+      return Promise.resolve({
+        providerStatus: "ACCESS_LOST",
+        eventType,
+        providerKey,
+        webhookUrl,
+        metadata: {
+          requiredScope: "rw_organization_admin",
+          requiredRole: "ADMINISTRATOR",
+        },
+        lastError: {
+          message: "LinkedIn notification subscription requires ADMINISTRATOR role and rw_organization_admin",
+        },
+        raw: {},
+      });
+    }
     return this.upsertOrganizationSocialActionSubscription(
       {
-        developerApplicationUrn: input.developerApplicationUrn,
-        memberUrn: input.memberUrn,
-        organizationUrn: input.organizationUrn,
-        roles: input.roles ?? [],
-        webhookUrl: input.webhookUrl ?? "",
-        eventType: input.eventType,
+        developerApplicationUrn,
+        memberUrn,
+        organizationUrn,
+        roles,
+        webhookUrl,
+        eventType,
       },
       context,
-    );
+    ).then((result) => ({
+      providerStatus: result.providerStatus,
+      eventType: result.eventType,
+      providerKey: {
+        applicationKey: result.developerApplicationUrn,
+        actorKey: result.memberUrn,
+        entityKey: result.organizationUrn,
+        eventType: result.eventType,
+      },
+      webhookUrl: result.webhookUrl,
+      expiresAt: result.expiresAt,
+      metadata: {
+        requiredScope: "rw_organization_admin",
+        requiredRole: "ADMINISTRATOR",
+        liveRegistrationState: "BLOCKED_EXTERNAL",
+        eventSubscriptionAccessState: "BLOCKED_EXTERNAL",
+      },
+      raw: result.raw,
+    }));
   }
 
   deleteProviderEventSubscription(
     input: ProviderEventSubscriptionRequest,
     context?: ConnectorOperationContext,
   ): Promise<void> {
+    const providerKey = input.providerKey ?? {};
+    const developerApplicationUrn = linkedInString(providerKey, "applicationKey");
+    const memberUrn = linkedInString(providerKey, "actorKey");
+    const organizationUrn = linkedInString(providerKey, "entityKey");
+    if (!developerApplicationUrn || !memberUrn || !organizationUrn) {
+      throw new ConnectorConfigurationError(
+        "linkedin",
+        "LinkedIn notification subscription cleanup requires provider subscription key",
+      );
+    }
     return this.deleteOrganizationSocialActionSubscription(
       {
-        developerApplicationUrn: input.developerApplicationUrn,
-        memberUrn: input.memberUrn,
-        organizationUrn: input.organizationUrn,
-        eventType: input.eventType,
+        developerApplicationUrn,
+        memberUrn,
+        organizationUrn,
+        eventType: input.eventType ?? linkedInString(providerKey, "eventType") ?? "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
       },
       context,
     );
@@ -1014,6 +1107,18 @@ function linkedInEventSubscriptionPath(input: {
   eventType: string;
 }): string {
   return `/eventSubscriptions/(developerApplication:${encodeURIComponent(input.developerApplicationUrn)},user:${encodeURIComponent(input.memberUrn)},entity:${encodeURIComponent(input.organizationUrn)},eventType:${input.eventType})`;
+}
+
+function linkedInString(record: Record<string, unknown> | null | undefined, key: string): string | null {
+  const value = record?.[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function linkedInDeveloperApplicationUrn(access: Record<string, unknown>): string | null {
+  const urn = linkedInString(access, "developerApplicationUrn");
+  if (urn) return urn;
+  const id = linkedInString(access, "developerApplicationId");
+  return id ? `urn:li:developerApplication:${id}` : null;
 }
 
 function isNonFatalLinkedInProfileDecorationError(err: unknown): boolean {

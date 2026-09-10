@@ -29,7 +29,10 @@ import {
   socialWebhookBullMqJobId,
 } from "@xlrrank/queue";
 import { processProviderSubscriptionCleanup } from "./provider-subscription-cleanup-processor.js";
-import { runProviderRetentionSweepOnce } from "./provider-retention-sweep.js";
+import {
+  loadProviderRetentionSweepCadenceMs,
+  runProviderRetentionSweepOnce,
+} from "./provider-retention-sweep.js";
 import { processSocialConnectionSync, socialSyncJobOptions } from "./social-sync-processor.js";
 import { processSocialWebhook } from "./social-webhook-processor.js";
 
@@ -128,6 +131,12 @@ export async function scheduleDueSyncsOnce(schedulerId: string): Promise<number>
 export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   const env = getEnv();
   const workerId = `worker-${process.pid}-${randomUUID()}`;
+  const retentionSweepIntervalMs = await loadProviderRetentionSweepCadenceMs(
+    env.PROVIDER_RETENTION_SWEEP_INTERVAL_MS,
+  ).catch((err) => {
+    logger.warn({ err }, "Provider retention cadence discovery failed; using configured interval");
+    return env.PROVIDER_RETENTION_SWEEP_INTERVAL_MS;
+  });
   await reconcileWorkerState(workerId);
   await touchWorkerHeartbeat({
     workerId,
@@ -186,13 +195,14 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     if (!stopping)
       scheduleDueSyncsOnce(workerId).catch((err) => logger.error({ err }, "Scheduler failed"));
   }, env.SOCIAL_SYNC_SCHEDULER_INTERVAL_MS);
-  const retentionTimer = setInterval(() => {
+  const runRetentionMaintenance = () => {
     if (!stopping) {
       runProviderRetentionSweepOnce(workerId).catch((err) =>
         logger.error({ err }, "Provider retention sweep failed"),
       );
     }
-  }, env.PROVIDER_RETENTION_SWEEP_INTERVAL_MS);
+  };
+  const retentionTimer = setInterval(runRetentionMaintenance, retentionSweepIntervalMs);
   const heartbeatTimer = setInterval(
     () => {
       if (!stopping) {
@@ -209,18 +219,19 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
 
   await dispatchOutboxOnce(workerId);
   await scheduleDueSyncsOnce(workerId);
-  await runProviderRetentionSweepOnce(workerId);
   await touchWorkerHeartbeat({
     workerId,
     kind: "worker",
     status: "READY",
-    metadata: { queuePrefix: env.QUEUE_PREFIX },
+    metadata: { queuePrefix: env.QUEUE_PREFIX, retentionSweepIntervalMs },
   });
+  runRetentionMaintenance();
   logger.info(
     {
       workerId,
       ingestionConcurrency: env.INGESTION_WORKER_CONCURRENCY,
       queuePrefix: env.QUEUE_PREFIX,
+      retentionSweepIntervalMs,
     },
     "Worker runtime ready",
   );

@@ -169,6 +169,7 @@ export const platforms = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     slug: text("slug").notNull(),
+    providerFamily: text("provider_family"),
     displayName: text("display_name").notNull(),
     enabled: boolean("enabled").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

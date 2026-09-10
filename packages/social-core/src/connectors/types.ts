@@ -106,25 +106,30 @@ export interface ProviderAsset {
   tokenKind: string;
   accessToken?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+  credentialMetadata?: Record<string, unknown> | undefined;
 }
 
 export interface ProviderEventSubscriptionRequest {
-  developerApplicationUrn: string;
-  memberUrn: string;
-  organizationUrn: string;
+  providerFamily?: string | undefined;
+  providerUserId?: string | undefined;
+  providerAssetId?: string | undefined;
+  assetMetadata?: Record<string, unknown> | null | undefined;
+  authorizationMetadata?: Record<string, unknown> | null | undefined;
+  access?: Record<string, unknown> | undefined;
+  providerKey?: Record<string, unknown> | undefined;
   roles?: string[] | undefined;
   webhookUrl?: string | undefined;
-  eventType: string;
+  eventType?: string | undefined;
 }
 
 export interface ProviderEventSubscriptionResult {
   providerStatus: string;
   eventType: string;
-  developerApplicationUrn: string;
-  memberUrn: string;
-  organizationUrn: string;
-  webhookUrl: string;
+  providerKey: Record<string, unknown>;
+  webhookUrl?: string | undefined;
   expiresAt?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
+  lastError?: Record<string, unknown> | undefined;
   raw: Record<string, unknown>;
 }
 
@@ -231,7 +236,7 @@ export interface SocialConnector {
   upsertProviderEventSubscription?(
     input: ProviderEventSubscriptionRequest,
     context?: ConnectorOperationContext,
-  ): Promise<ProviderEventSubscriptionResult>;
+  ): Promise<ProviderEventSubscriptionResult | null>;
   deleteProviderEventSubscription?(
     input: ProviderEventSubscriptionRequest,
     context?: ConnectorOperationContext,

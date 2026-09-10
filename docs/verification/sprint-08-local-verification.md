@@ -31,9 +31,10 @@ Live provider verification remains `BLOCKED_EXTERNAL` because no production Link
    - Historical migration `packages/database/migrations/0007_linkedin_retention_policies.sql` created the first LinkedIn retention table.
    - Forward migration `packages/database/migrations/0008_linkedin_retention_subscriptions_truthfulness.sql` corrects LinkedIn policy categories, adds `retention_mode`, supports nullable `max_retention_seconds` for no-duration-limit provider categories, adds generic `provider_data_category` columns, and creates `provider_event_subscriptions`.
    - Forward migration `packages/database/migrations/0010_provider_retention_runtime_side_tables.sql` adds retention category/basis columns for `social_account_handles` and durable `provider_retention_sweep_claims` for multi-worker retention-window ownership.
+   - Forward migration `packages/database/migrations/0011_provider_family_subscription_keys.sql` adds `platforms.provider_family` for data-driven provider-family retention across multiple platform slugs and `provider_event_subscriptions.provider_key` for connector-owned subscription identity while preserving legacy LinkedIn Rest.li key columns for compatibility.
    - Updated check constraint `provider_authorization_assets_type_check` to support `'LINKEDIN_ORGANIZATION'`.
    - Historical migrations `0000` through `0006` were preserved without modification.
-   - Cross-scope safe, record-level data retention purge mechanism implemented in `packages/database/src/social/retention.ts` (`loadProviderRetentionPolicies` and `purgeExpiredProviderData`), including canonical accounts, observations, handle history, scoped connection profile caches, authorization-asset decoration, and admin/reporting role data.
+   - Cross-scope safe, record-level data retention purge mechanism implemented in `packages/database/src/social/retention.ts` (`loadProviderRetentionPolicies` and `purgeExpiredProviderData`), including canonical accounts, observations, handle history, scoped connection profile caches, authorization-asset decoration, encrypted authorization-asset credential minimization, and admin/reporting role data.
 
 2. **Social Core & Connector Architecture**:
    - `packages/social-core/src/platforms/linkedin-api.ts`: centralized Marketing API version `202608`, Rest.li `2.0.0`, SSRF host validation, structured error mapping (401 reauth, 403 role-loss / product-access, 429 rate limit, 5xx server failure), official HMAC-SHA256 challenge/signature verification, opaque pagination cursor encoding/decoding.
@@ -42,12 +43,13 @@ Live provider verification remains `BLOCKED_EXTERNAL` because no production Link
 
 3. **API & Webhooks**:
    - `apps/api/src/platforms/platforms.controller.ts`: added `GET :id/linkedin/webhook` (challenge-response) and `@Public() @CsrfExempt() POST :id/linkedin/webhook` (notification ingestion).
-   - `apps/api/src/platforms/platforms.service.ts`: registered `LinkedInConnector`, generalized authorization asset persistence and selection for multi-asset platforms, added `verifyLinkedInWebhookChallenge`, fail-closed raw-body `receiveLinkedInWebhook`, minimized webhook receipt persistence, `notificationId:lastModifiedAt` logical dedupe, categorized initial profile/handle/observation persistence, connector-driven subscription synchronization, and local-first asynchronous provider subscription cleanup.
+   - `apps/api/src/platforms/platforms.service.ts`: registered `LinkedInConnector`, generalized authorization asset persistence and selection for multi-asset platforms, added `verifyLinkedInWebhookChallenge`, fail-closed raw-body `receiveLinkedInWebhook`, minimized webhook receipt persistence, `notificationId:lastModifiedAt` logical dedupe, categorized initial profile/handle/observation persistence, connector-driven subscription synchronization with generic `provider_key`, and local-first asynchronous provider subscription cleanup.
 
 4. **Worker Ingestion & Queue Reliability**:
    - `apps/worker/src/social-webhook-processor.ts`: connector-driven webhook processing now loads `webhook_receipts.platform_id`, asks the platform connector to extract provider asset IDs, and resolves connections with `sc.platform_id = receipt.platform_id` to prevent cross-provider object ID collisions.
-   - `apps/worker/src/provider-retention-sweep.ts` and `apps/worker/src/runtime.ts`: production worker startup and cadence timer execute generic provider/data-policy retention sweeps. Cadence defaults to one hour and is capped to one quarter of the shortest active provider retention class, so LinkedIn 24-hour cache classes are enforced more granularly than daily. Each provider/window uses PostgreSQL advisory locking plus `provider_retention_sweep_claims` for single logical ownership across worker replicas.
-   - `apps/worker/src/provider-subscription-cleanup-processor.ts`: generic connector-registry cleanup dispatch; no worker import or direct construction of `LinkedInConnector`.
+   - `apps/worker/src/provider-retention-sweep.ts` and `apps/worker/src/runtime.ts`: production worker startup and cadence timer execute generic provider/data-policy retention sweeps. Cadence defaults to one hour and is capped to one quarter of the shortest active provider retention class, so LinkedIn 24-hour cache classes are enforced more granularly than daily. Each provider/window uses PostgreSQL advisory locking plus `provider_retention_sweep_claims` for single logical ownership across worker replicas. Purge SQL runs through the leased `PoolClient`, so `statement_timeout` bounds the actual retention work; failed claims are safely reclaimable.
+   - `apps/worker/src/runtime.ts`: worker readiness is not blocked by the initial retention sweep; runtime registers the recurring maintenance timer and launches the first sweep asynchronously after `READY`.
+   - `apps/worker/src/provider-subscription-cleanup-processor.ts`: generic connector-registry cleanup dispatch using `provider_key`; no worker import or direct construction of `LinkedInConnector`.
    - `apps/worker/src/social-sync-processor.ts`: updated `updateConnectionAfterFailure` to transition connections to `DEGRADED` on organization role loss or product access denial rather than infinite retry or reauth loops.
 
 ---
@@ -75,7 +77,7 @@ pnpm --filter @xlrrank/social-core test
 - LinkedIn Ingestion (posts 2-page pagination, comments, networkSizes metrics, share analytics semantics): PASS.
 - LinkedIn Error Classifications (401, 403 role loss, 403 product review, 429, 500): PASS.
 - LinkedIn Webhook Security (challenge-response, official string-to-sign, bare hex header, raw-HMAC rejection, prefix rejection, whitespace/order mutation rejection, dedupe): PASS.
-- LinkedIn Event Subscription Contract (compound key, role denial, missing scope denial): PASS.
+- LinkedIn Event Subscription Contract (compound key, generic provider-key create/delete hooks, role denial, missing scope denial): PASS.
 - Full regression across X, Meta, Facebook, and Instagram connectors: PASS.
 
 ### 3. API OAuth, Asset Selection, IDOR, and Webhooks E2E
@@ -110,9 +112,19 @@ DATABASE_URL=postgres://xlrrank@127.0.0.1:5434/xlrrank_worker_e2e REDIS_URL=redi
 - LinkedIn webhook worker (receipt outbox, multi-scope connection resolution, sync dispatch, deduplication): PASS.
 - Social webhook platform isolation: PASS (LinkedIn organization ID `12345` and Facebook Page ID `12345`; LinkedIn receipt scheduled 1 LinkedIn sync and 0 Facebook syncs).
 - Provider subscription cleanup worker: PASS (processes pending cleanup job, invokes LinkedIn DELETE against Rest.li compound key, transitions to `PROVIDER_DELETED`).
-- Provider retention runtime: PASS (runtime startup executes sweep; two simulated worker actors race the same retention window and only one durable `provider_retention_sweep_claims` owner runs the purge).
+- Provider retention runtime: PASS (runtime startup registers and executes sweep; two simulated worker actors race the same retention window and only one durable `provider_retention_sweep_claims` owner runs the purge).
+- Provider-family retention mapping: PASS (synthetic provider family with two platform slugs is purged by one family policy).
 - Data retention (`purgeExpiredProviderData`): record-level LinkedIn categories, member comment on organization post purged after member social activity limit, authenticated organization post retained, interaction purge, operational webhook receipt purge, multi-tenant cross-scope isolation: PASS.
-- Canonical profile retention & asset minimization: PASS (`authenticated_member_profile` unlimited, `other_member_profile` 24h, `organization_profile` 8w, restricted fields redacted while preserving stable external ID, handle-history purge, scoped connection cache redaction, cross-scope multi-tenant lawful preservation, `provider_authorization_assets` decorative field minimization/purge, and one-year admin/reporting role expiry forcing `ACCESS_REQUIRED`/`DEGRADED`).
+- Canonical profile retention & asset minimization: PASS (`authenticated_member_profile` unlimited, `other_member_profile` 24h, `organization_profile` 8w, restricted fields redacted while preserving stable external ID, handle-history purge, scoped connection cache redaction, cross-scope multi-tenant lawful preservation, `provider_authorization_assets` decorative field minimization/purge, encrypted credential role scrubbing, and one-year admin/reporting role expiry forcing `ACCESS_REQUIRED`/`DEGRADED`).
+
+### 4a. Sprint 08 Closure Focused Regression Runs
+```text
+pnpm --filter @xlrrank/social-core test -- linkedin-connector.test.mjs
+pnpm --filter @xlrrank/queue test
+DATABASE_URL=postgres://xlrrank@127.0.0.1:5434/xlrrank_x_oauth_e2e X_OAUTH_E2E=1 NODE_ENV=test ENCRYPTION_MASTER_KEY=x-oauth-e2e-master-key-32-bytes-minimum node --test --test-name-pattern "LinkedIn notification subscriptions|Connection-specific disconnect|LinkedIn notification webhook deduplication" apps/api/test/platforms-oauth.e2e.mjs
+DATABASE_URL=postgres://xlrrank@127.0.0.1:5434/xlrrank_worker_e2e REDIS_URL=redis://127.0.0.1:6379 QUEUE_URL=redis://127.0.0.1:6379 WORKER_INGESTION_E2E=1 NODE_ENV=test ENCRYPTION_MASTER_KEY=worker-e2e-master-key-32-bytes-minimum node --test --test-name-pattern "Social webhook worker e2e: receipt platform boundary|Data retention: record-level|Data retention: provider-family|Provider subscription cleanup worker|Provider retention runtime|Data retention: canonical profile" apps/worker/test/worker-ingestion.e2e.mjs
+```
+**Result**: social-core 21 passed; queue 4 passed; API focused 5 passed; worker focused 6 passed. No blocking skips in focused closure coverage.
 
 ### 5. Monorepo Quality Matrix
 ```text

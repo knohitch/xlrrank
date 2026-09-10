@@ -1,4 +1,12 @@
+import type { Pool, PoolClient } from "pg";
+import {
+  decryptSecret,
+  encryptSecret,
+  providerAuthorizationAssetAssociatedData,
+} from "@xlrrank/shared";
 import { getPool } from "../client.js";
+
+type QueryExecutor = Pool | PoolClient;
 
 export interface ProviderRetentionPolicy {
   id: string;
@@ -10,13 +18,13 @@ export interface ProviderRetentionPolicy {
   description: string | null;
   metadata: Record<string, unknown> | null;
 }
-
 export interface PurgeRetentionOptions {
   providerFamily?: string;
   dataCategory?: string;
   now?: Date;
   dryRun?: boolean;
   scopeId?: string;
+  executor?: QueryExecutor;
 }
 
 export interface PurgeRetentionResult {
@@ -38,9 +46,9 @@ export interface PurgeRetentionResult {
 
 export async function loadProviderRetentionPolicies(
   providerFamily = "linkedin",
+  executor: QueryExecutor = getPool(),
 ): Promise<ProviderRetentionPolicy[]> {
-  const pool = getPool();
-  const res = await pool.query<{
+  const res = await executor.query<{
     id: string;
     provider_family: string;
     data_category: string;
@@ -75,12 +83,12 @@ export async function loadProviderRetentionPolicies(
 export async function purgeExpiredProviderData(
   options: PurgeRetentionOptions = {},
 ): Promise<PurgeRetentionResult> {
-  const pool = getPool();
+  const executor = options.executor ?? getPool();
   const providerFamily = options.providerFamily ?? "linkedin";
   const now = options.now ?? new Date();
   const dryRun = options.dryRun === true;
 
-  const policies = await loadProviderRetentionPolicies(providerFamily);
+  const policies = await loadProviderRetentionPolicies(providerFamily, executor);
   let accountObservationsPurged = 0;
   let accountProfilesSanitized = 0;
   let accountHandlesPurged = 0;
@@ -111,7 +119,7 @@ export async function purgeExpiredProviderData(
       if (options.scopeId) params.push(options.scopeId);
 
       if (dryRun) {
-        const countRes = await pool.query<{ count: string }>(
+        const countRes = await executor.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM social_content_observations sco
@@ -119,7 +127,7 @@ export async function purgeExpiredProviderData(
             JOIN platforms p ON p.id = sc.platform_id
             JOIN social_content_items sci ON sci.id = sco.content_item_id
             WHERE sco.observed_at < $1
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND COALESCE(sco.provider_data_category, sci.provider_data_category) = $3
               ${scopeFilter}
           `,
@@ -127,7 +135,7 @@ export async function purgeExpiredProviderData(
         );
         contentObservationsPurged += Number(countRes.rows[0]?.count ?? 0);
       } else {
-        const delObsRes = await pool.query<{ content_item_id: string }>(
+        const delObsRes = await executor.query<{ content_item_id: string }>(
           `
             DELETE FROM social_content_observations sco
             USING social_connections sc, platforms p
@@ -135,7 +143,7 @@ export async function purgeExpiredProviderData(
             WHERE sco.connection_id = sc.id
               AND sc.platform_id = p.id
               AND sci.id = sco.content_item_id
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND COALESCE(sco.provider_data_category, sci.provider_data_category) = $3
               AND sco.observed_at < $1
               ${scopeFilter}
@@ -148,7 +156,7 @@ export async function purgeExpiredProviderData(
         // Clean orphaned canonical items only if no other scope retains an observation
         const candidateItemIds = [...new Set(delObsRes.rows.map((r) => r.content_item_id))];
         if (candidateItemIds.length > 0) {
-          const orphanDel = await pool.query(
+          const orphanDel = await executor.query(
             `
               DELETE FROM social_content_items sci
               WHERE sci.id = ANY($1::uuid[])
@@ -170,7 +178,7 @@ export async function purgeExpiredProviderData(
       if (options.scopeId) params.push(options.scopeId);
 
       if (dryRun) {
-        const countRes = await pool.query<{ count: string }>(
+        const countRes = await executor.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM social_account_observations sao
@@ -178,7 +186,7 @@ export async function purgeExpiredProviderData(
             JOIN platforms p ON p.id = sc.platform_id
             JOIN social_external_accounts sea ON sea.id = sao.external_account_id
             WHERE sao.observed_at < $1
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND COALESCE(sao.provider_data_category, sea.provider_data_category) = $3
               ${scopeFilter}
           `,
@@ -186,7 +194,7 @@ export async function purgeExpiredProviderData(
         );
         accountObservationsPurged += Number(countRes.rows[0]?.count ?? 0);
       } else {
-        const delObsRes = await pool.query(
+        const delObsRes = await executor.query(
           `
             DELETE FROM social_account_observations sao
             USING social_connections sc, platforms p
@@ -194,7 +202,7 @@ export async function purgeExpiredProviderData(
             WHERE sao.connection_id = sc.id
               AND sc.platform_id = p.id
               AND sea.id = sao.external_account_id
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND COALESCE(sao.provider_data_category, sea.provider_data_category) = $3
               AND sao.observed_at < $1
               ${scopeFilter}
@@ -208,13 +216,13 @@ export async function purgeExpiredProviderData(
     {
       const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
       if (dryRun) {
-        const countRes = await pool.query<{ count: string }>(
+        const countRes = await executor.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM social_external_accounts sea
             JOIN platforms p ON p.id = sea.platform_id
             WHERE sea.last_observed_at < $1
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND sea.provider_data_category = $3
               AND NOT EXISTS (
                 SELECT 1
@@ -238,7 +246,7 @@ export async function purgeExpiredProviderData(
         );
         accountProfilesSanitized += Number(countRes.rows[0]?.count ?? 0);
       } else {
-        const sanitizeRes = await pool.query(
+        const sanitizeRes = await executor.query(
           `
             UPDATE social_external_accounts sea
             SET current_handle = NULL,
@@ -259,7 +267,7 @@ export async function purgeExpiredProviderData(
             FROM platforms p
             WHERE p.id = sea.platform_id
               AND sea.last_observed_at < $1
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND sea.provider_data_category = $3
               AND NOT EXISTS (
                 SELECT 1
@@ -276,14 +284,14 @@ export async function purgeExpiredProviderData(
     {
       const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
       if (dryRun) {
-        const countRes = await pool.query<{ count: string }>(
+        const countRes = await executor.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM social_account_handles sah
             JOIN social_external_accounts sea ON sea.id = sah.external_account_id
             JOIN platforms p ON p.id = sea.platform_id
             WHERE sah.last_seen_at < $1
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND COALESCE(sah.provider_data_category, sea.provider_data_category) = $3
               AND NOT EXISTS (
                 SELECT 1
@@ -297,14 +305,14 @@ export async function purgeExpiredProviderData(
         );
         accountHandlesPurged += Number(countRes.rows[0]?.count ?? 0);
       } else {
-        const delHandlesRes = await pool.query(
+        const delHandlesRes = await executor.query(
           `
             DELETE FROM social_account_handles sah
             USING social_external_accounts sea, platforms p
             WHERE sea.id = sah.external_account_id
               AND p.id = sea.platform_id
               AND sah.last_seen_at < $1
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND COALESCE(sah.provider_data_category, sea.provider_data_category) = $3
               AND NOT EXISTS (
                 SELECT 1
@@ -327,7 +335,7 @@ export async function purgeExpiredProviderData(
 
       const staleConnectionPredicate = `
         sc.status IN ('CONNECTED', 'DEGRADED', 'REAUTH_REQUIRED', 'DISCONNECTED')
-        AND p.slug = $2
+        AND COALESCE(p.provider_family, p.slug) = $2
         AND sea.provider_data_category = $3
         AND (
           sc.verified_handle IS NOT NULL
@@ -346,7 +354,7 @@ export async function purgeExpiredProviderData(
       `;
 
       if (dryRun) {
-        const countRes = await pool.query<{ count: string }>(
+        const countRes = await executor.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM social_connections sc
@@ -358,7 +366,7 @@ export async function purgeExpiredProviderData(
         );
         connectionProfileCachesSanitized += Number(countRes.rows[0]?.count ?? 0);
       } else {
-        const sanitizeRes = await pool.query(
+        const sanitizeRes = await executor.query(
           `
             UPDATE social_connections sc
             SET verified_handle = NULL,
@@ -386,7 +394,7 @@ export async function purgeExpiredProviderData(
     {
       const params: unknown[] = [cutoff, providerFamily, policy.dataCategory];
       if (dryRun) {
-        const countRes = await pool.query<{ count: string }>(
+        const countRes = await executor.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM provider_authorization_assets paa
@@ -406,7 +414,7 @@ export async function purgeExpiredProviderData(
         );
         authorizationAssetsSanitized += Number(countRes.rows[0]?.count ?? 0);
       } else {
-        const sanitizeRes = await pool.query(
+        const sanitizeRes = await executor.query(
           `
             UPDATE provider_authorization_assets paa
             SET name = NULL,
@@ -452,7 +460,7 @@ export async function purgeExpiredProviderData(
         )
       `;
       if (dryRun) {
-        const countRes = await pool.query<{ count: string }>(
+        const countRes = await executor.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM provider_authorization_assets paa
@@ -463,7 +471,15 @@ export async function purgeExpiredProviderData(
         );
         authorizationAssetRolesExpired += Number(countRes.rows[0]?.count ?? 0);
       } else {
-        const expiredAssetIds = await pool.query<{ id: string }>(
+        const expiredAssetIds = await executor.query<{
+          id: string;
+          provider_authorization_id: string;
+          scope_id: string;
+          provider_family: string;
+          platform_slug: string;
+          provider_asset_id: string;
+          credentials_encrypted: string | null;
+        }>(
           `
             UPDATE provider_authorization_assets paa
             SET metadata = jsonb_strip_nulls(
@@ -476,17 +492,20 @@ export async function purgeExpiredProviderData(
                       'accessState', 'ACCESS_REQUIRED'
                     )
                 )
-            FROM provider_authorizations pa
+            FROM provider_authorizations pa, platforms p
             WHERE pa.id = paa.provider_authorization_id
+              AND p.id = paa.platform_id
               AND ${staleRolesPredicate}
-            RETURNING paa.id
+            RETURNING paa.id, paa.provider_authorization_id, pa.scope_id, pa.provider_family,
+                      p.slug AS platform_slug, paa.provider_asset_id, paa.credentials_encrypted
           `,
           params,
         );
         authorizationAssetRolesExpired += expiredAssetIds.rowCount ?? 0;
         const ids = expiredAssetIds.rows.map((row) => row.id);
         if (ids.length > 0) {
-          await pool.query(
+          await sanitizeAuthorizationAssetCredentialRoles(executor, expiredAssetIds.rows);
+          await executor.query(
             `
               UPDATE social_connections sc
               SET status = CASE WHEN status = 'CONNECTED' THEN 'DEGRADED' ELSE status END,
@@ -520,7 +539,7 @@ export async function purgeExpiredProviderData(
       if (options.scopeId) params.push(options.scopeId);
 
       if (dryRun) {
-        const countRes = await pool.query<{ count: string }>(
+        const countRes = await executor.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM social_interaction_observations sio
@@ -528,7 +547,7 @@ export async function purgeExpiredProviderData(
             JOIN platforms p ON p.id = sc.platform_id
             JOIN social_interactions si ON si.id = sio.interaction_id
             WHERE si.occurred_at < $1
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND COALESCE(sio.provider_data_category, si.provider_data_category) = $3
               ${scopeFilter}
           `,
@@ -536,14 +555,14 @@ export async function purgeExpiredProviderData(
         );
         interactionsPurged += Number(countRes.rows[0]?.count ?? 0);
       } else {
-        const delObsRes = await pool.query<{ interaction_id: string }>(
+        const delObsRes = await executor.query<{ interaction_id: string }>(
           `
             DELETE FROM social_interaction_observations sio
             USING social_connections sc, platforms p, social_interactions si
             WHERE sio.connection_id = sc.id
               AND sc.platform_id = p.id
               AND si.id = sio.interaction_id
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND COALESCE(sio.provider_data_category, si.provider_data_category) = $3
               AND si.occurred_at < $1
               ${scopeFilter}
@@ -554,7 +573,7 @@ export async function purgeExpiredProviderData(
         interactionsPurged += delObsRes.rowCount ?? 0;
         const candidateInteractionIds = [...new Set(delObsRes.rows.map((row) => row.interaction_id))];
         if (candidateInteractionIds.length > 0) {
-          const orphanDel = await pool.query(
+          const orphanDel = await executor.query(
             `
               DELETE FROM social_interactions si
               WHERE si.id = ANY($1::uuid[])
@@ -576,14 +595,14 @@ export async function purgeExpiredProviderData(
       if (options.scopeId) params.push(options.scopeId);
 
       if (dryRun) {
-        const countRes = await pool.query<{ count: string }>(
+        const countRes = await executor.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM social_content_metrics scm
             JOIN social_connections sc ON sc.id = scm.connection_id
             JOIN platforms p ON p.id = sc.platform_id
             WHERE scm.collected_at < $1
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND scm.provider_data_category = $3
               ${scopeFilter}
           `,
@@ -591,13 +610,13 @@ export async function purgeExpiredProviderData(
         );
         metricsPurged += Number(countRes.rows[0]?.count ?? 0);
       } else {
-        const delMetricsRes = await pool.query(
+        const delMetricsRes = await executor.query(
           `
             DELETE FROM social_content_metrics scm
             USING social_connections sc, platforms p
             WHERE scm.connection_id = sc.id
               AND sc.platform_id = p.id
-              AND p.slug = $2
+              AND COALESCE(p.provider_family, p.slug) = $2
               AND scm.provider_data_category = $3
               AND scm.collected_at < $1
               ${scopeFilter}
@@ -610,7 +629,7 @@ export async function purgeExpiredProviderData(
 
     if (policy.dataCategory === "webhook_operational_receipt") {
       if (dryRun) {
-        const countRes = await pool.query<{ count: string }>(
+        const countRes = await executor.query<{ count: string }>(
           `
             SELECT count(*) AS count
             FROM webhook_receipts
@@ -622,7 +641,7 @@ export async function purgeExpiredProviderData(
         );
         receiptsPurged += Number(countRes.rows[0]?.count ?? 0);
       } else {
-        const delReceiptsRes = await pool.query(
+        const delReceiptsRes = await executor.query(
           `
             DELETE FROM webhook_receipts
             WHERE provider_family = $1
@@ -652,4 +671,51 @@ export async function purgeExpiredProviderData(
     receiptsPurged,
     dryRun,
   };
+}
+
+async function sanitizeAuthorizationAssetCredentialRoles(
+  executor: QueryExecutor,
+  assets: Array<{
+    id: string;
+    provider_authorization_id: string;
+    scope_id: string;
+    provider_family: string;
+    platform_slug: string;
+    provider_asset_id: string;
+    credentials_encrypted: string | null;
+  }>,
+): Promise<void> {
+  for (const asset of assets) {
+    if (!asset.credentials_encrypted) continue;
+    const aad = providerAuthorizationAssetAssociatedData({
+      authorizationAssetId: asset.id,
+      authorizationId: asset.provider_authorization_id,
+      scopeId: asset.scope_id,
+      platformSlug: asset.platform_slug,
+      providerAssetId: asset.provider_asset_id,
+    });
+    const parsed = JSON.parse(decryptSecret(asset.credentials_encrypted, undefined, aad)) as {
+      metadata?: Record<string, unknown>;
+      [key: string]: unknown;
+    };
+    const metadata = { ...(parsed.metadata ?? {}) };
+    delete metadata.roles;
+    delete metadata.primaryRole;
+    delete metadata.roleObservedAt;
+    delete metadata.roleProviderDataCategory;
+    parsed.metadata = {
+      ...metadata,
+      rolesRetentionExpiredAt: new Date().toISOString(),
+      accessState: "ACCESS_REQUIRED",
+    };
+    const encrypted = encryptSecret(JSON.stringify(parsed), undefined, aad);
+    await executor.query(
+      `
+        UPDATE provider_authorization_assets
+        SET credentials_encrypted = $2
+        WHERE id = $1
+      `,
+      [asset.id, encrypted],
+    );
+  }
 }

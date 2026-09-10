@@ -359,83 +359,90 @@ export async function createSocialWebhookProcessRequest(input: {
 export async function createProviderSubscriptionCleanupRequest(input: {
   subscriptionId: string;
 }): Promise<DurableProviderSubscriptionCleanupRequest> {
-  const env = getEnv();
   const pool = getPool();
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const subscription = await client.query<{ id: string }>(
-      "SELECT id FROM provider_event_subscriptions WHERE id = $1 FOR UPDATE",
-      [input.subscriptionId],
-    );
-    if (!subscription.rows[0]) throw new Error("Provider subscription not found");
-
-    const idempotencyKey = `provider-subscription-cleanup:${input.subscriptionId}`;
-    const active = await client.query<{ id: string; status: JobStatus }>(
-      `
-        SELECT id, status
-        FROM jobs
-        WHERE type = $1
-          AND idempotency_key = $2
-          AND status IN (${activeStatusList()})
-        ORDER BY created_at ASC
-        LIMIT 1
-      `,
-      [JOB_TYPES.providerSubscriptionCleanup, idempotencyKey],
-    );
-    if (active.rows[0]) {
-      await client.query("COMMIT");
-      return {
-        jobId: active.rows[0].id,
-        status: active.rows[0].status,
-        subscriptionId: input.subscriptionId,
-        accepted: false,
-        duplicate: true,
-      };
-    }
-
-    const jobId = randomUUID();
-    const payload: ProviderSubscriptionCleanupPayload = {
-      version: PROVIDER_SUBSCRIPTION_CLEANUP_PAYLOAD_VERSION,
-      jobRequestId: jobId,
-      subscriptionId: input.subscriptionId,
-    };
-    await client.query(
-      `
-        INSERT INTO jobs (
-          id, type, queue_name, status, payload, payload_version,
-          idempotency_key, max_attempts
-        )
-        VALUES ($1, $2, $3, 'PENDING_DISPATCH', $4::jsonb, $5, $6, $7)
-      `,
-      [
-        jobId,
-        JOB_TYPES.providerSubscriptionCleanup,
-        QUEUE_NAMES.ingestion,
-        JSON.stringify(payload),
-        PROVIDER_SUBSCRIPTION_CLEANUP_PAYLOAD_VERSION,
-        idempotencyKey,
-        env.SOCIAL_SYNC_MAX_ATTEMPTS,
-      ],
-    );
-    await client.query(
-      "INSERT INTO job_outbox (job_id, queue_name, job_type, payload) VALUES ($1, $2, $3, $4::jsonb)",
-      [jobId, QUEUE_NAMES.ingestion, JOB_TYPES.providerSubscriptionCleanup, JSON.stringify(payload)],
-    );
+    const result = await createProviderSubscriptionCleanupRequestTx(client, input);
     await client.query("COMMIT");
-    return {
-      jobId,
-      status: "PENDING_DISPATCH",
-      subscriptionId: input.subscriptionId,
-      accepted: true,
-      duplicate: false,
-    };
+    return result;
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
   } finally {
     client.release();
   }
+}
+
+export async function createProviderSubscriptionCleanupRequestTx(
+  client: PoolClient,
+  input: { subscriptionId: string },
+): Promise<DurableProviderSubscriptionCleanupRequest> {
+  const env = getEnv();
+  const subscription = await client.query<{ id: string }>(
+    "SELECT id FROM provider_event_subscriptions WHERE id = $1 FOR UPDATE",
+    [input.subscriptionId],
+  );
+  if (!subscription.rows[0]) throw new Error("Provider subscription not found");
+
+  const idempotencyKey = `provider-subscription-cleanup:${input.subscriptionId}`;
+  const active = await client.query<{ id: string; status: JobStatus }>(
+    `
+      SELECT id, status
+      FROM jobs
+      WHERE type = $1
+        AND idempotency_key = $2
+        AND status IN (${activeStatusList()})
+      ORDER BY created_at ASC
+      LIMIT 1
+    `,
+    [JOB_TYPES.providerSubscriptionCleanup, idempotencyKey],
+  );
+  if (active.rows[0]) {
+    return {
+      jobId: active.rows[0].id,
+      status: active.rows[0].status,
+      subscriptionId: input.subscriptionId,
+      accepted: false,
+      duplicate: true,
+    };
+  }
+
+  const jobId = randomUUID();
+  const payload: ProviderSubscriptionCleanupPayload = {
+    version: PROVIDER_SUBSCRIPTION_CLEANUP_PAYLOAD_VERSION,
+    jobRequestId: jobId,
+    subscriptionId: input.subscriptionId,
+  };
+  await client.query(
+    `
+      INSERT INTO jobs (
+        id, type, queue_name, status, payload, payload_version,
+        idempotency_key, max_attempts
+      )
+      VALUES ($1, $2, $3, 'PENDING_DISPATCH', $4::jsonb, $5, $6, $7)
+    `,
+    [
+      jobId,
+      JOB_TYPES.providerSubscriptionCleanup,
+      QUEUE_NAMES.ingestion,
+      JSON.stringify(payload),
+      PROVIDER_SUBSCRIPTION_CLEANUP_PAYLOAD_VERSION,
+      idempotencyKey,
+      env.SOCIAL_SYNC_MAX_ATTEMPTS,
+    ],
+  );
+  await client.query(
+    "INSERT INTO job_outbox (job_id, queue_name, job_type, payload) VALUES ($1, $2, $3, $4::jsonb)",
+    [jobId, QUEUE_NAMES.ingestion, JOB_TYPES.providerSubscriptionCleanup, JSON.stringify(payload)],
+  );
+  return {
+    jobId,
+    status: "PENDING_DISPATCH",
+    subscriptionId: input.subscriptionId,
+    accepted: true,
+    duplicate: false,
+  };
 }
 
 export async function claimPendingOutboxEntries(input: {

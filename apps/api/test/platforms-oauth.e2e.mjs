@@ -1164,7 +1164,7 @@ test(
         `
           SELECT provider_authorization_id, provider_authorization_asset_id, social_connection_id,
                  provider_user_id, provider_asset_id, developer_application_urn, member_urn,
-                 entity_urn, event_type, provider_status, metadata
+                 entity_urn, provider_key, event_type, provider_status, metadata
           FROM provider_event_subscriptions
           WHERE social_connection_id = $1
         `,
@@ -1178,6 +1178,12 @@ test(
     assert.equal(activeSub.developer_application_urn, "urn:li:developerApplication:999");
     assert.equal(activeSub.member_urn, "urn:li:person:li-member-sub-123");
     assert.equal(activeSub.entity_urn, "urn:li:organization:12345");
+    assert.deepEqual(activeSub.provider_key, {
+      applicationKey: "urn:li:developerApplication:999",
+      actorKey: "urn:li:person:li-member-sub-123",
+      entityKey: "urn:li:organization:12345",
+      eventType: "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS",
+    });
     assert.equal(activeSub.event_type, "ORGANIZATION_SOCIAL_ACTION_NOTIFICATIONS");
     assert.equal(activeSub.provider_status, "ACTIVE");
     assert.equal(JSON.stringify(activeSub.metadata).includes("synthetic-linkedin-access"), false);
