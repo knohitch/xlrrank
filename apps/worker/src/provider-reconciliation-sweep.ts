@@ -40,7 +40,7 @@ export async function runProviderReconciliationSweepOnce(
   const env = getEnv();
   const sweepTimeoutMs = env.PROVIDER_RECONCILIATION_SWEEP_TIMEOUT_MS;
   const sweepSignal = AbortSignal.timeout(sweepTimeoutMs);
-  const maxBatchesPerRun = Number(process.env.PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN) || 5;
+  const maxBatchesPerRun = env.PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN;
 
   ensureWorkerConnectors();
 
@@ -69,7 +69,13 @@ export async function runProviderReconciliationSweepOnce(
     authorsScrubbed: 0,
   };
 
+  let globalBatchesRun = 0;
+
   for (const connection of connectionsRes.rows) {
+    if (globalBatchesRun >= maxBatchesPerRun) {
+      break;
+    }
+
     if (sweepSignal.aborted) {
       logger.warn("Reconciliation sweep timed out; skipping remaining connections");
       break;
@@ -122,15 +128,18 @@ export async function runProviderReconciliationSweepOnce(
       run.connectionsProcessed += 1;
 
       for (const entityType of RECONCILIATION_ENTITY_TYPES) {
+        if (globalBatchesRun >= maxBatchesPerRun) {
+          break;
+        }
+
         if (sweepSignal.aborted) {
           logger.warn("Reconciliation sweep timed out; stopping entity type loop");
           break;
         }
 
         let hasMore = true;
-        let batchesRun = 0;
 
-        while (hasMore && batchesRun < maxBatchesPerRun) {
+        while (hasMore && globalBatchesRun < maxBatchesPerRun) {
           if (sweepSignal.aborted) {
             logger.warn("Reconciliation sweep timed out; stopping batch processing");
             break;
@@ -172,7 +181,7 @@ export async function runProviderReconciliationSweepOnce(
             break;
           }
 
-          batchesRun += 1;
+          globalBatchesRun += 1;
 
           // Step 2: Network call OUTSIDE of any database transaction
           const items: ReconcileResourceItem[] = claimResult.candidates.map((c) => ({

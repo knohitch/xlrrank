@@ -478,8 +478,10 @@ test("Reddit connector reconcileResources queries /api/info for Links/Comments a
 
     // Accounts: /user/{username}/about.json
     assert.equal(statuses.get("t2_user1")?.state, "EXISTS");
-    assert.equal(statuses.get("t2_suspended")?.state, "ACCOUNT_DELETED");
-    assert.equal(statuses.get("t2_deleted")?.state, "ACCOUNT_DELETED");
+    assert.equal(statuses.get("t2_suspended")?.state, "UNKNOWN");
+    assert.equal(statuses.get("t2_suspended")?.details?.reason, "ACCOUNT_SUSPENDED");
+    assert.equal(statuses.get("t2_deleted")?.state, "UNKNOWN");
+    assert.equal(statuses.get("t2_deleted")?.details?.reason, "ACCOUNT_NOT_FOUND_404");
     assert.equal(statuses.get("t2_temporary")?.state, "UNKNOWN");
     assert.equal(statuses.get("t2_no_handle")?.state, "UNKNOWN");
   } finally {

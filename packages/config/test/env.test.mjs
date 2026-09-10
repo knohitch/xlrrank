@@ -50,3 +50,18 @@ test("smtp transport requires delivery configuration", async () => {
   });
   assert.equal(valid.success, true);
 });
+
+test("env schema validates PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN", async () => {
+  const { envSchema } = await import("../dist/env.js");
+  const defaults = envSchema.parse({});
+  assert.equal(defaults.PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN, 5);
+
+  const custom = envSchema.parse({ PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: "12" });
+  assert.equal(custom.PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN, 12);
+
+  const invalidZero = envSchema.safeParse({ PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: "0" });
+  assert.equal(invalidZero.success, false);
+
+  const invalidNegative = envSchema.safeParse({ PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: "-3" });
+  assert.equal(invalidNegative.success, false);
+});

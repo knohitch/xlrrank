@@ -6,6 +6,7 @@ import {
   ConnectorConfigurationError,
   MalformedProviderResponseError,
   PermanentProviderError,
+  RateLimitError,
 } from "../connectors/errors.js";
 import type {
   AccountMetrics,
@@ -627,13 +628,28 @@ export class RedditConnector extends BaseSocialConnector {
           undefined,
           context.signal,
         );
-        if (response.rateLimit) latestRateLimit = response.rateLimit;
+        if (response.rateLimit) {
+          latestRateLimit = response.rateLimit;
+          if (response.rateLimit.remaining === 0) {
+            const currentIndex = accountItems.indexOf(item);
+            for (const remaining of accountItems.slice(currentIndex + 1)) {
+              statuses.push({ externalId: remaining.externalId, state: "UNKNOWN", details: { reason: "DEFERRED_RATE_LIMIT" } });
+            }
+            break;
+          }
+        }
 
         const userData = response.body.data;
-        if (!userData || userData.name === "[deleted]" || userData.is_suspended === true) {
+        if (!userData || userData.name === "[deleted]") {
           statuses.push({
             externalId: item.externalId,
             state: "ACCOUNT_DELETED",
+          });
+        } else if (userData.is_suspended === true) {
+          statuses.push({
+            externalId: item.externalId,
+            state: "UNKNOWN",
+            details: { reason: "ACCOUNT_SUSPENDED" },
           });
         } else if (userData.name) {
           statuses.push({
@@ -648,13 +664,21 @@ export class RedditConnector extends BaseSocialConnector {
           });
         }
       } catch (err) {
-        if (
+        if (err instanceof RateLimitError) {
+          const currentIndex = accountItems.indexOf(item);
+          for (const remaining of accountItems.slice(currentIndex + 1)) {
+            statuses.push({ externalId: remaining.externalId, state: "UNKNOWN", details: { reason: "DEFERRED_RATE_LIMIT" } });
+          }
+          latestRateLimit = { remaining: 0, retryAfter: err.retryAfterSeconds };
+          break;
+        } else if (
           err instanceof PermanentProviderError &&
           (/status 404/i.test(err.message) || /not found/i.test(err.message))
         ) {
           statuses.push({
             externalId: item.externalId,
-            state: "ACCOUNT_DELETED",
+            state: "UNKNOWN",
+            details: { reason: "ACCOUNT_NOT_FOUND_404" },
           });
         } else {
           statuses.push({

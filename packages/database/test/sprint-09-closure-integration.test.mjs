@@ -281,10 +281,15 @@ test("Integration: PostgreSQL connection-scoped bounded data deletion without sc
     assert.ok(creationResult.deletionRequestId);
     assert.equal(creationResult.providerFamily, "reddit");
 
-    // 2. Execute deletion with bounded batchSize: 1
-    const executionResult = await executeProviderDataDeletion(creationResult.deletionRequestId, {
+    // 2. Execute deletion with bounded batchSize: 1 until complete
+    let executionResult = await executeProviderDataDeletion(creationResult.deletionRequestId, {
       batchSize: 1,
     });
+    while (executionResult.status === "IN_PROGRESS") {
+      executionResult = await executeProviderDataDeletion(creationResult.deletionRequestId, {
+        batchSize: 1,
+      });
+    }
 
     assert.equal(executionResult.status, "COMPLETED");
     assert.ok(executionResult.contentObservationsPurged >= 2, "Both Reddit content observations should be purged");

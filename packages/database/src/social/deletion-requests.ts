@@ -61,7 +61,7 @@ export interface CreateProviderDataDeletionResult {
 export interface ProviderDataDeletionExecutionResult {
   deletionRequestId: string;
   providerFamily: string;
-  status: "COMPLETED" | "FAILED";
+  status: "COMPLETED" | "FAILED" | "IN_PROGRESS";
   contentObservationsPurged: number;
   canonicalItemsPurged: number;
   interactionsPurged: number;
@@ -137,6 +137,13 @@ export async function createProviderDataDeletionRequest(
     if (ownsClient) await client.query("BEGIN");
 
     const requestedAt = input.requestedAt ?? new Date();
+
+    if (!input.scopeId && !input.connectionId && !input.providerAuthorizationId) {
+      if (input.metadata?.privilegedProviderDeletion !== true) {
+        throw new Error("Missing scope identifiers. For a provider-family-wide deletion, you must explicitly set metadata.privilegedProviderDeletion = true");
+      }
+    }
+
     const deadlineAt =
       input.deadlineAt ??
       (await calculateProviderDataDeletionDeadline(input.providerFamily, requestedAt, client));
@@ -260,6 +267,7 @@ export async function createProviderDataDeletionRequest(
 export interface ExecuteProviderDataDeletionOptions {
   executor?: QueryExecutor;
   batchSize?: number;
+  maxBatchesPerInvocation?: number;
 }
 
 export async function executeProviderDataDeletion(
@@ -270,6 +278,8 @@ export async function executeProviderDataDeletion(
   const client = (options.executor ?? (await pool.connect())) as PoolClient;
   const ownsClient = !options.executor;
   const batchSize = Math.max(1, options.batchSize ?? 100);
+  const maxBatches = options.maxBatchesPerInvocation ?? 10;
+  let batchesUsed = 0;
 
   try {
     if (ownsClient) await client.query("BEGIN");
@@ -279,12 +289,13 @@ export async function executeProviderDataDeletion(
       provider_family: string;
       scope_id: string | null;
       connection_id: string | null;
+      provider_authorization_id: string | null;
       status: string;
       completion_evidence: Record<string, unknown> | null;
       metadata: Record<string, unknown> | null;
     }>(
       `
-        SELECT id, provider_family, scope_id, connection_id, status, completion_evidence, metadata
+        SELECT id, provider_family, scope_id, connection_id, provider_authorization_id, status, completion_evidence, metadata
         FROM provider_data_deletion_requests
         WHERE id = $1
         FOR UPDATE
@@ -326,6 +337,39 @@ export async function executeProviderDataDeletion(
     let scopeId = request.scope_id;
     const connectionId = request.connection_id;
 
+    if (request.provider_authorization_id) {
+      const authRes = await client.query<{
+        scope_id: string;
+        provider_family: string;
+        provider_user_id: string;
+      }>(
+        "SELECT scope_id, provider_family, provider_user_id FROM provider_authorizations WHERE id = $1 LIMIT 1",
+        [request.provider_authorization_id],
+      );
+      const auth = authRes.rows[0];
+      if (!auth) {
+        throw new Error(`Provider authorization '${request.provider_authorization_id}' not found`);
+      }
+      if (auth.provider_family !== request.provider_family) {
+        throw new Error(`Provider family mismatch for authorization '${request.provider_authorization_id}'`);
+      }
+      if (request.scope_id && request.scope_id !== auth.scope_id) {
+        throw new Error(`Scope mismatch for authorization '${request.provider_authorization_id}'`);
+      }
+      if (request.connection_id) {
+        const connScopeRes = await client.query<{ scope_id: string }>(
+          "SELECT scope_id FROM social_connections WHERE id = $1 LIMIT 1",
+          [request.connection_id],
+        );
+        if (connScopeRes.rows[0]?.scope_id !== auth.scope_id) {
+          throw new Error(`Connection scope mismatch for authorization '${request.provider_authorization_id}'`);
+        }
+      }
+      if (!scopeId) {
+        scopeId = auth.scope_id;
+      }
+    }
+
     if (connectionId && !scopeId) {
       const connScopeRes = await client.query<{ scope_id: string }>(
         "SELECT scope_id FROM social_connections WHERE id = $1 LIMIT 1",
@@ -354,6 +398,9 @@ export async function executeProviderDataDeletion(
       | {
           phase?: Phase | "COMPLETED";
           counts?: Record<string, number>;
+          targetContentItemIds?: string[];
+          targetInteractionIds?: string[];
+          targetAccountIds?: string[];
         }
       | undefined;
 
@@ -367,6 +414,20 @@ export async function executeProviderDataDeletion(
       accountHandlesPurged: savedProgress?.counts?.accountHandlesPurged ?? 0,
       contentMetricsPurged: savedProgress?.counts?.contentMetricsPurged ?? 0,
     };
+
+    const targetContentItemIds = new Set<string>(savedProgress?.targetContentItemIds ?? []);
+    const targetInteractionIds = new Set<string>(savedProgress?.targetInteractionIds ?? []);
+    const targetAccountIds = new Set<string>(savedProgress?.targetAccountIds ?? []);
+
+    if ((connectionId || scopeId) && targetAccountIds.size === 0) {
+      const connAcctRes = await client.query<{ external_account_id: string }>(
+        `SELECT external_account_id FROM social_connections WHERE ($1::uuid IS NULL OR id = $1) AND ($2::uuid IS NULL OR scope_id = $2) AND external_account_id IS NOT NULL`,
+        [connectionId ?? null, scopeId ?? null],
+      );
+      for (const row of connAcctRes.rows) {
+        if (row.external_account_id) targetAccountIds.add(row.external_account_id);
+      }
+    }
 
     let startPhaseIndex = 0;
     if (savedProgress?.phase) {
@@ -382,6 +443,9 @@ export async function executeProviderDataDeletion(
       currentMetadata.deletionProgress = {
         phase: nextPhase,
         counts: { ...counts },
+        targetContentItemIds: Array.from(targetContentItemIds),
+        targetInteractionIds: Array.from(targetInteractionIds),
+        targetAccountIds: Array.from(targetAccountIds),
       };
       await client.query(
         "UPDATE provider_data_deletion_requests SET metadata = $2::jsonb, updated_at = now() WHERE id = $1",
@@ -391,7 +455,9 @@ export async function executeProviderDataDeletion(
 
     // Phase 1: CONTENT_OBSERVATIONS
     if (startPhaseIndex <= 0) {
-      while (true) {
+      let phaseComplete = false;
+      while (batchesUsed < maxBatches) {
+        batchesUsed++;
         const params: unknown[] = [providerFamily];
         let where = "COALESCE(p.provider_family, p.slug) = $1";
         if (scopeId) {
@@ -405,7 +471,7 @@ export async function executeProviderDataDeletion(
         params.push(batchSize);
         const limitParam = `$${params.length}`;
 
-        const delRes = await client.query(
+        const delRes = await client.query<{ content_item_id: string }>(
           `
             DELETE FROM social_content_observations
             WHERE id IN (
@@ -416,55 +482,84 @@ export async function executeProviderDataDeletion(
               WHERE ${where}
               LIMIT ${limitParam}
             )
+            RETURNING content_item_id
           `,
           params,
         );
+        for (const row of delRes.rows) {
+          if (row.content_item_id) targetContentItemIds.add(row.content_item_id);
+        }
         const deleted = delRes.rowCount ?? 0;
         counts.contentObservationsPurged += deleted;
-        if (deleted < batchSize) break;
+        if (deleted < batchSize) {
+          phaseComplete = true;
+          break;
+        }
+      }
+      if (!phaseComplete) {
+        await checkpoint("CONTENT_OBSERVATIONS");
+        if (ownsClient) await client.query("COMMIT");
+        return { deletionRequestId, providerFamily, status: "IN_PROGRESS", ...counts, evidence: {} };
       }
       await checkpoint("CANONICAL_ITEMS");
     }
 
     // Phase 2: CANONICAL_ITEMS (Orphaned canonical items only if NO observation from any provider remains)
     if (startPhaseIndex <= 1) {
-      while (true) {
-        const params: unknown[] = [providerFamily];
-        let where = "COALESCE(p.provider_family, p.slug) = $1";
-        if (scopeId) {
-          params.push(scopeId);
-          where += ` AND (sci.scope_id = $${params.length} OR sci.scope_id IS NULL)`;
-        }
-        params.push(batchSize);
-        const limitParam = `$${params.length}`;
+      let phaseComplete = false;
+      if ((scopeId || connectionId) && targetContentItemIds.size === 0) {
+        phaseComplete = true;
+      } else {
+        while (batchesUsed < maxBatches) {
+          batchesUsed++;
+          const targetIdsArray = Array.from(targetContentItemIds);
+          const params: unknown[] = [providerFamily];
+          let where = "COALESCE(p.provider_family, p.slug) = $1";
+          if (scopeId || connectionId) {
+            params.push(targetIdsArray);
+            where += ` AND sci.id = ANY($${params.length}::uuid[])`;
+          }
+          params.push(batchSize);
+          const limitParam = `$${params.length}`;
 
-        const delRes = await client.query(
-          `
-            DELETE FROM social_content_items
-            WHERE id IN (
-              SELECT sci.id
-              FROM social_content_items sci
-              JOIN platforms p ON sci.platform_id = p.id
-              WHERE ${where}
-                AND NOT EXISTS (
-                  SELECT 1 FROM social_content_observations sco
-                  WHERE sco.content_item_id = sci.id
-                )
-              LIMIT ${limitParam}
-            )
-          `,
-          params,
-        );
-        const deleted = delRes.rowCount ?? 0;
-        counts.canonicalItemsPurged += deleted;
-        if (deleted < batchSize) break;
+          const delRes = await client.query(
+            `
+              DELETE FROM social_content_items
+              WHERE id IN (
+                SELECT sci.id
+                FROM social_content_items sci
+                JOIN platforms p ON sci.platform_id = p.id
+                WHERE ${where}
+                  AND NOT EXISTS (
+                    SELECT 1 FROM social_content_observations sco
+                    WHERE sco.content_item_id = sci.id
+                  )
+                LIMIT ${limitParam}
+              )
+            `,
+            params,
+          );
+          const deleted = delRes.rowCount ?? 0;
+          counts.canonicalItemsPurged += deleted;
+          if (deleted < batchSize) {
+            phaseComplete = true;
+            break;
+          }
+        }
+      }
+      if (!phaseComplete) {
+        await checkpoint("CANONICAL_ITEMS");
+        if (ownsClient) await client.query("COMMIT");
+        return { deletionRequestId, providerFamily, status: "IN_PROGRESS", ...counts, evidence: {} };
       }
       await checkpoint("INTERACTION_OBSERVATIONS");
     }
 
     // Phase 3: INTERACTION_OBSERVATIONS
     if (startPhaseIndex <= 2) {
-      while (true) {
+      let phaseComplete = false;
+      while (batchesUsed < maxBatches) {
+        batchesUsed++;
         const params: unknown[] = [providerFamily];
         let where = "COALESCE(p.provider_family, p.slug) = $1";
         if (scopeId) {
@@ -478,7 +573,7 @@ export async function executeProviderDataDeletion(
         params.push(batchSize);
         const limitParam = `$${params.length}`;
 
-        const delRes = await client.query(
+        const delRes = await client.query<{ interaction_id: string }>(
           `
             DELETE FROM social_interaction_observations
             WHERE id IN (
@@ -489,55 +584,84 @@ export async function executeProviderDataDeletion(
               WHERE ${where}
               LIMIT ${limitParam}
             )
+            RETURNING interaction_id
           `,
           params,
         );
+        for (const row of delRes.rows) {
+          if (row.interaction_id) targetInteractionIds.add(row.interaction_id);
+        }
         const deleted = delRes.rowCount ?? 0;
         counts.interactionsPurged += deleted;
-        if (deleted < batchSize) break;
+        if (deleted < batchSize) {
+          phaseComplete = true;
+          break;
+        }
+      }
+      if (!phaseComplete) {
+        await checkpoint("INTERACTION_OBSERVATIONS");
+        if (ownsClient) await client.query("COMMIT");
+        return { deletionRequestId, providerFamily, status: "IN_PROGRESS", ...counts, evidence: {} };
       }
       await checkpoint("CANONICAL_INTERACTIONS");
     }
 
     // Phase 4: CANONICAL_INTERACTIONS
     if (startPhaseIndex <= 3) {
-      while (true) {
-        const params: unknown[] = [providerFamily];
-        let where = "COALESCE(p.provider_family, p.slug) = $1";
-        if (scopeId) {
-          params.push(scopeId);
-          where += ` AND (si.scope_id = $${params.length} OR si.scope_id IS NULL)`;
-        }
-        params.push(batchSize);
-        const limitParam = `$${params.length}`;
+      let phaseComplete = false;
+      if ((scopeId || connectionId) && targetInteractionIds.size === 0) {
+        phaseComplete = true;
+      } else {
+        while (batchesUsed < maxBatches) {
+          batchesUsed++;
+          const targetIdsArray = Array.from(targetInteractionIds);
+          const params: unknown[] = [providerFamily];
+          let where = "COALESCE(p.provider_family, p.slug) = $1";
+          if (scopeId || connectionId) {
+            params.push(targetIdsArray);
+            where += ` AND si.id = ANY($${params.length}::uuid[])`;
+          }
+          params.push(batchSize);
+          const limitParam = `$${params.length}`;
 
-        const delRes = await client.query(
-          `
-            DELETE FROM social_interactions
-            WHERE id IN (
-              SELECT si.id
-              FROM social_interactions si
-              JOIN platforms p ON si.platform_id = p.id
-              WHERE ${where}
-                AND NOT EXISTS (
-                  SELECT 1 FROM social_interaction_observations sio
-                  WHERE sio.interaction_id = si.id
-                )
-              LIMIT ${limitParam}
-            )
-          `,
-          params,
-        );
-        const deleted = delRes.rowCount ?? 0;
-        counts.canonicalInteractionsPurged += deleted;
-        if (deleted < batchSize) break;
+          const delRes = await client.query(
+            `
+              DELETE FROM social_interactions
+              WHERE id IN (
+                SELECT si.id
+                FROM social_interactions si
+                JOIN platforms p ON si.platform_id = p.id
+                WHERE ${where}
+                  AND NOT EXISTS (
+                    SELECT 1 FROM social_interaction_observations sio
+                    WHERE sio.interaction_id = si.id
+                  )
+                LIMIT ${limitParam}
+              )
+            `,
+            params,
+          );
+          const deleted = delRes.rowCount ?? 0;
+          counts.canonicalInteractionsPurged += deleted;
+          if (deleted < batchSize) {
+            phaseComplete = true;
+            break;
+          }
+        }
+      }
+      if (!phaseComplete) {
+        await checkpoint("CANONICAL_INTERACTIONS");
+        if (ownsClient) await client.query("COMMIT");
+        return { deletionRequestId, providerFamily, status: "IN_PROGRESS", ...counts, evidence: {} };
       }
       await checkpoint("ACCOUNT_OBSERVATIONS");
     }
 
     // Phase 5: ACCOUNT_OBSERVATIONS
     if (startPhaseIndex <= 4) {
-      while (true) {
+      let phaseComplete = false;
+      while (batchesUsed < maxBatches) {
+        batchesUsed++;
         const params: unknown[] = [providerFamily];
         let where = "COALESCE(p.provider_family, p.slug) = $1";
         if (scopeId) {
@@ -551,7 +675,7 @@ export async function executeProviderDataDeletion(
         params.push(batchSize);
         const limitParam = `$${params.length}`;
 
-        const delRes = await client.query(
+        const delRes = await client.query<{ external_account_id: string }>(
           `
             DELETE FROM social_account_observations
             WHERE id IN (
@@ -562,90 +686,149 @@ export async function executeProviderDataDeletion(
               WHERE ${where}
               LIMIT ${limitParam}
             )
+            RETURNING external_account_id
           `,
           params,
         );
+        for (const row of delRes.rows) {
+          if (row.external_account_id) targetAccountIds.add(row.external_account_id);
+        }
         const deleted = delRes.rowCount ?? 0;
         counts.accountObservationsPurged += deleted;
-        if (deleted < batchSize) break;
+        if (deleted < batchSize) {
+          phaseComplete = true;
+          break;
+        }
+      }
+      if (!phaseComplete) {
+        await checkpoint("ACCOUNT_OBSERVATIONS");
+        if (ownsClient) await client.query("COMMIT");
+        return { deletionRequestId, providerFamily, status: "IN_PROGRESS", ...counts, evidence: {} };
       }
       await checkpoint("ACCOUNTS");
     }
 
     // Phase 6: ACCOUNTS (Sanitize orphaned external accounts)
     if (startPhaseIndex <= 5) {
-      while (true) {
-        const sanitizeRes = await client.query(
-          `
-            UPDATE social_external_accounts sea
-            SET current_handle = NULL,
-                display_name = NULL,
-                profile_url = NULL,
-                profile_image_url = NULL,
-                bio = NULL,
-                location = NULL,
-                website = NULL,
-                follower_count = NULL,
-                following_count = NULL,
-                metadata = (COALESCE(sea.metadata, '{}'::jsonb)) || jsonb_build_object(
-                  'deletionRequestPurgedAt', now(),
-                  'deletionRequestId', $2::text,
-                  'providerFamily', $1::text
-                ),
-                updated_at = now()
-            WHERE sea.id IN (
-              SELECT sea2.id
-              FROM social_external_accounts sea2
-              JOIN platforms p ON p.id = sea2.platform_id
-              WHERE COALESCE(p.provider_family, p.slug) = $1
-                AND (sea2.metadata IS NULL OR NOT (sea2.metadata ? 'deletionRequestPurgedAt'))
-                AND NOT EXISTS (
-                  SELECT 1 FROM social_account_observations sao
-                  WHERE sao.external_account_id = sea2.id
-                )
-              LIMIT $3
-            )
-          `,
-          [providerFamily, deletionRequestId, batchSize],
-        );
-        const sanitized = sanitizeRes.rowCount ?? 0;
-        counts.accountsSanitized += sanitized;
-        if (sanitized < batchSize) break;
+      let phaseComplete = false;
+      if ((scopeId || connectionId) && targetAccountIds.size === 0) {
+        phaseComplete = true;
+      } else {
+        while (batchesUsed < maxBatches) {
+          batchesUsed++;
+          const targetIdsArray = Array.from(targetAccountIds);
+          const params: unknown[] = [providerFamily, deletionRequestId, batchSize];
+          let extraWhere = "";
+          if (scopeId || connectionId) {
+            params.push(targetIdsArray);
+            extraWhere += ` AND sea2.id = ANY($${params.length}::uuid[])`;
+          }
+          const sanitizeRes = await client.query(
+            `
+              UPDATE social_external_accounts sea
+              SET current_handle = NULL,
+                  display_name = NULL,
+                  profile_url = NULL,
+                  profile_image_url = NULL,
+                  bio = NULL,
+                  location = NULL,
+                  website = NULL,
+                  follower_count = NULL,
+                  following_count = NULL,
+                  metadata = (COALESCE(sea.metadata, '{}'::jsonb)) || jsonb_build_object(
+                    'deletionRequestPurgedAt', now(),
+                    'deletionRequestId', $2::text,
+                    'providerFamily', $1::text
+                  ),
+                  updated_at = now()
+              WHERE sea.id IN (
+                SELECT sea2.id
+                FROM social_external_accounts sea2
+                JOIN platforms p ON p.id = sea2.platform_id
+                WHERE COALESCE(p.provider_family, p.slug) = $1
+                  AND (sea2.metadata IS NULL OR NOT (sea2.metadata ? 'deletionRequestPurgedAt'))
+                  AND NOT EXISTS (
+                    SELECT 1 FROM social_account_observations sao
+                    WHERE sao.external_account_id = sea2.id
+                  )${extraWhere}
+                LIMIT $3
+              )
+            `,
+            params,
+          );
+          const sanitized = sanitizeRes.rowCount ?? 0;
+          counts.accountsSanitized += sanitized;
+          if (sanitized < batchSize) {
+            phaseComplete = true;
+            break;
+          }
+        }
+      }
+      if (!phaseComplete) {
+        await checkpoint("ACCOUNTS");
+        if (ownsClient) await client.query("COMMIT");
+        return { deletionRequestId, providerFamily, status: "IN_PROGRESS", ...counts, evidence: {} };
       }
       await checkpoint("ACCOUNT_HANDLES");
     }
 
     // Phase 7: ACCOUNT_HANDLES (Purge account handles for orphaned accounts)
     if (startPhaseIndex <= 6) {
-      while (true) {
-        const handleDelRes = await client.query(
-          `
-            DELETE FROM social_account_handles
-            WHERE id IN (
-              SELECT sah.id
-              FROM social_account_handles sah
-              JOIN social_external_accounts sea ON sea.id = sah.external_account_id
-              JOIN platforms p ON p.id = sea.platform_id
-              WHERE COALESCE(p.provider_family, p.slug) = $1
-                AND NOT EXISTS (
-                  SELECT 1 FROM social_account_observations sao
-                  WHERE sao.external_account_id = sea.id
-                )
-              LIMIT $2
-            )
-          `,
-          [providerFamily, batchSize],
-        );
-        const deleted = handleDelRes.rowCount ?? 0;
-        counts.accountHandlesPurged += deleted;
-        if (deleted < batchSize) break;
+      let phaseComplete = false;
+      if ((scopeId || connectionId) && targetAccountIds.size === 0) {
+        phaseComplete = true;
+      } else {
+        while (batchesUsed < maxBatches) {
+          batchesUsed++;
+          const targetIdsArray = Array.from(targetAccountIds);
+          const params: unknown[] = [providerFamily];
+          let extraWhere = "";
+          if (scopeId || connectionId) {
+            params.push(targetIdsArray);
+            extraWhere += ` AND sea.id = ANY($${params.length}::uuid[])`;
+          }
+          params.push(batchSize);
+          const limitParam = `$${params.length}`;
+
+          const handleDelRes = await client.query(
+            `
+              DELETE FROM social_account_handles
+              WHERE id IN (
+                SELECT sah.id
+                FROM social_account_handles sah
+                JOIN social_external_accounts sea ON sea.id = sah.external_account_id
+                JOIN platforms p ON p.id = sea.platform_id
+                WHERE COALESCE(p.provider_family, p.slug) = $1
+                  AND NOT EXISTS (
+                    SELECT 1 FROM social_account_observations sao
+                    WHERE sao.external_account_id = sea.id
+                  )${extraWhere}
+                LIMIT ${limitParam}
+              )
+            `,
+            params,
+          );
+          const deleted = handleDelRes.rowCount ?? 0;
+          counts.accountHandlesPurged += deleted;
+          if (deleted < batchSize) {
+            phaseComplete = true;
+            break;
+          }
+        }
+      }
+      if (!phaseComplete) {
+        await checkpoint("ACCOUNT_HANDLES");
+        if (ownsClient) await client.query("COMMIT");
+        return { deletionRequestId, providerFamily, status: "IN_PROGRESS", ...counts, evidence: {} };
       }
       await checkpoint("CONTENT_METRICS");
     }
 
     // Phase 8: CONTENT_METRICS (Purge derivatives)
     if (startPhaseIndex <= 7) {
-      while (true) {
+      let phaseComplete = false;
+      while (batchesUsed < maxBatches) {
+        batchesUsed++;
         const params: unknown[] = [providerFamily];
         let where = "COALESCE(p.provider_family, p.slug) = $1";
         if (scopeId) {
@@ -675,7 +858,15 @@ export async function executeProviderDataDeletion(
         );
         const deleted = metricsDelRes.rowCount ?? 0;
         counts.contentMetricsPurged += deleted;
-        if (deleted < batchSize) break;
+        if (deleted < batchSize) {
+          phaseComplete = true;
+          break;
+        }
+      }
+      if (!phaseComplete) {
+        await checkpoint("CONTENT_METRICS");
+        if (ownsClient) await client.query("COMMIT");
+        return { deletionRequestId, providerFamily, status: "IN_PROGRESS", ...counts, evidence: {} };
       }
       await checkpoint("COMPLETED");
     }

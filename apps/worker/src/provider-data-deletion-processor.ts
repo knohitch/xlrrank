@@ -1,4 +1,4 @@
-﻿import type { Job } from "bullmq";
+import type { Job } from "bullmq";
 import { executeProviderDataDeletion, getPool, safeJobError } from "@xlrrank/database";
 import { JOB_TYPES, parseProviderDataDeletionPayload } from "@xlrrank/queue";
 import { createChildLogger } from "@xlrrank/observability";
@@ -20,6 +20,28 @@ export async function processProviderDataDeletion(job: Job): Promise<void> {
 
   try {
     const result = await executeProviderDataDeletion(payload.deletionRequestId);
+
+    if (result.status === "IN_PROGRESS") {
+      logger.info(
+        {
+          jobRequestId: payload.jobRequestId,
+          deletionRequestId: payload.deletionRequestId,
+          providerFamily: result.providerFamily,
+          result,
+        },
+        "Provider data deletion partially complete, re-enqueuing for continuation",
+      );
+      await pool.query(
+        "UPDATE jobs SET status = 'QUEUED', updated_at = now() WHERE id = $1",
+        [payload.jobRequestId],
+      );
+      await pool.query(
+        "INSERT INTO job_outbox (job_id, queue_name, job_type, payload) VALUES ($1, $2, $3, $4::jsonb)",
+        [payload.jobRequestId, job.queueName ?? "ingestion", JOB_TYPES.providerDataDeletion, JSON.stringify(payload)],
+      );
+      return;
+    }
+
     logger.info(
       {
         jobRequestId: payload.jobRequestId,
