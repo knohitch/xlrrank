@@ -1008,6 +1008,7 @@ export class PlatformsService {
             }),
           );
           const cleanupJob = await createProviderAuthorizationCleanupRequestTx(client, {
+            id: cleanupId,
             connectionId: connection.id,
             scopeId: input.scopeId,
             platformId: connection.platform_id,

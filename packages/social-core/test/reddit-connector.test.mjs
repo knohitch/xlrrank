@@ -113,8 +113,22 @@ async function startRedditFixture() {
         res.end(JSON.stringify(user));
         return;
       }
-      if (url.pathname === "/user/xlr_reddit/about.json") {
+      if (url.pathname === "/user/xlr_reddit/about.json" || url.pathname === "/user/user1/about.json") {
         res.end(JSON.stringify({ data: user }));
+        return;
+      }
+      if (url.pathname === "/user/suspended_user/about.json") {
+        res.end(JSON.stringify({ data: { ...user, name: "suspended_user", is_suspended: true } }));
+        return;
+      }
+      if (url.pathname === "/user/deleted_user/about.json") {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ message: "Not Found", error: 404 }));
+        return;
+      }
+      if (url.pathname === "/user/temporary_error/about.json") {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ message: "temporary error" }));
         return;
       }
       if (url.pathname === "/user/limited/about.json") {
@@ -195,15 +209,6 @@ async function startRedditFixture() {
               name: "t1_author_deleted",
               author: "[deleted]",
             },
-          });
-        }
-        if (ids.includes("t2_user1")) {
-          children.push({ kind: "t2", data: user });
-        }
-        if (ids.includes("t2_suspended")) {
-          children.push({
-            kind: "t2",
-            data: { ...user, id: "t2_suspended", name: "suspended_user", is_suspended: true },
           });
         }
         res.end(JSON.stringify({ kind: "Listing", data: { children } }));
@@ -436,7 +441,7 @@ test("Reddit connector maps errors, rejects missing User-Agent, and disallows un
   }
 });
 
-test("Reddit connector reconcileResources queries /api/info and maps deleted, author-deleted, and missing resources", async () => {
+test("Reddit connector reconcileResources queries /api/info for Links/Comments and /user/about for Accounts", async () => {
   const { RedditConnector } = await import("../dist/index.js");
   const fixture = await startRedditFixture();
   try {
@@ -449,27 +454,34 @@ test("Reddit connector reconcileResources queries /api/info and maps deleted, au
         { id: "3", externalId: "t3_completely_missing", entityType: "CONTENT" },
         { id: "4", externalId: "t1_comment1", entityType: "INTERACTION" },
         { id: "5", externalId: "t1_author_deleted", entityType: "INTERACTION" },
-        { id: "6", externalId: "t2_user1", entityType: "ACCOUNT" },
-        { id: "7", externalId: "t2_suspended", entityType: "ACCOUNT" },
-        { id: "8", externalId: "t2_missing_account", entityType: "ACCOUNT" },
+        { id: "6", externalId: "t2_user1", entityType: "ACCOUNT", lookupKey: "user1" },
+        { id: "7", externalId: "t2_suspended", entityType: "ACCOUNT", lookupKey: "suspended_user" },
+        { id: "8", externalId: "t2_deleted", entityType: "ACCOUNT", lookupKey: "deleted_user" },
+        { id: "9", externalId: "t2_temporary", entityType: "ACCOUNT", lookupKey: "temporary_error" },
+        { id: "10", externalId: "t2_no_handle", entityType: "ACCOUNT" },
       ],
       ctx,
     );
 
     const statuses = new Map(result.statuses.map((s) => [s.externalId, s]));
+
+    // Content: /api/info
     assert.equal(statuses.get("t3_post1")?.state, "EXISTS");
     assert.equal(statuses.get("t3_post1")?.authorDeleted, false);
-
     assert.equal(statuses.get("t3_post_removed")?.state, "DELETED");
     assert.equal(statuses.get("t3_completely_missing")?.state, "DELETED");
 
+    // Interactions: /api/info
     assert.equal(statuses.get("t1_comment1")?.state, "EXISTS");
     assert.equal(statuses.get("t1_author_deleted")?.state, "EXISTS");
     assert.equal(statuses.get("t1_author_deleted")?.authorDeleted, true);
 
+    // Accounts: /user/{username}/about.json
     assert.equal(statuses.get("t2_user1")?.state, "EXISTS");
     assert.equal(statuses.get("t2_suspended")?.state, "ACCOUNT_DELETED");
-    assert.equal(statuses.get("t2_missing_account")?.state, "ACCOUNT_DELETED");
+    assert.equal(statuses.get("t2_deleted")?.state, "ACCOUNT_DELETED");
+    assert.equal(statuses.get("t2_temporary")?.state, "UNKNOWN");
+    assert.equal(statuses.get("t2_no_handle")?.state, "UNKNOWN");
   } finally {
     await fixture.close();
   }

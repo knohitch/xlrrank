@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   calculateProviderDataDeletionDeadline,
+  MissingProviderDeletionDeadlinePolicyError,
   loadProviderRetentionPolicies,
   MissingApprovedUseCaseRetentionPolicyError,
   claimReconciliationCandidates,
@@ -175,14 +176,31 @@ test("Data Deletion: calculateProviderDataDeletionDeadline calculates 10-day dea
   assert.equal(deadline.toISOString(), "2026-09-11T00:00:00.000Z"); // Exactly 10 days later
 });
 
-test("Data Deletion: calculateProviderDataDeletionDeadline defaults to 30 days for providers without metadata", async () => {
+test("Data Deletion: calculateProviderDataDeletionDeadline fails closed when provider metadata is missing", async () => {
   const mockDb = createMockExecutor({
     "SELECT metadata": { rows: [] },
   });
 
   const requestedAt = new Date("2026-09-01T00:00:00.000Z");
-  const deadline = await calculateProviderDataDeletionDeadline("unknown_provider", requestedAt, mockDb);
-  assert.equal(deadline.toISOString(), "2026-10-01T00:00:00.000Z"); // 30 days later
+  await assert.rejects(
+    () => calculateProviderDataDeletionDeadline("unknown_provider", requestedAt, mockDb),
+    MissingProviderDeletionDeadlinePolicyError,
+  );
+});
+
+test("Data Deletion: calculateProviderDataDeletionDeadline resolves from environment variable override", async () => {
+  process.env.PROVIDER_DATA_DELETION_DEADLINE_SECONDS_UNKNOWN_PROVIDER = "432000";
+  try {
+    const mockDb = createMockExecutor({
+      "SELECT metadata": { rows: [] },
+    });
+
+    const requestedAt = new Date("2026-09-01T00:00:00.000Z");
+    const deadline = await calculateProviderDataDeletionDeadline("unknown_provider", requestedAt, mockDb);
+    assert.equal(deadline.toISOString(), "2026-09-06T00:00:00.000Z"); // 5 days later
+  } finally {
+    delete process.env.PROVIDER_DATA_DELETION_DEADLINE_SECONDS_UNKNOWN_PROVIDER;
+  }
 });
 
 // ─── DEFECT 2: Reconciliation & Scrubbing ───────────────────────────────────

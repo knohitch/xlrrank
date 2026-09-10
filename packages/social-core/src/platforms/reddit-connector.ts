@@ -5,6 +5,7 @@ import {
   CapabilityUnavailableError,
   ConnectorConfigurationError,
   MalformedProviderResponseError,
+  PermanentProviderError,
 } from "../connectors/errors.js";
 import type {
   AccountMetrics,
@@ -20,6 +21,7 @@ import type {
   OAuthTokenResult,
   PageResult,
   ProviderApplicationConfig,
+  RateLimitInfo,
   ReconcileResourceItem,
   ReconcileResourcesResult,
   ReconcileResourceStatus,
@@ -510,67 +512,146 @@ export class RedditConnector extends BaseSocialConnector {
 
     // Bounded batch of max 100 items per call (Reddit API limit)
     const batch = items.slice(0, 100);
-
-    const fullnames: string[] = [];
-    const itemMap = new Map<string, ReconcileResourceItem>();
-
-    for (const item of batch) {
-      let fullname = item.externalId;
-      if (!fullname.includes("_")) {
-        if (item.entityType === "CONTENT") fullname = `t3_${item.externalId}`;
-        else if (item.entityType === "INTERACTION") fullname = `t1_${item.externalId}`;
-        else if (item.entityType === "ACCOUNT") fullname = `t2_${item.externalId}`;
-      }
-      fullnames.push(fullname);
-      itemMap.set(fullname, item);
-      itemMap.set(item.externalId, item);
-    }
-
-    const query = new URLSearchParams();
-    query.set("id", fullnames.join(","));
-    query.set("raw_json", "1");
-
-    const response = await this.client.get<RedditListing<RedditThing & RedditUser>>(
-      "/api/info",
-      token(credentials),
-      redditUserAgent(credentials),
-      query,
-      context.signal,
-    );
-
-    const children = listingChildren(response.body);
-    const seenFullnames = new Map<string, RedditThing & RedditUser>();
-
-    for (const data of children) {
-      if (!data) continue;
-      const name = stringOrUndefined(data.name);
-      const id = stringOrUndefined(data.id);
-      if (name) seenFullnames.set(name, data);
-      if (id) seenFullnames.set(id, data);
-    }
-
     const statuses: ReconcileResourceStatus[] = [];
+    let latestRateLimit: RateLimitInfo | undefined;
 
-    for (const item of batch) {
-      let candidateFullname = item.externalId;
-      if (!candidateFullname.includes("_")) {
-        if (item.entityType === "CONTENT") candidateFullname = `t3_${item.externalId}`;
-        else if (item.entityType === "INTERACTION") candidateFullname = `t1_${item.externalId}`;
-        else if (item.entityType === "ACCOUNT") candidateFullname = `t2_${item.externalId}`;
+    const contentAndCommentItems = batch.filter(
+      (i) => i.entityType === "CONTENT" || i.entityType === "INTERACTION",
+    );
+    const accountItems = batch.filter((i) => i.entityType === "ACCOUNT");
+
+    // 1. Links and Comments reconciliation via official /api/info
+    if (contentAndCommentItems.length > 0) {
+      const fullnames: string[] = [];
+      for (const item of contentAndCommentItems) {
+        let fullname = item.externalId;
+        if (!fullname.includes("_")) {
+          fullname = item.entityType === "CONTENT" ? `t3_${item.externalId}` : `t1_${item.externalId}`;
+        }
+        fullnames.push(fullname);
       }
 
-      const found = seenFullnames.get(candidateFullname) ?? seenFullnames.get(item.externalId);
+      const query = new URLSearchParams();
+      query.set("id", fullnames.join(","));
+      query.set("raw_json", "1");
 
-      if (!found) {
+      const response = await this.client.get<RedditListing<RedditThing>>(
+        "/api/info",
+        token(credentials),
+        redditUserAgent(credentials),
+        query,
+        context.signal,
+      );
+      if (response.rateLimit) latestRateLimit = response.rateLimit;
+
+      const children = listingChildren(response.body);
+      const seenFullnames = new Map<string, RedditThing>();
+
+      for (const data of children) {
+        if (!data) continue;
+        const name = stringOrUndefined(data.name);
+        const id = stringOrUndefined(data.id);
+        if (name) seenFullnames.set(name, data);
+        if (id) seenFullnames.set(id, data);
+      }
+
+      for (const item of contentAndCommentItems) {
+        let candidateFullname = item.externalId;
+        if (!candidateFullname.includes("_")) {
+          candidateFullname =
+            item.entityType === "CONTENT" ? `t3_${item.externalId}` : `t1_${item.externalId}`;
+        }
+
+        const found = seenFullnames.get(candidateFullname) ?? seenFullnames.get(item.externalId);
+
+        if (!found) {
+          statuses.push({
+            externalId: item.externalId,
+            state: "DELETED",
+          });
+          continue;
+        }
+
+        const selftext = typeof found.selftext === "string" ? found.selftext : "";
+        const body = typeof found.body === "string" ? found.body : "";
+        const removedBy = found.removed_by_category;
+        const author = typeof found.author === "string" ? found.author : "";
+
+        if (
+          selftext === "[deleted]" ||
+          selftext === "[removed]" ||
+          body === "[deleted]" ||
+          body === "[removed]" ||
+          removedBy === "deleted" ||
+          removedBy === "moderator" ||
+          removedBy === "author" ||
+          removedBy === "automod_filtered"
+        ) {
+          statuses.push({
+            externalId: item.externalId,
+            state: "DELETED",
+          });
+        } else {
+          const authorDeleted = author === "[deleted]" || author === "";
+          statuses.push({
+            externalId: item.externalId,
+            state: "EXISTS",
+            authorDeleted,
+          });
+        }
+      }
+    }
+
+    // 2. Account reconciliation via official /user/{username}/about.json (t2_* not supported by /api/info)
+    for (const item of accountItems) {
+      const lookupIdentifier =
+        item.lookupKey ??
+        stringOrUndefined(item.metadata?.handle) ??
+        stringOrUndefined(item.metadata?.authorHandle);
+
+      if (!lookupIdentifier) {
         statuses.push({
           externalId: item.externalId,
-          state: item.entityType === "ACCOUNT" ? "ACCOUNT_DELETED" : "DELETED",
+          state: "UNKNOWN",
+          details: { reason: "MISSING_LOOKUP_IDENTIFIER" },
         });
         continue;
       }
 
-      if (item.entityType === "ACCOUNT") {
-        if (found.is_suspended === true || found.name === "[deleted]") {
+      const username = lookupIdentifier.replace(/^u\//, "").replace(/^\/u\//, "").replace(/^@/, "");
+      try {
+        const response = await this.client.get<{ data?: RedditUser }>(
+          `/user/${encodeURIComponent(username)}/about.json`,
+          token(credentials),
+          redditUserAgent(credentials),
+          undefined,
+          context.signal,
+        );
+        if (response.rateLimit) latestRateLimit = response.rateLimit;
+
+        const userData = response.body.data;
+        if (!userData || userData.name === "[deleted]" || userData.is_suspended === true) {
+          statuses.push({
+            externalId: item.externalId,
+            state: "ACCOUNT_DELETED",
+          });
+        } else if (userData.name) {
+          statuses.push({
+            externalId: item.externalId,
+            state: "EXISTS",
+          });
+        } else {
+          statuses.push({
+            externalId: item.externalId,
+            state: "UNKNOWN",
+            details: { reason: "INCONCLUSIVE_USER_PAYLOAD" },
+          });
+        }
+      } catch (err) {
+        if (
+          err instanceof PermanentProviderError &&
+          (/status 404/i.test(err.message) || /not found/i.test(err.message))
+        ) {
           statuses.push({
             externalId: item.externalId,
             state: "ACCOUNT_DELETED",
@@ -578,44 +659,16 @@ export class RedditConnector extends BaseSocialConnector {
         } else {
           statuses.push({
             externalId: item.externalId,
-            state: "EXISTS",
+            state: "UNKNOWN",
+            details: { error: err instanceof Error ? err.message : String(err) },
           });
         }
-        continue;
-      }
-
-      const selftext = typeof found.selftext === "string" ? found.selftext : "";
-      const body = typeof found.body === "string" ? found.body : "";
-      const removedBy = found.removed_by_category;
-      const author = typeof found.author === "string" ? found.author : "";
-
-      if (
-        selftext === "[deleted]" ||
-        selftext === "[removed]" ||
-        body === "[deleted]" ||
-        body === "[removed]" ||
-        removedBy === "deleted" ||
-        removedBy === "moderator" ||
-        removedBy === "author" ||
-        removedBy === "automod_filtered"
-      ) {
-        statuses.push({
-          externalId: item.externalId,
-          state: "DELETED",
-        });
-      } else {
-        const authorDeleted = author === "[deleted]" || author === "";
-        statuses.push({
-          externalId: item.externalId,
-          state: "EXISTS",
-          authorDeleted,
-        });
       }
     }
 
     return {
       statuses,
-      rateLimit: response.rateLimit,
+      rateLimit: latestRateLimit,
     };
   }
 

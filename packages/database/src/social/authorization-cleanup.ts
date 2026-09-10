@@ -21,6 +21,7 @@ export interface DurableProviderAuthorizationCleanupRequest {
 }
 
 export interface CreateProviderAuthorizationCleanupInput {
+  id?: string;
   connectionId?: string | null;
   scopeId: string;
   platformId: string;
@@ -33,7 +34,7 @@ export async function createProviderAuthorizationCleanupRequestTx(
   client: PoolClient,
   input: CreateProviderAuthorizationCleanupInput,
 ): Promise<DurableProviderAuthorizationCleanupRequest> {
-  const cleanupId = randomUUID();
+  const cleanupId = input.id ?? randomUUID();
   const jobId = randomUUID();
   const idempotencyKey = `provider-auth-cleanup:${input.connectionId ?? cleanupId}`;
 

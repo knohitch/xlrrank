@@ -73,10 +73,12 @@ export {
   calculateProviderDataDeletionDeadline,
   createProviderDataDeletionRequest,
   executeProviderDataDeletion,
+  MissingProviderDeletionDeadlinePolicyError,
 } from "./social/deletion-requests.js";
 export type {
   CreateProviderDataDeletionInput,
   CreateProviderDataDeletionResult,
+  ExecuteProviderDataDeletionOptions,
   ProviderDataDeletionExecutionResult,
   ProviderDataDeletionRequestRecord,
 } from "./social/deletion-requests.js";

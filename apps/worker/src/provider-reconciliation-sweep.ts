@@ -9,6 +9,7 @@ import {
   recordReconciliationFailure,
   safeJobError,
 } from "@xlrrank/database";
+import { getEnv } from "@xlrrank/config";
 import { createChildLogger, getMetrics } from "@xlrrank/observability";
 import { decryptSecret, socialCredentialAssociatedData } from "@xlrrank/shared";
 import {
@@ -36,6 +37,10 @@ export async function runProviderReconciliationSweepOnce(
   workerId: string,
 ): Promise<ProviderReconciliationSweepRun> {
   const pool = getPool();
+  const env = getEnv();
+  const sweepTimeoutMs = env.PROVIDER_RECONCILIATION_SWEEP_TIMEOUT_MS;
+  const sweepSignal = AbortSignal.timeout(sweepTimeoutMs);
+  const maxBatchesPerRun = Number(process.env.PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN) || 5;
 
   ensureWorkerConnectors();
 
@@ -65,6 +70,11 @@ export async function runProviderReconciliationSweepOnce(
   };
 
   for (const connection of connectionsRes.rows) {
+    if (sweepSignal.aborted) {
+      logger.warn("Reconciliation sweep timed out; skipping remaining connections");
+      break;
+    }
+
     const connector = connectorRegistry.create(connection.platform_slug);
     if (!connector || typeof connector.reconcileResources !== "function") {
       continue;
@@ -112,48 +122,102 @@ export async function runProviderReconciliationSweepOnce(
       run.connectionsProcessed += 1;
 
       for (const entityType of RECONCILIATION_ENTITY_TYPES) {
+        if (sweepSignal.aborted) {
+          logger.warn("Reconciliation sweep timed out; stopping entity type loop");
+          break;
+        }
+
         let hasMore = true;
-        while (hasMore) {
+        let batchesRun = 0;
+
+        while (hasMore && batchesRun < maxBatchesPerRun) {
+          if (sweepSignal.aborted) {
+            logger.warn("Reconciliation sweep timed out; stopping batch processing");
+            break;
+          }
+
+          // Step 1: Claim candidates in a short transaction
+          let claimResult;
           await client.query("BEGIN");
-          let checkpointId: string | null = null;
           try {
-            const claimResult = await claimReconciliationCandidates(client, {
+            claimResult = await claimReconciliationCandidates(client, {
               connectionId: connection.id,
               scopeId: connection.scope_id,
               providerFamily: connection.provider_family,
               entityType,
               limit: 50,
             });
+            await client.query("COMMIT");
+          } catch (claimErr) {
+            await client.query("ROLLBACK").catch(() => undefined);
+            throw claimErr;
+          }
 
-            checkpointId = claimResult.checkpointId;
+          const checkpointId = claimResult.checkpointId;
 
-            if (claimResult.candidates.length === 0) {
+          if (claimResult.candidates.length === 0) {
+            await client.query("BEGIN");
+            try {
               await advanceReconciliationCheckpoint(client, {
                 checkpointId: claimResult.checkpointId,
                 lastProcessedId: null,
                 hasMore: false,
               });
               await client.query("COMMIT");
-              hasMore = false;
-              break;
+            } catch (advErr) {
+              await client.query("ROLLBACK").catch(() => undefined);
+              throw advErr;
             }
+            hasMore = false;
+            break;
+          }
 
-            const items: ReconcileResourceItem[] = claimResult.candidates.map((c) => ({
-              id: c.id,
-              externalId: c.externalId,
-              entityType: c.entityType,
-              metadata: c.metadata ?? undefined,
-            }));
+          batchesRun += 1;
 
-            const reconcileResult = await connector.reconcileResources(items, {
+          // Step 2: Network call OUTSIDE of any database transaction
+          const items: ReconcileResourceItem[] = claimResult.candidates.map((c) => ({
+            id: c.id,
+            externalId: c.externalId,
+            entityType: c.entityType,
+            lookupKey: c.authorHandle ?? undefined,
+            metadata: c.metadata ?? undefined,
+          }));
+
+          let reconcileResult;
+          try {
+            reconcileResult = await connector.reconcileResources(items, {
               scopeId: connection.scope_id,
               connectionId: connection.id,
               credentials,
+              signal: sweepSignal,
             });
+          } catch (netErr) {
+            if (checkpointId) {
+              await recordReconciliationFailure(client, checkpointId, netErr).catch(() => undefined);
+            }
+            logger.error(
+              {
+                err: safeJobError(netErr),
+                connectionId: connection.id,
+                entityType,
+              },
+              "Reconciliation network call failed",
+            );
+            hasMore = false;
+            break;
+          }
 
-            run.itemsReconciled += claimResult.candidates.length;
+          run.itemsReconciled += claimResult.candidates.length;
 
+          // Step 3: Finalize & Checkpoint in a short transaction
+          await client.query("BEGIN");
+          try {
             for (const status of reconcileResult.statuses) {
+              // Never scrub or delete on UNKNOWN state
+              if (status.state === "UNKNOWN") {
+                continue;
+              }
+
               const candidate = claimResult.candidates.find((c) => c.externalId === status.externalId);
               if (!candidate) continue;
 
@@ -237,20 +301,39 @@ export async function runProviderReconciliationSweepOnce(
 
             await client.query("COMMIT");
             hasMore = claimResult.hasMore;
-          } catch (batchErr) {
+          } catch (finalizeErr) {
             await client.query("ROLLBACK").catch(() => undefined);
             if (checkpointId) {
-              await recordReconciliationFailure(client, checkpointId, batchErr).catch(() => undefined);
+              await recordReconciliationFailure(client, checkpointId, finalizeErr).catch(() => undefined);
             }
             logger.error(
               {
-                err: safeJobError(batchErr),
+                err: safeJobError(finalizeErr),
                 connectionId: connection.id,
                 entityType,
               },
-              "Reconciliation batch failed",
+              "Reconciliation finalize batch failed",
             );
-            hasMore = false; // abort entity type loop on error
+            hasMore = false;
+            break;
+          }
+
+          // Step 4: Check Rate Limit feedback
+          if (reconcileResult.rateLimit) {
+            const { remaining, retryAfter } = reconcileResult.rateLimit;
+            if (remaining === 0 || (typeof retryAfter === "number" && retryAfter > 0)) {
+              logger.warn(
+                {
+                  connectionId: connection.id,
+                  remaining,
+                  retryAfter,
+                  entityType,
+                },
+                "Reconciliation rate limit exhausted or backoff requested; preserving checkpoint and breaking",
+              );
+              hasMore = false;
+              break;
+            }
           }
         }
       }

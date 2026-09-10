@@ -299,6 +299,7 @@ export interface ReconcileResourceItem {
   id: string;
   externalId: string;
   entityType: "CONTENT" | "INTERACTION" | "ACCOUNT";
+  lookupKey?: string | undefined;
   dataCategory?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
 }

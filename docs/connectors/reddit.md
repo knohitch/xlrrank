@@ -82,19 +82,33 @@ Retention rules:
 
 ## Upstream Deletion Reconciliation
 
-Reddit deletion reconciliation revalidates persisted content and accounts against official Reddit `/api/info` in accordance with Reddit Developer Terms:
-- Endpoints: `GET /api/info` using `id` parameter with prefixed fullnames (`t3_` for submissions, `t1_` for comments, `t2_` for user accounts) in bounded batches (up to 100 items).
+Reddit deletion reconciliation revalidates persisted content and accounts against official Reddit endpoints in accordance with Reddit Developer Terms:
+- Endpoints:
+  - Links and Comments: `GET /api/info` using `id` parameter with prefixed fullnames (`t3_` for submissions, `t1_` for comments) in bounded batches (up to 100 items).
+  - User Accounts: `GET /user/{username}/about.json` using generic `lookupKey` / handle under `read` OAuth scope (official Reddit Data API specification restricts `/api/info` to `t1`, `t3`, and `t5`; `t2_*` accounts are queried via the about endpoint).
+- States: Distinguishes `EXISTS`, `DELETED`, `ACCOUNT_DELETED`, and `UNKNOWN`. Transient network errors (429, 5xx, timeouts, missing handles) return `UNKNOWN` and never trigger destructive scrubbing.
 - Safe claiming: Database candidates are claimed with `FOR UPDATE SKIP LOCKED` and durable cursor tracking in `provider_reconciliation_checkpoints`.
+- Non-locking execution: Candidates are claimed in a short database transaction; network requests execute outside open transactions; final state updates and checkpoint advancements commit in a separate short transaction.
+- Work budget & Rate-limiting: Reconciliation sweeps enforce per-run batch budgets (`maxBatchesPerRun = 5`) and respect upstream rate-limit headers (`rateLimit.remaining === 0` or `retryAfter > 0`), gracefully preserving the checkpoint cursor. Sweeps are bounded by `AbortSignal.timeout(env.PROVIDER_RECONCILIATION_SWEEP_TIMEOUT_MS)`.
 - Upstream removal: Items missing from the `/api/info` response or marked with `removed_by_category`, `[deleted]`, or `[removed]` have their observations purged. Orphan canonical items and interactions are removed only if no observation from another provider references them (preserving multi-provider provenance).
-- Author account deletion: Items where `author === "[deleted]"` or user accounts marked suspended/deleted trigger author anonymization (`author_handle = '[deleted]'`, `author_external_id = NULL`, removal of author fullname from metadata) across stored posts and interactions.
+- Author account deletion: Suspended or deleted user accounts trigger author anonymization (`author_handle = '[deleted]'`, `author_external_id = NULL`, removal of author fullname from metadata) across stored posts and interactions.
 
 ## Provider Data Deletion Requests (DPA Compliance)
 
 Reddit Developer Terms and Data Protection Addendum (DPA) require deletion of Personal Data and derivatives within 10 days of request:
 - Queue: `QUEUE_NAMES.ingestion`, job type `JOB_TYPES.providerDataDeletion` (`provider.data.deletion`).
-- Deadline calculation: `calculateProviderDataDeletionDeadline` dynamically evaluates provider retention policy metadata (`deletionRequestDeadlineSeconds: 864000`, exactly 10 days for Reddit).
+- Deadline calculation: `calculateProviderDataDeletionDeadline` dynamically evaluates provider retention policy metadata (`deletionRequestDeadlineSeconds: 864000`, exactly 10 days for Reddit) or environment overrides. It fails closed with `MissingProviderDeletionDeadlinePolicyError` if provider policy metadata is absent.
 - Durability: Requests, domain jobs, and outbox entries are committed atomically in the database within a single transaction prior to Redis transport.
-- Execution: `executeProviderDataDeletion` safely purges observations, orphaned canonical records, and content metrics, recording execution evidence.
+- Bounded phased execution: `executeProviderDataDeletion` runs in configurable bounded batches (`batchSize`, default 100) across 8 distinct phases:
+  1. `CONTENT_OBSERVATIONS`
+  2. `CANONICAL_ITEMS` (orphaned items cleaned only if no observation from any provider remains)
+  3. `INTERACTION_OBSERVATIONS`
+  4. `CANONICAL_INTERACTIONS` (orphaned interactions cleaned only if no observation remains)
+  5. `ACCOUNT_OBSERVATIONS`
+  6. `ACCOUNTS` (orphaned external accounts sanitized)
+  7. `ACCOUNT_HANDLES` (orphaned handles purged)
+  8. `CONTENT_METRICS` (derivatives purged)
+- Progress checkpointing & Idempotency: Execution progress is checkpointed in `provider_data_deletion_requests.metadata.deletionProgress` after each phase/batch, enabling safe resumption upon restart and idempotent replay. Callers omitting `scopeId` for connection-scoped deletions have `scopeId` resolved automatically from `social_connections`.
 
 ## Disconnect & Durable Token Revocation
 
@@ -102,8 +116,9 @@ Disconnect maintains local-first availability while ensuring reliable remote tok
 - Local disconnect: Immediately marks connection `DISCONNECTED` and clears credentials from `social_connections`.
 - Immediate revocation: Connector attempts remote revocation against `https://www.reddit.com/api/v1/revoke_token` with a 1500ms timeout.
 - Sibling connection safety: Sibling connections in the same scope sharing the verified external account remain active and are not revoked.
-- Durable fallback: If remote revocation times out or fails with a retryable error, a durable cleanup record is created in `provider_authorization_cleanups` along with an outbox job `provider.authorization.cleanup`. The credentials snapshot is encrypted using dedicated associated data.
-- Secret hygiene: Upon successful remote revocation or terminal failure in `processProviderAuthorizationCleanup`, `credentials_encrypted` is wiped to `NULL` to prevent credential leakage.
+- Durable fallback: If remote revocation times out or fails with a retryable error, a durable cleanup record is created in `provider_authorization_cleanups` along with an outbox job `provider.authorization.cleanup`. A single canonical `cleanupId` is shared across ID allocation, AES-256-GCM encryption AAD, database row insertion, and worker decryption.
+- Worker query correctness: The worker queries `pac.connection_id` matching the database schema.
+- Secret hygiene: Upon successful remote revocation or terminal failure in `processProviderAuthorizationCleanup`, `credentials_encrypted` is wiped to `NULL` to prevent credential leakage. Retries retain credentials until max attempts (3) or terminal classification.
 
 ## Live Gate
 

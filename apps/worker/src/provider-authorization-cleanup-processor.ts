@@ -55,14 +55,14 @@ export async function processProviderAuthorizationCleanup(job: Job): Promise<voi
       status: string;
       scope_id: string;
       platform_id: string;
-      social_connection_id: string | null;
+      connection_id: string | null;
       credentials_encrypted: string | null;
       attempt_count: number;
       platform_slug: string;
     }>(
       `
         SELECT pac.id, pac.status, pac.scope_id, pac.platform_id,
-               pac.social_connection_id, pac.credentials_encrypted, pac.attempt_count,
+               pac.connection_id, pac.credentials_encrypted, pac.attempt_count,
                p.slug AS platform_slug
         FROM provider_authorization_cleanups pac
         JOIN platforms p ON p.id = pac.platform_id

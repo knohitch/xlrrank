@@ -73,6 +73,15 @@ export interface ProviderDataDeletionExecutionResult {
   evidence: Record<string, unknown>;
 }
 
+export class MissingProviderDeletionDeadlinePolicyError extends Error {
+  constructor(public readonly providerFamily: string) {
+    super(
+      `No data deletion deadline policy found for provider family '${providerFamily}'. A retention policy record or environment override is required.`,
+    );
+    this.name = "MissingProviderDeletionDeadlinePolicyError";
+  }
+}
+
 export async function calculateProviderDataDeletionDeadline(
   providerFamily: string,
   requestedAt = new Date(),
@@ -109,9 +118,11 @@ export async function calculateProviderDataDeletionDeadline(
     }
   }
 
-  // Default fallback if no provider policy establishes a deadline: 30 days
-  const effectiveSeconds = deadlineSeconds ?? 30 * 86400;
-  return new Date(requestedAt.getTime() + effectiveSeconds * 1000);
+  if (deadlineSeconds === null) {
+    throw new MissingProviderDeletionDeadlinePolicyError(providerFamily);
+  }
+
+  return new Date(requestedAt.getTime() + deadlineSeconds * 1000);
 }
 
 export async function createProviderDataDeletionRequest(
@@ -246,13 +257,19 @@ export async function createProviderDataDeletionRequest(
   }
 }
 
+export interface ExecuteProviderDataDeletionOptions {
+  executor?: QueryExecutor;
+  batchSize?: number;
+}
+
 export async function executeProviderDataDeletion(
   deletionRequestId: string,
-  options: { executor?: QueryExecutor } = {},
+  options: ExecuteProviderDataDeletionOptions = {},
 ): Promise<ProviderDataDeletionExecutionResult> {
   const pool = getPool();
   const client = (options.executor ?? (await pool.connect())) as PoolClient;
   const ownsClient = !options.executor;
+  const batchSize = Math.max(1, options.batchSize ?? 100);
 
   try {
     if (ownsClient) await client.query("BEGIN");
@@ -264,9 +281,10 @@ export async function executeProviderDataDeletion(
       connection_id: string | null;
       status: string;
       completion_evidence: Record<string, unknown> | null;
+      metadata: Record<string, unknown> | null;
     }>(
       `
-        SELECT id, provider_family, scope_id, connection_id, status, completion_evidence
+        SELECT id, provider_family, scope_id, connection_id, status, completion_evidence, metadata
         FROM provider_data_deletion_requests
         WHERE id = $1
         FOR UPDATE
@@ -305,171 +323,365 @@ export async function executeProviderDataDeletion(
     );
 
     const providerFamily = request.provider_family;
-    const scopeId = request.scope_id;
+    let scopeId = request.scope_id;
     const connectionId = request.connection_id;
 
-    // 1. Purge content observations for this provider family (and optional scope / connection)
-    const scopeObsFilter = scopeId ? "AND sco.scope_id = $2" : "";
-    const connObsFilter = connectionId ? "AND sco.connection_id = $3" : "";
-    const obsParams: unknown[] = [providerFamily];
-    if (scopeId) obsParams.push(scopeId);
-    if (connectionId) obsParams.push(connectionId);
-
-    const delObsRes = await client.query<{ content_item_id: string }>(
-      `
-        DELETE FROM social_content_observations sco
-        USING social_connections sc, platforms p
-        WHERE sco.connection_id = sc.id
-          AND sc.platform_id = p.id
-          AND COALESCE(p.provider_family, p.slug) = $1
-          ${scopeObsFilter}
-          ${connObsFilter}
-        RETURNING sco.content_item_id
-      `,
-      obsParams,
-    );
-    const contentObservationsPurged = delObsRes.rowCount ?? 0;
-
-    // Clean orphaned canonical items ONLY IF no other observation from another provider exists
-    let canonicalItemsPurged = 0;
-    const candidateItemIds = [...new Set(delObsRes.rows.map((r) => r.content_item_id))];
-    if (candidateItemIds.length > 0) {
-      const orphanDel = await client.query(
-        `
-          DELETE FROM social_content_items sci
-          WHERE sci.id = ANY($1::uuid[])
-            AND NOT EXISTS (
-              SELECT 1 FROM social_content_observations sco
-              WHERE sco.content_item_id = sci.id
-            )
-        `,
-        [candidateItemIds],
+    if (connectionId && !scopeId) {
+      const connScopeRes = await client.query<{ scope_id: string }>(
+        "SELECT scope_id FROM social_connections WHERE id = $1 LIMIT 1",
+        [connectionId],
       );
-      canonicalItemsPurged = orphanDel.rowCount ?? 0;
+      if (connScopeRes.rows[0]?.scope_id) {
+        scopeId = connScopeRes.rows[0].scope_id;
+      }
     }
 
-    // 2. Purge interaction observations and orphaned canonical interactions
-    const scopeIntFilter = scopeId ? "AND sio.scope_id = $2" : "";
-    const connIntFilter = connectionId ? "AND sio.connection_id = $3" : "";
-    const delIntObsRes = await client.query<{ interaction_id: string }>(
-      `
-        DELETE FROM social_interaction_observations sio
-        USING social_connections sc, platforms p
-        WHERE sio.connection_id = sc.id
-          AND sc.platform_id = p.id
-          AND COALESCE(p.provider_family, p.slug) = $1
-          ${scopeIntFilter}
-          ${connIntFilter}
-        RETURNING sio.interaction_id
-      `,
-      obsParams,
-    );
-    const interactionsPurged = delIntObsRes.rowCount ?? 0;
+    const PHASES = [
+      "CONTENT_OBSERVATIONS",
+      "CANONICAL_ITEMS",
+      "INTERACTION_OBSERVATIONS",
+      "CANONICAL_INTERACTIONS",
+      "ACCOUNT_OBSERVATIONS",
+      "ACCOUNTS",
+      "ACCOUNT_HANDLES",
+      "CONTENT_METRICS",
+    ] as const;
 
-    let canonicalInteractionsPurged = 0;
-    const candidateIntIds = [...new Set(delIntObsRes.rows.map((r) => r.interaction_id))];
-    if (candidateIntIds.length > 0) {
-      const orphanIntDel = await client.query(
-        `
-          DELETE FROM social_interactions si
-          WHERE si.id = ANY($1::uuid[])
-            AND NOT EXISTS (
-              SELECT 1 FROM social_interaction_observations sio
-              WHERE sio.interaction_id = si.id
-            )
-        `,
-        [candidateIntIds],
-      );
-      canonicalInteractionsPurged = orphanIntDel.rowCount ?? 0;
+    type Phase = typeof PHASES[number];
+
+    const currentMetadata: Record<string, unknown> = { ...(request.metadata ?? {}) };
+    const savedProgress = currentMetadata.deletionProgress as
+      | {
+          phase?: Phase | "COMPLETED";
+          counts?: Record<string, number>;
+        }
+      | undefined;
+
+    const counts = {
+      contentObservationsPurged: savedProgress?.counts?.contentObservationsPurged ?? 0,
+      canonicalItemsPurged: savedProgress?.counts?.canonicalItemsPurged ?? 0,
+      interactionsPurged: savedProgress?.counts?.interactionsPurged ?? 0,
+      canonicalInteractionsPurged: savedProgress?.counts?.canonicalInteractionsPurged ?? 0,
+      accountObservationsPurged: savedProgress?.counts?.accountObservationsPurged ?? 0,
+      accountsSanitized: savedProgress?.counts?.accountsSanitized ?? 0,
+      accountHandlesPurged: savedProgress?.counts?.accountHandlesPurged ?? 0,
+      contentMetricsPurged: savedProgress?.counts?.contentMetricsPurged ?? 0,
+    };
+
+    let startPhaseIndex = 0;
+    if (savedProgress?.phase) {
+      const idx = PHASES.indexOf(savedProgress.phase as Phase);
+      if (idx >= 0) {
+        startPhaseIndex = idx;
+      } else if (savedProgress.phase === "COMPLETED") {
+        startPhaseIndex = PHASES.length;
+      }
     }
 
-    // 3. Purge account observations
-    const delAcctObsRes = await client.query<{ external_account_id: string }>(
-      `
-        DELETE FROM social_account_observations sao
-        USING social_connections sc, platforms p
-        WHERE sao.connection_id = sc.id
-          AND sc.platform_id = p.id
-          AND COALESCE(p.provider_family, p.slug) = $1
-          ${scopeId ? "AND sao.scope_id = $2" : ""}
-          ${connectionId ? "AND sao.connection_id = $3" : ""}
-        RETURNING sao.external_account_id
-      `,
-      obsParams,
-    );
-    const accountObservationsPurged = delAcctObsRes.rowCount ?? 0;
+    const checkpoint = async (nextPhase: Phase | "COMPLETED") => {
+      currentMetadata.deletionProgress = {
+        phase: nextPhase,
+        counts: { ...counts },
+      };
+      await client.query(
+        "UPDATE provider_data_deletion_requests SET metadata = $2::jsonb, updated_at = now() WHERE id = $1",
+        [deletionRequestId, JSON.stringify(currentMetadata)],
+      );
+    };
 
-    // Sanitize external accounts for this provider family where no observations remain
-    const sanitizeRes = await client.query(
-      `
-        UPDATE social_external_accounts sea
-        SET current_handle = NULL,
-            display_name = NULL,
-            profile_url = NULL,
-            profile_image_url = NULL,
-            bio = NULL,
-            location = NULL,
-            website = NULL,
-            follower_count = NULL,
-            following_count = NULL,
-            metadata = jsonb_build_object(
-              'deletionRequestPurgedAt', now(),
-              'deletionRequestId', $2::text,
-              'providerFamily', $1::text
-            ),
-            updated_at = now()
-        FROM platforms p
-        WHERE p.id = sea.platform_id
-          AND COALESCE(p.provider_family, p.slug) = $1
-          AND NOT EXISTS (
-            SELECT 1 FROM social_account_observations sao
-            WHERE sao.external_account_id = sea.id
-          )
-      `,
-      [providerFamily, deletionRequestId],
-    );
-    const accountsSanitized = sanitizeRes.rowCount ?? 0;
+    // Phase 1: CONTENT_OBSERVATIONS
+    if (startPhaseIndex <= 0) {
+      while (true) {
+        const params: unknown[] = [providerFamily];
+        let where = "COALESCE(p.provider_family, p.slug) = $1";
+        if (scopeId) {
+          params.push(scopeId);
+          where += ` AND sco.scope_id = $${params.length}`;
+        }
+        if (connectionId) {
+          params.push(connectionId);
+          where += ` AND sco.connection_id = $${params.length}`;
+        }
+        params.push(batchSize);
+        const limitParam = `$${params.length}`;
 
-    // Purge account handles for orphaned accounts
-    const handleDelRes = await client.query(
-      `
-        DELETE FROM social_account_handles sah
-        USING social_external_accounts sea, platforms p
-        WHERE sea.id = sah.external_account_id
-          AND p.id = sea.platform_id
-          AND COALESCE(p.provider_family, p.slug) = $1
-          AND NOT EXISTS (
-            SELECT 1 FROM social_account_observations sao
-            WHERE sao.external_account_id = sea.id
-          )
-      `,
-      [providerFamily],
-    );
-    const accountHandlesPurged = handleDelRes.rowCount ?? 0;
+        const delRes = await client.query(
+          `
+            DELETE FROM social_content_observations
+            WHERE id IN (
+              SELECT sco.id
+              FROM social_content_observations sco
+              JOIN social_connections sc ON sco.connection_id = sc.id
+              JOIN platforms p ON sc.platform_id = p.id
+              WHERE ${where}
+              LIMIT ${limitParam}
+            )
+          `,
+          params,
+        );
+        const deleted = delRes.rowCount ?? 0;
+        counts.contentObservationsPurged += deleted;
+        if (deleted < batchSize) break;
+      }
+      await checkpoint("CANONICAL_ITEMS");
+    }
 
-    // 4. Purge content metrics (derivatives)
-    const metricsDelRes = await client.query(
-      `
-        DELETE FROM social_content_metrics scm
-        USING social_connections sc, platforms p
-        WHERE scm.connection_id = sc.id
-          AND sc.platform_id = p.id
-          AND COALESCE(p.provider_family, p.slug) = $1
-          ${scopeId ? "AND scm.scope_id = $2" : ""}
-      `,
-      scopeId ? [providerFamily, scopeId] : [providerFamily],
-    );
-    const contentMetricsPurged = metricsDelRes.rowCount ?? 0;
+    // Phase 2: CANONICAL_ITEMS (Orphaned canonical items only if NO observation from any provider remains)
+    if (startPhaseIndex <= 1) {
+      while (true) {
+        const params: unknown[] = [providerFamily];
+        let where = "COALESCE(p.provider_family, p.slug) = $1";
+        if (scopeId) {
+          params.push(scopeId);
+          where += ` AND (sci.scope_id = $${params.length} OR sci.scope_id IS NULL)`;
+        }
+        params.push(batchSize);
+        const limitParam = `$${params.length}`;
+
+        const delRes = await client.query(
+          `
+            DELETE FROM social_content_items
+            WHERE id IN (
+              SELECT sci.id
+              FROM social_content_items sci
+              JOIN platforms p ON sci.platform_id = p.id
+              WHERE ${where}
+                AND NOT EXISTS (
+                  SELECT 1 FROM social_content_observations sco
+                  WHERE sco.content_item_id = sci.id
+                )
+              LIMIT ${limitParam}
+            )
+          `,
+          params,
+        );
+        const deleted = delRes.rowCount ?? 0;
+        counts.canonicalItemsPurged += deleted;
+        if (deleted < batchSize) break;
+      }
+      await checkpoint("INTERACTION_OBSERVATIONS");
+    }
+
+    // Phase 3: INTERACTION_OBSERVATIONS
+    if (startPhaseIndex <= 2) {
+      while (true) {
+        const params: unknown[] = [providerFamily];
+        let where = "COALESCE(p.provider_family, p.slug) = $1";
+        if (scopeId) {
+          params.push(scopeId);
+          where += ` AND sio.scope_id = $${params.length}`;
+        }
+        if (connectionId) {
+          params.push(connectionId);
+          where += ` AND sio.connection_id = $${params.length}`;
+        }
+        params.push(batchSize);
+        const limitParam = `$${params.length}`;
+
+        const delRes = await client.query(
+          `
+            DELETE FROM social_interaction_observations
+            WHERE id IN (
+              SELECT sio.id
+              FROM social_interaction_observations sio
+              JOIN social_connections sc ON sio.connection_id = sc.id
+              JOIN platforms p ON sc.platform_id = p.id
+              WHERE ${where}
+              LIMIT ${limitParam}
+            )
+          `,
+          params,
+        );
+        const deleted = delRes.rowCount ?? 0;
+        counts.interactionsPurged += deleted;
+        if (deleted < batchSize) break;
+      }
+      await checkpoint("CANONICAL_INTERACTIONS");
+    }
+
+    // Phase 4: CANONICAL_INTERACTIONS
+    if (startPhaseIndex <= 3) {
+      while (true) {
+        const params: unknown[] = [providerFamily];
+        let where = "COALESCE(p.provider_family, p.slug) = $1";
+        if (scopeId) {
+          params.push(scopeId);
+          where += ` AND (si.scope_id = $${params.length} OR si.scope_id IS NULL)`;
+        }
+        params.push(batchSize);
+        const limitParam = `$${params.length}`;
+
+        const delRes = await client.query(
+          `
+            DELETE FROM social_interactions
+            WHERE id IN (
+              SELECT si.id
+              FROM social_interactions si
+              JOIN platforms p ON si.platform_id = p.id
+              WHERE ${where}
+                AND NOT EXISTS (
+                  SELECT 1 FROM social_interaction_observations sio
+                  WHERE sio.interaction_id = si.id
+                )
+              LIMIT ${limitParam}
+            )
+          `,
+          params,
+        );
+        const deleted = delRes.rowCount ?? 0;
+        counts.canonicalInteractionsPurged += deleted;
+        if (deleted < batchSize) break;
+      }
+      await checkpoint("ACCOUNT_OBSERVATIONS");
+    }
+
+    // Phase 5: ACCOUNT_OBSERVATIONS
+    if (startPhaseIndex <= 4) {
+      while (true) {
+        const params: unknown[] = [providerFamily];
+        let where = "COALESCE(p.provider_family, p.slug) = $1";
+        if (scopeId) {
+          params.push(scopeId);
+          where += ` AND sao.scope_id = $${params.length}`;
+        }
+        if (connectionId) {
+          params.push(connectionId);
+          where += ` AND sao.connection_id = $${params.length}`;
+        }
+        params.push(batchSize);
+        const limitParam = `$${params.length}`;
+
+        const delRes = await client.query(
+          `
+            DELETE FROM social_account_observations
+            WHERE id IN (
+              SELECT sao.id
+              FROM social_account_observations sao
+              JOIN social_connections sc ON sao.connection_id = sc.id
+              JOIN platforms p ON sc.platform_id = p.id
+              WHERE ${where}
+              LIMIT ${limitParam}
+            )
+          `,
+          params,
+        );
+        const deleted = delRes.rowCount ?? 0;
+        counts.accountObservationsPurged += deleted;
+        if (deleted < batchSize) break;
+      }
+      await checkpoint("ACCOUNTS");
+    }
+
+    // Phase 6: ACCOUNTS (Sanitize orphaned external accounts)
+    if (startPhaseIndex <= 5) {
+      while (true) {
+        const sanitizeRes = await client.query(
+          `
+            UPDATE social_external_accounts sea
+            SET current_handle = NULL,
+                display_name = NULL,
+                profile_url = NULL,
+                profile_image_url = NULL,
+                bio = NULL,
+                location = NULL,
+                website = NULL,
+                follower_count = NULL,
+                following_count = NULL,
+                metadata = (COALESCE(sea.metadata, '{}'::jsonb)) || jsonb_build_object(
+                  'deletionRequestPurgedAt', now(),
+                  'deletionRequestId', $2::text,
+                  'providerFamily', $1::text
+                ),
+                updated_at = now()
+            WHERE sea.id IN (
+              SELECT sea2.id
+              FROM social_external_accounts sea2
+              JOIN platforms p ON p.id = sea2.platform_id
+              WHERE COALESCE(p.provider_family, p.slug) = $1
+                AND (sea2.metadata IS NULL OR NOT (sea2.metadata ? 'deletionRequestPurgedAt'))
+                AND NOT EXISTS (
+                  SELECT 1 FROM social_account_observations sao
+                  WHERE sao.external_account_id = sea2.id
+                )
+              LIMIT $3
+            )
+          `,
+          [providerFamily, deletionRequestId, batchSize],
+        );
+        const sanitized = sanitizeRes.rowCount ?? 0;
+        counts.accountsSanitized += sanitized;
+        if (sanitized < batchSize) break;
+      }
+      await checkpoint("ACCOUNT_HANDLES");
+    }
+
+    // Phase 7: ACCOUNT_HANDLES (Purge account handles for orphaned accounts)
+    if (startPhaseIndex <= 6) {
+      while (true) {
+        const handleDelRes = await client.query(
+          `
+            DELETE FROM social_account_handles
+            WHERE id IN (
+              SELECT sah.id
+              FROM social_account_handles sah
+              JOIN social_external_accounts sea ON sea.id = sah.external_account_id
+              JOIN platforms p ON p.id = sea.platform_id
+              WHERE COALESCE(p.provider_family, p.slug) = $1
+                AND NOT EXISTS (
+                  SELECT 1 FROM social_account_observations sao
+                  WHERE sao.external_account_id = sea.id
+                )
+              LIMIT $2
+            )
+          `,
+          [providerFamily, batchSize],
+        );
+        const deleted = handleDelRes.rowCount ?? 0;
+        counts.accountHandlesPurged += deleted;
+        if (deleted < batchSize) break;
+      }
+      await checkpoint("CONTENT_METRICS");
+    }
+
+    // Phase 8: CONTENT_METRICS (Purge derivatives)
+    if (startPhaseIndex <= 7) {
+      while (true) {
+        const params: unknown[] = [providerFamily];
+        let where = "COALESCE(p.provider_family, p.slug) = $1";
+        if (scopeId) {
+          params.push(scopeId);
+          where += ` AND scm.scope_id = $${params.length}`;
+        }
+        if (connectionId) {
+          params.push(connectionId);
+          where += ` AND scm.connection_id = $${params.length}`;
+        }
+        params.push(batchSize);
+        const limitParam = `$${params.length}`;
+
+        const metricsDelRes = await client.query(
+          `
+            DELETE FROM social_content_metrics
+            WHERE id IN (
+              SELECT scm.id
+              FROM social_content_metrics scm
+              JOIN social_connections sc ON scm.connection_id = sc.id
+              JOIN platforms p ON sc.platform_id = p.id
+              WHERE ${where}
+              LIMIT ${limitParam}
+            )
+          `,
+          params,
+        );
+        const deleted = metricsDelRes.rowCount ?? 0;
+        counts.contentMetricsPurged += deleted;
+        if (deleted < batchSize) break;
+      }
+      await checkpoint("COMPLETED");
+    }
 
     const evidence = {
-      contentObservationsPurged,
-      canonicalItemsPurged,
-      interactionsPurged,
-      canonicalInteractionsPurged,
-      accountObservationsPurged,
-      accountsSanitized,
-      accountHandlesPurged,
-      contentMetricsPurged,
+      ...counts,
       executedAt: new Date().toISOString(),
     };
 
@@ -504,14 +716,7 @@ export async function executeProviderDataDeletion(
       deletionRequestId,
       providerFamily,
       status: "COMPLETED",
-      contentObservationsPurged,
-      canonicalItemsPurged,
-      interactionsPurged,
-      canonicalInteractionsPurged,
-      accountObservationsPurged,
-      accountsSanitized,
-      accountHandlesPurged,
-      contentMetricsPurged,
+      ...counts,
       evidence,
     };
   } catch (err) {
