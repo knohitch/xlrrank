@@ -56,19 +56,37 @@ export interface SocialDnaProfile {
   sourceKind: "DERIVED";
 }
 
+export interface SocialDnaProfileSource {
+  externalAccountId?: string | undefined;
+  platformId?: string | undefined;
+  providerObjectId?: string | undefined;
+  bio?: string | undefined;
+  displayName?: string | undefined;
+  location?: string | undefined;
+  website?: string | undefined;
+  observedAt?: string | undefined;
+}
+
+export interface SocialDnaPolicy {
+  policyKey: string;
+  version: string;
+  tokenMinLength: number;
+  topicTaxonomy: Array<{ key: string; terms: string[] }>;
+  expertiseTopics?: string[] | undefined;
+  interestTopics?: string[] | undefined;
+  commercialTopics?: string[] | undefined;
+  audienceRules?: Array<{ key: string; topics: string[] }> | undefined;
+  communicationStyle?: { inquisitiveQuestionRatio: number } | undefined;
+  complexity?: { mediumFormMinTokens: number; longFormMinTokens: number } | undefined;
+  comparisonWeights?: { topics: number; interests: number } | undefined;
+}
+
 export interface SocialDnaInput {
   personId: string;
   algorithmVersion?: string | undefined;
-  profile?: {
-    externalAccountId?: string | undefined;
-    platformId?: string | undefined;
-    providerObjectId?: string | undefined;
-    bio?: string | undefined;
-    displayName?: string | undefined;
-    location?: string | undefined;
-    website?: string | undefined;
-    observedAt?: string | undefined;
-  };
+  policy?: SocialDnaPolicy | undefined;
+  profile?: SocialDnaProfileSource | undefined;
+  profiles?: SocialDnaProfileSource[] | undefined;
   content?: Array<{
     id?: string | undefined;
     externalAccountId?: string | undefined;
@@ -91,42 +109,112 @@ export interface SocialDnaInput {
   statedPreferences?: Record<string, string>;
 }
 
-const DEFAULT_ALGORITHM_VERSION = "social-dna-deterministic-v1";
-const TOKEN_MIN_LENGTH = 3;
-
-const TOPIC_LEXICON: Record<string, readonly string[]> = {
-  software_engineering: ["software", "engineering", "developer", "code", "typescript", "backend", "frontend"],
-  ai_automation: ["ai", "automation", "agent", "llm", "workflow", "model"],
-  saas: ["saas", "startup", "product", "growth", "b2b", "platform"],
-  fashion_beauty: ["fashion", "beauty", "style", "makeup", "skincare", "outfit"],
-  lifestyle: ["lifestyle", "wellness", "travel", "home", "creator", "visual"],
-  finance: ["finance", "fintech", "market", "investing", "payments", "banking"],
-  real_estate: ["real", "estate", "property", "broker", "homes", "realtor"],
+const STRUCTURAL_SOCIAL_DNA_POLICY: SocialDnaPolicy = {
+  policyKey: "structural",
+  version: "no-business-rules",
+  tokenMinLength: 3,
+  topicTaxonomy: [],
+  expertiseTopics: [],
+  interestTopics: [],
+  commercialTopics: [],
+  audienceRules: [],
+  communicationStyle: { inquisitiveQuestionRatio: 0.5 },
+  complexity: { mediumFormMinTokens: 10, longFormMinTokens: 30 },
+  comparisonWeights: { topics: 0.5, interests: 0.5 },
 };
 
-const COMMERCIAL_TERMS = new Set(["saas", "startup", "b2b", "growth", "market", "brand", "product", "commerce"]);
+export function validateSocialDnaPolicy(policy: SocialDnaPolicy): SocialDnaPolicy {
+  if (!policy.policyKey || !policy.version) throw new Error("Social DNA policy requires policyKey and version");
+  if (!Number.isInteger(policy.tokenMinLength) || policy.tokenMinLength < 1) {
+    throw new Error("Social DNA policy tokenMinLength must be a positive integer");
+  }
+  const topics = new Set<string>();
+  for (const topic of policy.topicTaxonomy) {
+    if (!topic.key) throw new Error("Social DNA topic key is required");
+    if (topics.has(topic.key)) throw new Error(`Duplicate Social DNA topic '${topic.key}'`);
+    topics.add(topic.key);
+    if (!Array.isArray(topic.terms) || topic.terms.length === 0 || topic.terms.some((term) => !term.trim())) {
+      throw new Error(`Social DNA topic '${topic.key}' requires non-empty terms`);
+    }
+  }
+  for (const listName of ["expertiseTopics", "interestTopics", "commercialTopics"] as const) {
+    for (const topic of policy[listName] ?? []) {
+      if (!topics.has(topic)) throw new Error(`Social DNA ${listName} references unknown topic '${topic}'`);
+    }
+  }
+  for (const rule of policy.audienceRules ?? []) {
+    if (!rule.key) throw new Error("Social DNA audience rule key is required");
+    for (const topic of rule.topics) {
+      if (!topics.has(topic)) throw new Error(`Social DNA audience rule '${rule.key}' references unknown topic '${topic}'`);
+    }
+  }
+  const communicationRatio = policy.communicationStyle?.inquisitiveQuestionRatio;
+  if (communicationRatio !== undefined && (!Number.isFinite(communicationRatio) || communicationRatio < 0 || communicationRatio > 1)) {
+    throw new Error("Social DNA inquisitiveQuestionRatio must be between 0 and 1");
+  }
+  if (policy.complexity) {
+    assertPositive(policy.complexity.mediumFormMinTokens, "Social DNA mediumFormMinTokens");
+    assertPositive(policy.complexity.longFormMinTokens, "Social DNA longFormMinTokens");
+    if (policy.complexity.mediumFormMinTokens > policy.complexity.longFormMinTokens) {
+      throw new Error("Social DNA mediumFormMinTokens cannot exceed longFormMinTokens");
+    }
+  }
+  if (policy.comparisonWeights) {
+    assertFiniteNonnegative(policy.comparisonWeights.topics, "Social DNA comparison topic weight");
+    assertFiniteNonnegative(policy.comparisonWeights.interests, "Social DNA comparison interest weight");
+    if (policy.comparisonWeights.topics + policy.comparisonWeights.interests <= 0) {
+      throw new Error("Social DNA comparison weights must contain a positive total");
+    }
+  }
+  return policy;
+}
 
 export function generateSocialDna(input: SocialDnaInput): SocialDnaProfile {
-  const algorithmVersion = input.algorithmVersion ?? DEFAULT_ALGORITHM_VERSION;
+  const policy = validateSocialDnaPolicy(input.policy ?? STRUCTURAL_SOCIAL_DNA_POLICY);
+  const algorithmVersion = input.algorithmVersion ?? `social-dna:${policy.policyKey}:${policy.version}`;
   const evidence: SocialDnaEvidence[] = [];
   const statedSignals: SocialDnaSignal[] = [];
   const observedSignals: SocialDnaSignal[] = [];
   const topicCounts = new Map<string, number>();
   const formatCounts = new Map<string, number>();
-  const languageCounts = new Map<string, number>();
+  const profiles = profileSources(input);
 
-  if (input.profile?.bio) {
-    for (const [topic, count] of classifyText(input.profile.bio)) {
-      addCount(topicCounts, topic, count);
-      const item = evidenceItem("STATED", "profile_bio_topic", count, algorithmVersion, {
-        externalAccountId: input.profile.externalAccountId,
-        platformId: input.profile.platformId,
-        providerObjectId: input.profile.providerObjectId,
-        observedAt: input.profile.observedAt,
-        sample: topic,
+  for (const profile of profiles) {
+    if (profile.bio) {
+      for (const [topic, count] of classifyText(profile.bio, policy)) {
+        addCount(topicCounts, topic, count);
+        const item = evidenceItem("STATED", "profile_bio_topic", count, algorithmVersion, {
+          externalAccountId: profile.externalAccountId,
+          platformId: profile.platformId,
+          providerObjectId: profile.providerObjectId,
+          observedAt: profile.observedAt,
+          sample: topic,
+        });
+        evidence.push(item);
+        statedSignals.push({ key: "profile_bio_topic", value: topic, sourceKind: "STATED", evidence: [item] });
+      }
+    }
+    if (profile.location) {
+      const item = evidenceItem("STATED", "profile_location", 1, algorithmVersion, {
+        externalAccountId: profile.externalAccountId,
+        platformId: profile.platformId,
+        providerObjectId: profile.providerObjectId,
+        observedAt: profile.observedAt,
+        sample: profile.location,
       });
       evidence.push(item);
-      statedSignals.push({ key: "profile_bio_topic", value: topic, sourceKind: "STATED", evidence: [item] });
+      statedSignals.push({ key: "location", value: profile.location, sourceKind: "STATED", evidence: [item] });
+    }
+    if (profile.website) {
+      const item = evidenceItem("STATED", "profile_website", 1, algorithmVersion, {
+        externalAccountId: profile.externalAccountId,
+        platformId: profile.platformId,
+        providerObjectId: profile.providerObjectId,
+        observedAt: profile.observedAt,
+        sample: profile.website,
+      });
+      evidence.push(item);
+      statedSignals.push({ key: "website", value: profile.website, sourceKind: "STATED", evidence: [item] });
     }
   }
 
@@ -138,8 +226,7 @@ export function generateSocialDna(input: SocialDnaInput): SocialDnaProfile {
 
   for (const content of input.content ?? []) {
     addCount(formatCounts, content.contentType ?? "post", 1);
-    if (content.language) addCount(languageCounts, content.language, 1);
-    for (const [topic, count] of classifyText(content.body)) {
+    for (const [topic, count] of classifyText(content.body, policy)) {
       addCount(topicCounts, topic, count);
       const item = evidenceItem("OBSERVED", "content_topic", count, algorithmVersion, {
         contentItemId: content.id,
@@ -168,6 +255,7 @@ export function generateSocialDna(input: SocialDnaInput): SocialDnaProfile {
 
   const sortedTopics = sortedCountKeys(topicCounts);
   const contentFormats = sortedCountKeys(formatCounts);
+  const geography = uniqueSorted(statedSignals.filter((signal) => signal.key === "location").map((signal) => signal.value));
   const dimensions: SocialDnaDimension[] = [];
   if (sortedTopics.length > 0) {
     dimensions.push({
@@ -191,23 +279,14 @@ export function generateSocialDna(input: SocialDnaInput): SocialDnaProfile {
       ),
     });
   }
-  if (input.profile?.location) {
-    const item = evidenceItem("STATED", "profile_location", 1, algorithmVersion, {
-      externalAccountId: input.profile.externalAccountId,
-      platformId: input.profile.platformId,
-      providerObjectId: input.profile.providerObjectId,
-      observedAt: input.profile.observedAt,
-      sample: input.profile.location,
-    });
-    evidence.push(item);
-    statedSignals.push({ key: "location", value: input.profile.location, sourceKind: "STATED", evidence: [item] });
+  if (geography.length > 0) {
     dimensions.push({
       key: "geography",
       label: "Geography/location signals",
-      values: [input.profile.location],
-      confidence: confidenceFromCounts(1, evidence.length),
+      values: geography,
+      confidence: confidenceFromCounts(geography.length, evidence.length),
       sourceKind: "STATED",
-      evidence: [item],
+      evidence: evidence.filter((e) => e.signalType === "profile_location"),
     });
   }
 
@@ -219,8 +298,9 @@ export function generateSocialDna(input: SocialDnaInput): SocialDnaProfile {
   };
   const sourceFingerprint = fingerprint({
     algorithmVersion,
+    policy: { policyKey: policy.policyKey, version: policy.version, config: policy },
     personId: input.personId,
-    profile: input.profile ?? null,
+    profiles,
     content: [...(input.content ?? [])].sort(compareSourceIds),
     interactions: [...(input.interactions ?? [])].sort(compareSourceIds),
     statedPreferences: input.statedPreferences ?? {},
@@ -236,23 +316,19 @@ export function generateSocialDna(input: SocialDnaInput): SocialDnaProfile {
     statedSignals,
     observedSignals,
     evidence,
-    expertise: sortedTopics.filter((topic) => !["lifestyle", "fashion_beauty"].includes(topic)),
+    expertise: sortedTopics.filter((topic) => (policy.expertiseTopics ?? []).includes(topic)),
     topics: sortedTopics,
-    interests: [
-      ...new Set([
-        ...statedSignals.map((s) => s.value),
-        ...sortedTopics.filter((topic) => topic === "lifestyle" || topic === "fashion_beauty"),
-      ]),
-    ].sort(),
-    commercialInterests: sortedTopics.filter((topic) =>
-      TOPIC_LEXICON[topic]?.some((term) => COMMERCIAL_TERMS.has(term)),
-    ),
-    geography: input.profile?.location ? [input.profile.location] : [],
-    audienceTypes: inferAudienceTypes(sortedTopics),
+    interests: uniqueSorted([
+      ...Object.values(input.statedPreferences ?? {}),
+      ...sortedTopics.filter((topic) => (policy.interestTopics ?? []).includes(topic)),
+    ]),
+    commercialInterests: sortedTopics.filter((topic) => (policy.commercialTopics ?? []).includes(topic)),
+    geography,
+    audienceTypes: inferAudienceTypes(sortedTopics, policy),
     contentFormats,
-    communicationStyle: inferCommunicationStyle(input.content ?? []),
+    communicationStyle: inferCommunicationStyle(input.content ?? [], policy),
     tone: "unknown",
-    complexity: inferComplexity(input.content ?? []),
+    complexity: inferComplexity(input.content ?? [], policy),
     generatedAt: sourceWindow.to ?? sourceWindow.from ?? "1970-01-01T00:00:00.000Z",
     sourceKind: "DERIVED",
   };
@@ -261,34 +337,39 @@ export function generateSocialDna(input: SocialDnaInput): SocialDnaProfile {
 export function compareDnaProfiles(
   a: SocialDnaProfile,
   b: SocialDnaProfile,
+  policy?: Pick<SocialDnaPolicy, "comparisonWeights">,
 ): { similarity: number; sharedTopics: string[]; sharedInterests: string[] } {
+  const weights = policy?.comparisonWeights ?? STRUCTURAL_SOCIAL_DNA_POLICY.comparisonWeights ?? { topics: 0.5, interests: 0.5 };
+  const totalWeight = weights.topics + weights.interests;
   const sharedTopics = a.topics.filter((t) => b.topics.includes(t));
   const sharedInterests = a.interests.filter((i) => b.interests.includes(i));
   const maxTopics = Math.max(a.topics.length, b.topics.length, 1);
   const maxInterests = Math.max(a.interests.length, b.interests.length, 1);
   const similarity = Math.round(
-    ((sharedTopics.length / maxTopics) * 0.6 + (sharedInterests.length / maxInterests) * 0.4) * 100,
+    ((sharedTopics.length / maxTopics) * (weights.topics / totalWeight) +
+      (sharedInterests.length / maxInterests) * (weights.interests / totalWeight)) *
+      100,
   );
   return { similarity, sharedTopics, sharedInterests };
 }
 
-function classifyText(text: string): Map<string, number> {
-  const tokens = tokenize(text);
+function classifyText(text: string, policy: SocialDnaPolicy): Map<string, number> {
+  const tokens = tokenize(text, policy.tokenMinLength);
   const result = new Map<string, number>();
-  for (const [topic, terms] of Object.entries(TOPIC_LEXICON)) {
+  for (const topic of policy.topicTaxonomy) {
     let count = 0;
-    for (const term of terms) count += tokens.filter((token) => token === term).length;
-    if (count > 0) result.set(topic, count);
+    for (const term of topic.terms) count += tokens.filter((token) => token === term.toLowerCase()).length;
+    if (count > 0) result.set(topic.key, count);
   }
   return result;
 }
 
-function tokenize(text: string): string[] {
+function tokenize(text: string, minLength: number): string[] {
   return text
     .toLowerCase()
     .replace(/https?:\/\/\S+/g, " ")
     .split(/[^a-z0-9]+/)
-    .filter((token) => token.length >= TOKEN_MIN_LENGTH);
+    .filter((token) => token.length >= minLength);
 }
 
 function evidenceItem(
@@ -337,30 +418,60 @@ function sortJson(value: unknown): unknown {
 }
 
 function compareSourceIds(
-  a: { id?: string | undefined; providerObjectId?: string | undefined },
-  b: { id?: string | undefined; providerObjectId?: string | undefined },
+  a: { id?: string | undefined; externalAccountId?: string | undefined; providerObjectId?: string | undefined },
+  b: { id?: string | undefined; externalAccountId?: string | undefined; providerObjectId?: string | undefined },
 ): number {
-  return (a.id ?? a.providerObjectId ?? "").localeCompare(b.id ?? b.providerObjectId ?? "");
+  return (a.id ?? a.externalAccountId ?? a.providerObjectId ?? "").localeCompare(b.id ?? b.externalAccountId ?? b.providerObjectId ?? "");
 }
 
-function inferAudienceTypes(topics: string[]): string[] {
+function profileSources(input: SocialDnaInput): SocialDnaProfileSource[] {
+  const sources = [...(input.profiles ?? [])];
+  if (input.profile) sources.push(input.profile);
+  const seen = new Set<string>();
+  return sources
+    .filter((source) => {
+      const key = source.externalAccountId ?? `${source.platformId ?? ""}:${source.providerObjectId ?? ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort(compareSourceIds);
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))].sort();
+}
+
+function inferAudienceTypes(topics: string[], policy: SocialDnaPolicy): string[] {
   const audience = new Set<string>();
-  if (topics.some((t) => ["software_engineering", "ai_automation", "saas"].includes(t))) audience.add("developer");
-  if (topics.some((t) => ["fashion_beauty", "lifestyle"].includes(t))) audience.add("creator");
-  if (topics.includes("finance")) audience.add("commercial");
+  for (const rule of policy.audienceRules ?? []) {
+    if (topics.some((topic) => rule.topics.includes(topic))) audience.add(rule.key);
+  }
   return [...audience].sort();
 }
 
-function inferCommunicationStyle(content: Array<{ body: string }>): string {
+function inferCommunicationStyle(content: Array<{ body: string }>, policy: SocialDnaPolicy): string {
   if (content.length === 0) return "unknown";
+  const ratio = policy.communicationStyle?.inquisitiveQuestionRatio ?? 0.5;
   const questionCount = content.filter((item) => item.body.includes("?")).length;
-  return questionCount > content.length / 2 ? "inquisitive" : "informational";
+  return questionCount / content.length > ratio ? "inquisitive" : "informational";
 }
 
-function inferComplexity(content: Array<{ body: string }>): string {
+function inferComplexity(content: Array<{ body: string }>, policy: SocialDnaPolicy): string {
   if (content.length === 0) return "unknown";
-  const averageLength = content.reduce((sum, item) => sum + tokenize(item.body).length, 0) / content.length;
-  if (averageLength >= 30) return "long_form";
-  if (averageLength >= 10) return "medium_form";
+  const rules = policy.complexity ?? STRUCTURAL_SOCIAL_DNA_POLICY.complexity ?? { mediumFormMinTokens: 10, longFormMinTokens: 30 };
+  const averageLength = content.reduce((sum, item) => sum + tokenize(item.body, policy.tokenMinLength).length, 0) / content.length;
+  if (averageLength >= rules.longFormMinTokens) return "long_form";
+  if (averageLength >= rules.mediumFormMinTokens) return "medium_form";
   return "short_form";
+}
+
+function assertPositive(value: unknown, path: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) throw new Error(`${path} must be a positive integer`);
+}
+
+function assertFiniteNonnegative(value: unknown, path: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${path} must be a finite nonnegative number`);
+  }
 }

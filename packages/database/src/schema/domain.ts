@@ -12,6 +12,7 @@ import {
   primaryKey,
   doublePrecision,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { users, platforms, aiProviders, aiModels, jobs, organizations } from "./auth.js";
 
 export const dataScopes = pgTable(
@@ -745,7 +746,9 @@ export const canonicalPersonAccounts = pgTable(
   (t) => [
     index("canonical_person_accounts_scope_idx").on(t.scopeId),
     index("canonical_person_accounts_person_idx").on(t.personId),
-    uniqueIndex("canonical_person_accounts_active_unique").on(t.scopeId, t.externalAccountId, t.status),
+    uniqueIndex("canonical_person_accounts_confirmed_unique")
+      .on(t.scopeId, t.externalAccountId)
+      .where(sql`${t.status} = 'CONFIRMED'`),
   ],
 );
 
@@ -763,6 +766,29 @@ export const identityResolutionPolicies = pgTable(
   (t) => [
     uniqueIndex("identity_resolution_policies_key_version_unique").on(t.policyKey, t.version),
     index("identity_resolution_policies_active_idx").on(t.policyKey, t.active),
+    uniqueIndex("identity_resolution_policies_one_active_unique")
+      .on(t.policyKey)
+      .where(sql`${t.active} = true`),
+  ],
+);
+
+export const socialDnaPolicies = pgTable(
+  "social_dna_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    policyKey: text("policy_key").notNull(),
+    version: text("version").notNull(),
+    config: jsonb("config").notNull(),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("social_dna_policies_key_version_unique").on(t.policyKey, t.version),
+    index("social_dna_policies_active_idx").on(t.policyKey, t.active),
+    uniqueIndex("social_dna_policies_one_active_unique")
+      .on(t.policyKey)
+      .where(sql`${t.active} = true`),
   ],
 );
 

@@ -21,6 +21,7 @@ export interface IdentityAccountInput {
 export interface IdentitySignalPolicy {
   key: string;
   weight: number;
+  threshold?: number | undefined;
 }
 
 export interface IdentityResolutionPolicy {
@@ -97,6 +98,7 @@ export function validateIdentityResolutionPolicy(policy: IdentityResolutionPolic
     if (seen.has(signal.key)) throw new Error(`Duplicate identity signal '${signal.key}'`);
     seen.add(signal.key);
     assertFiniteNonnegative(signal.weight, `signals.${signal.key}.weight`);
+    if (signal.threshold !== undefined) assertThreshold(signal.threshold, `signals.${signal.key}.threshold`);
   }
   return policy;
 }
@@ -143,7 +145,7 @@ export function orderedPair(a: string, b: string): [string, string] {
 }
 
 function evaluateSignal(policy: IdentitySignalPolicy, a: IdentityAccountInput, b: IdentityAccountInput): IdentityMatchSignal {
-  const result = signalMatched(policy.key, a, b);
+  const result = signalMatched(policy, a, b);
   return {
     key: policy.key,
     matched: result.matched,
@@ -154,17 +156,18 @@ function evaluateSignal(policy: IdentitySignalPolicy, a: IdentityAccountInput, b
 }
 
 function signalMatched(
-  key: string,
+  policy: IdentitySignalPolicy,
   a: IdentityAccountInput,
   b: IdentityAccountInput,
 ): { matched: boolean; description: string } {
+  const key = policy.key;
   if (key === "name_similarity") {
     const similarity = textSimilarity(a.name, b.name);
-    return { matched: similarity >= 0.8, description: `normalized display-name similarity ${similarity.toFixed(4)}` };
+    return thresholdMatch("normalized display-name similarity", similarity, policy.threshold);
   }
   if (key === "handle_similarity") {
     const similarity = textSimilarity(normalizeHandle(a.handle), normalizeHandle(b.handle));
-    return { matched: similarity >= 0.8, description: `normalized handle similarity ${similarity.toFixed(4)}` };
+    return thresholdMatch("normalized handle similarity", similarity, policy.threshold);
   }
   if (key === "company_match") return exactTextMatch(key, a.company, b.company);
   if (key === "role_match") return exactTextMatch(key, a.role, b.role);
@@ -186,13 +189,24 @@ function signalMatched(
   if (key === "location_match") return exactTextMatch(key, a.location, b.location);
   if (key === "bio_similarity") {
     const similarity = tokenJaccard(a.bio, b.bio);
-    return { matched: similarity >= 0.35, description: `bio token similarity ${similarity.toFixed(4)}` };
+    return thresholdMatch("bio token similarity", similarity, policy.threshold);
   }
   if (key === "topic_similarity") {
     const similarity = setJaccard(new Set(a.topics ?? []), new Set(b.topics ?? []));
-    return { matched: similarity >= 0.35, description: `topic similarity ${similarity.toFixed(4)}` };
+    return thresholdMatch("topic similarity", similarity, policy.threshold);
   }
   throw new Error(`Unsupported identity signal '${key}'`);
+}
+
+function thresholdMatch(
+  label: string,
+  value: number,
+  configuredThreshold: number | undefined,
+): { matched: boolean; description: string } {
+  if (configuredThreshold === undefined) {
+    return { matched: value > 0, description: `${label} ${value.toFixed(4)} above structural zero threshold` };
+  }
+  return { matched: value >= configuredThreshold, description: `${label} ${value.toFixed(4)} threshold ${configuredThreshold.toFixed(4)}` };
 }
 
 function detectContradictions(

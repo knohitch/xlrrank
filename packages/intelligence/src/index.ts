@@ -1,8 +1,8 @@
 export type { ScoringComponent, ScoringConfig } from "./scoring.js";
 export { DEFAULT_DISCOVERY_SCORING, computeDeterministicScore } from "./scoring.js";
 
-export type { SocialDnaDimension, SocialDnaProfile, SocialDnaInput } from "./social-dna.js";
-export { generateSocialDna, compareDnaProfiles } from "./social-dna.js";
+export type { SocialDnaDimension, SocialDnaPolicy, SocialDnaProfile, SocialDnaInput } from "./social-dna.js";
+export { generateSocialDna, compareDnaProfiles, validateSocialDnaPolicy } from "./social-dna.js";
 
 export type {
   IdentityAccountInput,

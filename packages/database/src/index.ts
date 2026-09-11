@@ -113,6 +113,7 @@ export type {
 export {
   linkIdentityCandidate,
   persistIdentityResolutionPolicy,
+  persistSocialDnaPolicy,
   recomputeSocialDnaForPerson,
   rejectIdentityCandidate,
   resolveIdentityCandidate,
@@ -121,6 +122,7 @@ export {
 export type {
   ManualIdentityDecisionInput,
   PersistIdentityResolutionPolicyInput,
+  PersistSocialDnaPolicyInput,
   RecomputeSocialDnaInput,
   ResolveIdentityCandidateInput,
 } from "./intelligence/social-intelligence.js";

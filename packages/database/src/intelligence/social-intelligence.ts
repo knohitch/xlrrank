@@ -5,8 +5,10 @@ import {
   orderedPair,
   shouldAutoMerge,
   validateIdentityResolutionPolicy,
+  validateSocialDnaPolicy,
   type IdentityAccountInput,
   type IdentityResolutionPolicy,
+  type SocialDnaPolicy,
   type SocialDnaProfile,
 } from "@xlrrank/intelligence";
 import { getPool } from "../client.js";
@@ -15,6 +17,11 @@ type Executor = Pick<Pool | PoolClient, "query">;
 
 export interface PersistIdentityResolutionPolicyInput {
   policy: IdentityResolutionPolicy;
+  active?: boolean;
+}
+
+export interface PersistSocialDnaPolicyInput {
+  policy: SocialDnaPolicy;
   active?: boolean;
 }
 
@@ -35,6 +42,7 @@ export interface RecomputeSocialDnaInput {
   scopeId: string;
   personId: string;
   algorithmVersion?: string;
+  policyKey?: string;
 }
 
 export async function persistIdentityResolutionPolicy(
@@ -42,19 +50,71 @@ export async function persistIdentityResolutionPolicy(
   executor: Executor = getPool(),
 ): Promise<string> {
   const policy = validateIdentityResolutionPolicy(input.policy);
-  const result = await executor.query<{ id: string }>(
-    `
-      INSERT INTO identity_resolution_policies (policy_key, version, config, active)
-      VALUES ($1, $2, $3, $4)
-      ON CONFLICT (policy_key, version)
-      DO UPDATE SET config = EXCLUDED.config, active = EXCLUDED.active, updated_at = now()
-      RETURNING id
-    `,
-    [policy.policyKey, policy.version, policy, input.active ?? true],
-  );
-  const row = result.rows[0];
-  if (!row) throw new Error("Identity resolution policy was not persisted");
-  return row.id;
+  return persistVersionedPolicy(executor, {
+    table: "identity_resolution_policies",
+    key: policy.policyKey,
+    version: policy.version,
+    config: policy,
+    active: input.active ?? true,
+  });
+}
+
+export async function persistSocialDnaPolicy(
+  input: PersistSocialDnaPolicyInput,
+  executor: Executor = getPool(),
+): Promise<string> {
+  const policy = validateSocialDnaPolicy(input.policy);
+  return persistVersionedPolicy(executor, {
+    table: "social_dna_policies",
+    key: policy.policyKey,
+    version: policy.version,
+    config: policy,
+    active: input.active ?? true,
+  });
+}
+
+async function persistVersionedPolicy(
+  executor: Executor,
+  input: { table: "identity_resolution_policies" | "social_dna_policies"; key: string; version: string; config: unknown; active: boolean },
+): Promise<string> {
+  const run = async (client: Executor): Promise<string> => {
+    if (input.active) {
+      await client.query(`UPDATE ${input.table} SET active = false, updated_at = now() WHERE policy_key = $1 AND version <> $2`, [
+        input.key,
+        input.version,
+      ]);
+    }
+    const result = await client.query<{ id: string }>(
+      `
+        INSERT INTO ${input.table} (policy_key, version, config, active)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (policy_key, version)
+        DO UPDATE SET config = EXCLUDED.config, active = EXCLUDED.active, updated_at = now()
+        RETURNING id
+      `,
+      [input.key, input.version, input.config, input.active],
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error("Policy was not persisted");
+    return row.id;
+  };
+  const maybePool = executor as Executor & { connect?: () => Promise<PoolClient> };
+  if (typeof maybePool.connect === "function") {
+    const client = await maybePool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`policy:${input.table}:${input.key}`]);
+      const id = await run(client);
+      await client.query("COMMIT");
+      return id;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+  return run(executor);
 }
 
 export async function resolveIdentityCandidate(input: ResolveIdentityCandidateInput): Promise<{
@@ -159,6 +219,13 @@ export async function linkIdentityCandidate(input: ManualIdentityDecisionInput):
 export async function splitIdentityCandidate(input: ManualIdentityDecisionInput): Promise<void> {
   await withDecisionTransaction(input.candidateId, async (client, candidate) => {
     const accounts = await candidateAccounts(client, input.candidateId);
+    await lockMembershipAccounts(client, accounts.scopeId, [accounts.accountAId, accounts.accountBId]);
+    const priorMemberships = await loadConfirmedMemberships(client, accounts.scopeId, [accounts.accountAId, accounts.accountBId]);
+    await invalidateCurrentSocialDnaForPeople(
+      client,
+      accounts.scopeId,
+      priorMemberships.map((row) => row.person_id),
+    );
     await client.query(
       `
         UPDATE canonical_person_accounts
@@ -268,6 +335,21 @@ async function loadActivePolicy(executor: Executor, policyKey: string): Promise<
   return validateIdentityResolutionPolicy(result.rows[0].config);
 }
 
+async function loadActiveSocialDnaPolicy(executor: Executor, policyKey: string): Promise<SocialDnaPolicy> {
+  const result = await executor.query<{ config: SocialDnaPolicy }>(
+    `
+      SELECT config
+      FROM social_dna_policies
+      WHERE policy_key = $1 AND active = true
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT 1
+    `,
+    [policyKey],
+  );
+  if (!result.rowCount || !result.rows[0]) throw new Error(`Social DNA policy '${policyKey}' is not configured`);
+  return validateSocialDnaPolicy(result.rows[0].config);
+}
+
 async function loadAccountForIdentity(executor: Executor, scopeId: string, accountId: string): Promise<IdentityAccountInput> {
   const result = await executor.query<{
     id: string;
@@ -338,19 +420,42 @@ async function withDecisionTransaction<T>(
 
 async function linkCandidateAccounts(executor: Executor, candidateId: string): Promise<string> {
   const accounts = await candidateAccounts(executor, candidateId);
-  const existingPerson = await executor.query<{ person_id: string }>(
-    `
-      SELECT person_id
-      FROM canonical_person_accounts
-      WHERE scope_id = $1 AND external_account_id IN ($2, $3) AND status = 'CONFIRMED'
-      ORDER BY linked_at ASC
-      LIMIT 1
-    `,
-    [accounts.scopeId, accounts.accountAId, accounts.accountBId],
-  );
-  const personId = existingPerson.rows[0]?.person_id ?? (await createPersonFromAccount(executor, accounts.accountAId));
+  await lockMembershipAccounts(executor, accounts.scopeId, [accounts.accountAId, accounts.accountBId]);
+  const directMemberships = await loadConfirmedMemberships(executor, accounts.scopeId, [accounts.accountAId, accounts.accountBId]);
+  let candidatePersonIds = uniqueSortedStrings(directMemberships.map((row) => row.person_id));
+
+  if (candidatePersonIds.length > 1) {
+    const clusterRows = await loadConfirmedAccountsForPeople(executor, accounts.scopeId, candidatePersonIds);
+    await lockMembershipAccounts(
+      executor,
+      accounts.scopeId,
+      uniqueSortedStrings(clusterRows.map((row) => row.external_account_id)),
+    );
+    const refreshedRows = await loadConfirmedAccountsForPeople(executor, accounts.scopeId, candidatePersonIds);
+    candidatePersonIds = uniqueSortedStrings(refreshedRows.map((row) => row.person_id));
+  }
+
+  const personId = candidatePersonIds[0] ?? (await createPersonFromAccount(executor, accounts.accountAId));
+  const losingPersonIds = candidatePersonIds.filter((id) => id !== personId);
+  const affectedPersonIds = uniqueSortedStrings([personId, ...losingPersonIds]);
+
+  if (losingPersonIds.length > 0) {
+    await executor.query(
+      `
+        UPDATE canonical_person_accounts
+        SET person_id = $3,
+            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('canonical_union_from_person_ids', $4::jsonb),
+            updated_at = now()
+        WHERE scope_id = $1 AND person_id = ANY($2::uuid[]) AND status = 'CONFIRMED'
+      `,
+      [accounts.scopeId, losingPersonIds, personId, JSON.stringify(losingPersonIds)],
+    );
+  }
+
   await insertConfirmedAccountLink(executor, accounts.scopeId, personId, accounts.accountAId, candidateId);
   await insertConfirmedAccountLink(executor, accounts.scopeId, personId, accounts.accountBId, candidateId);
+  await invalidateCurrentSocialDnaForPeople(executor, accounts.scopeId, affectedPersonIds);
+  await assertCandidateAccountsSharePerson(executor, accounts.scopeId, [accounts.accountAId, accounts.accountBId], candidateId);
   return personId;
 }
 
@@ -409,11 +514,91 @@ async function insertConfirmedAccountLink(
     `
       INSERT INTO canonical_person_accounts (scope_id, person_id, external_account_id, status, source_candidate_id)
       VALUES ($1, $2, $3, 'CONFIRMED', $4)
-      ON CONFLICT (scope_id, external_account_id, status)
+      ON CONFLICT (scope_id, external_account_id) WHERE status = 'CONFIRMED'
       DO UPDATE SET person_id = EXCLUDED.person_id, source_candidate_id = EXCLUDED.source_candidate_id, updated_at = now()
     `,
     [scopeId, personId, accountId, candidateId],
   );
+}
+
+async function lockMembershipAccounts(executor: Executor, scopeId: string, accountIds: string[]): Promise<void> {
+  for (const accountId of uniqueSortedStrings(accountIds)) {
+    await executor.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`identity-membership:${scopeId}:${accountId}`]);
+  }
+}
+
+async function loadConfirmedMemberships(
+  executor: Executor,
+  scopeId: string,
+  accountIds: string[],
+): Promise<Array<{ person_id: string; external_account_id: string }>> {
+  if (accountIds.length === 0) return [];
+  const result = await executor.query<{ person_id: string; external_account_id: string }>(
+    `
+      SELECT person_id, external_account_id
+      FROM canonical_person_accounts
+      WHERE scope_id = $1 AND external_account_id = ANY($2::uuid[]) AND status = 'CONFIRMED'
+      ORDER BY external_account_id
+      FOR UPDATE
+    `,
+    [scopeId, uniqueSortedStrings(accountIds)],
+  );
+  return result.rows;
+}
+
+async function loadConfirmedAccountsForPeople(
+  executor: Executor,
+  scopeId: string,
+  personIds: string[],
+): Promise<Array<{ person_id: string; external_account_id: string }>> {
+  if (personIds.length === 0) return [];
+  const result = await executor.query<{ person_id: string; external_account_id: string }>(
+    `
+      SELECT person_id, external_account_id
+      FROM canonical_person_accounts
+      WHERE scope_id = $1 AND person_id = ANY($2::uuid[]) AND status = 'CONFIRMED'
+      ORDER BY external_account_id
+      FOR UPDATE
+    `,
+    [scopeId, uniqueSortedStrings(personIds)],
+  );
+  return result.rows;
+}
+
+async function invalidateCurrentSocialDnaForPeople(executor: Executor, scopeId: string, personIds: string[]): Promise<void> {
+  const uniquePersonIds = uniqueSortedStrings(personIds);
+  if (uniquePersonIds.length === 0) return;
+  await executor.query(
+    `
+      UPDATE social_dna_profiles
+      SET is_current = false, superseded_at = COALESCE(superseded_at, now())
+      WHERE scope_id = $1 AND person_id = ANY($2::uuid[]) AND is_current = true
+    `,
+    [scopeId, uniquePersonIds],
+  );
+}
+
+async function assertCandidateAccountsSharePerson(
+  executor: Executor,
+  scopeId: string,
+  accountIds: string[],
+  candidateId: string,
+): Promise<void> {
+  const result = await executor.query<{ person_id: string }>(
+    `
+      SELECT DISTINCT person_id
+      FROM canonical_person_accounts
+      WHERE scope_id = $1 AND external_account_id = ANY($2::uuid[]) AND status = 'CONFIRMED'
+    `,
+    [scopeId, uniqueSortedStrings(accountIds)],
+  );
+  if (result.rows.length !== 1) {
+    throw new Error(`Linked identity candidate '${candidateId}' did not converge to one canonical person`);
+  }
+}
+
+function uniqueSortedStrings(values: string[]): string[] {
+  return [...new Set(values)].sort();
 }
 
 async function updateCandidateStatus(
@@ -452,6 +637,7 @@ async function loadSocialDnaInput(
   executor: Executor,
   input: RecomputeSocialDnaInput,
 ): Promise<Parameters<typeof generateSocialDna>[0]> {
+  const policy = await loadActiveSocialDnaPolicy(executor, input.policyKey ?? "default");
   const accounts = await executor.query<{
     id: string;
     platform_id: string;
@@ -474,7 +660,6 @@ async function loadSocialDnaInput(
     [input.scopeId, input.personId],
   );
   const accountIds = accounts.rows.map((row) => row.id);
-  const profile = accounts.rows[0];
   const content = accountIds.length
     ? await executor.query<{
         id: string;
@@ -519,6 +704,17 @@ async function loadSocialDnaInput(
   const dnaInput: Parameters<typeof generateSocialDna>[0] = {
     personId: input.personId,
     algorithmVersion: input.algorithmVersion,
+    policy,
+    profiles: accounts.rows.map((profile) => ({
+      externalAccountId: profile.id,
+      platformId: profile.platform_id,
+      providerObjectId: profile.external_id,
+      bio: profile.bio ?? undefined,
+      displayName: profile.display_name ?? profile.current_handle ?? undefined,
+      location: profile.location ?? undefined,
+      website: profile.website ?? undefined,
+      observedAt: profile.last_observed_at.toISOString(),
+    })),
     content: content.rows.map((row) => ({
       id: row.id,
       externalAccountId: row.author_external_account_id,
@@ -539,17 +735,5 @@ async function loadSocialDnaInput(
       observedAt: row.occurred_at.toISOString(),
     })),
   };
-  if (profile) {
-    dnaInput.profile = {
-      externalAccountId: profile.id,
-      platformId: profile.platform_id,
-      providerObjectId: profile.external_id,
-      bio: profile.bio ?? undefined,
-      displayName: profile.display_name ?? profile.current_handle ?? undefined,
-      location: profile.location ?? undefined,
-      website: profile.website ?? undefined,
-      observedAt: profile.last_observed_at.toISOString(),
-    };
-  }
   return dnaInput;
 }
