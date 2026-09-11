@@ -33,6 +33,27 @@ test("production requires signing and encryption secrets", async () => {
     NODE_ENV: "production",
     SESSION_SIGNING_SECRET: "s".repeat(32),
     ENCRYPTION_MASTER_KEY: "e".repeat(32),
+    AI_ROUTING_POLICY_JSON: "{}",
+  });
+  assert.equal(valid.success, true);
+});
+
+test("production requires configured AI routing policy", async () => {
+  const { envSchema } = await import("../dist/env.js");
+  const missing = envSchema.safeParse({
+    NODE_ENV: "production",
+    SESSION_SIGNING_SECRET: "s".repeat(32),
+    ENCRYPTION_MASTER_KEY: "e".repeat(32),
+  });
+  assert.equal(missing.success, false);
+
+  const malformed = envSchema.safeParse({
+    AI_ROUTING_POLICY_JSON: "not-json",
+  });
+  assert.equal(malformed.success, false);
+
+  const valid = envSchema.safeParse({
+    AI_ROUTING_POLICY_JSON: "{}",
   });
   assert.equal(valid.success, true);
 });

@@ -1,5 +1,6 @@
-import type { ReasoningTier } from "@xlrrank/shared";
-import type { AiCapability } from "../capabilities.js";
+import { getEnv } from "@xlrrank/config";
+import { REASONING_TIERS, type ReasoningTier } from "@xlrrank/shared";
+import { AI_CAPABILITIES, type AiCapability } from "../capabilities.js";
 import type { BaseAiProvider } from "../providers/base.js";
 import type { AiMessage, EmbeddingResponse, StructuredResponse, TextGenerationResponse } from "../providers/types.js";
 import type { ModelLifecycleStage } from "../registry/types.js";
@@ -80,6 +81,7 @@ export interface RoutingPolicy {
 }
 
 export type RuntimeProviderResolver = (candidate: RoutingModelCandidate) => Promise<BaseAiProvider>;
+export type RoutingPolicyProvider = () => RoutingPolicy;
 
 export interface RoutingDecision {
   providerId: string;
@@ -139,44 +141,30 @@ interface RankedCandidate {
   score: number;
 }
 
-const DEFAULT_ROUTING_MODE_WEIGHTS: Record<RoutingMode, RoutingModeWeights> = {
-  AUTOMATIC: { quality: 1, latency: 1, health: 1, capabilityPreference: 1 },
-  QUALITY_OPTIMIZED: { quality: 1.6, latency: 0.4, health: 1, capabilityPreference: 1.2 },
-  COST_OPTIMIZED: { quality: 0.6, latency: 1.6, health: 1, capabilityPreference: 0.7 },
-  CUSTOM: { quality: 1, latency: 1, health: 1, capabilityPreference: 1 },
+const ROUTING_MODES = ["AUTOMATIC", "QUALITY_OPTIMIZED", "COST_OPTIMIZED", "CUSTOM"] as const satisfies readonly RoutingMode[];
+const ROUTING_MODE_SET = new Set<string>(ROUTING_MODES);
+const ROUTING_CAPABILITY_SET = new Set<string>(AI_CAPABILITIES);
+const ROUTING_TIER_SET = new Set<string>(REASONING_TIERS);
+
+const STRUCTURAL_ROUTING_MODE_WEIGHTS: Record<RoutingMode, RoutingModeWeights> = {
+  AUTOMATIC: { quality: 0, latency: 0, health: 0, capabilityPreference: 0 },
+  QUALITY_OPTIMIZED: { quality: 0, latency: 0, health: 0, capabilityPreference: 0 },
+  COST_OPTIMIZED: { quality: 0, latency: 0, health: 0, capabilityPreference: 0 },
+  CUSTOM: { quality: 0, latency: 0, health: 0, capabilityPreference: 0 },
 };
 
-export const DEFAULT_ROUTING_POLICY: RoutingPolicy = {
-  maxFallbackAttempts: 2,
-  unknownQualityScore: 50,
-  unknownLatencyScore: 50,
-  latencyReferenceMs: 2_000,
+export const STRUCTURAL_ROUTING_POLICY: RoutingPolicy = {
+  maxFallbackAttempts: 0,
+  unknownQualityScore: 0,
+  unknownLatencyScore: 0,
+  latencyReferenceMs: 1,
   healthScores: {
-    HEALTHY: 100,
-    DEGRADED: 50,
-    UNKNOWN: 30,
+    HEALTHY: 0,
+    DEGRADED: 0,
+    UNKNOWN: 0,
   },
-  defaultModeWeights: DEFAULT_ROUTING_MODE_WEIGHTS,
-  tiers: {
-    TIER_0_UTILITY: {
-      preferredCapabilities: {},
-      modeWeights: {
-        AUTOMATIC: { quality: 0.7, latency: 1.5, health: 1, capabilityPreference: 0.5 },
-      },
-    },
-    TIER_3_DEEP_INTELLIGENCE: {
-      preferredCapabilities: { reasoning: 35 },
-      modeWeights: {
-        AUTOMATIC: { quality: 1.2, latency: 0.4, health: 1, capabilityPreference: 1.5 },
-      },
-    },
-    TIER_4_CRITICAL: {
-      preferredCapabilities: { reasoning: 45 },
-      modeWeights: {
-        AUTOMATIC: { quality: 1.4, latency: 0.25, health: 1.2, capabilityPreference: 1.8 },
-      },
-    },
-  },
+  defaultModeWeights: STRUCTURAL_ROUTING_MODE_WEIGHTS,
+  tiers: {},
 };
 
 export class AiRouter {
@@ -188,10 +176,13 @@ export class AiRouter {
     private readonly gateway: AiGateway,
     options: {
       routingPolicy?: Partial<RoutingPolicy>;
+      routingPolicyProvider?: RoutingPolicyProvider;
       runtimeProviderResolver?: RuntimeProviderResolver;
     } = {},
   ) {
-    this.routingPolicy = mergeRoutingPolicy(DEFAULT_ROUTING_POLICY, options.routingPolicy);
+    this.routingPolicy = options.routingPolicy
+      ? resolveRoutingPolicy(options.routingPolicy)
+      : options.routingPolicyProvider?.() ?? loadRoutingPolicyFromEnv();
     this.runtimeProviderResolver =
       options.runtimeProviderResolver ??
       ((candidate) => this.registry.createRuntimeProvider({
@@ -577,8 +568,63 @@ export class AiRouter {
   }
 
   private policyFor(request: RoutingRequest): RoutingPolicy {
-    return request.routingPolicy ? mergeRoutingPolicy(this.routingPolicy, request.routingPolicy) : this.routingPolicy;
+    return request.routingPolicy ? resolveRoutingPolicy(request.routingPolicy, this.routingPolicy) : this.routingPolicy;
   }
+}
+
+export function loadRoutingPolicyFromEnv(): RoutingPolicy {
+  const raw = process.env.AI_ROUTING_POLICY_JSON ?? getEnv().AI_ROUTING_POLICY_JSON;
+  if (!raw) return STRUCTURAL_ROUTING_POLICY;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("AI_ROUTING_POLICY_JSON must be valid JSON");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("AI_ROUTING_POLICY_JSON must be a JSON object");
+  }
+  return resolveRoutingPolicy(parsed as Partial<RoutingPolicy>);
+}
+
+export function resolveRoutingPolicy(
+  override: Partial<RoutingPolicy> = {},
+  base: RoutingPolicy = STRUCTURAL_ROUTING_POLICY,
+): RoutingPolicy {
+  return validateRoutingPolicy(mergeRoutingPolicy(base, override));
+}
+
+export function validateRoutingPolicy(policy: RoutingPolicy): RoutingPolicy {
+  assertNonnegativeInteger(policy.maxFallbackAttempts, "maxFallbackAttempts");
+  assertFiniteNumber(policy.unknownQualityScore, "unknownQualityScore");
+  assertFiniteNumber(policy.unknownLatencyScore, "unknownLatencyScore");
+  assertPositiveFiniteNumber(policy.latencyReferenceMs, "latencyReferenceMs");
+
+  for (const key of ["HEALTHY", "DEGRADED", "UNKNOWN"] as const) {
+    assertFiniteNumber(policy.healthScores[key], `healthScores.${key}`);
+  }
+  for (const [mode, weights] of Object.entries(policy.defaultModeWeights)) {
+    if (!ROUTING_MODE_SET.has(mode)) throw new Error(`Unsupported routing mode '${mode}'`);
+    validateWeights(weights, `defaultModeWeights.${mode}`);
+  }
+  for (const mode of ROUTING_MODES) {
+    validateWeights(policy.defaultModeWeights[mode], `defaultModeWeights.${mode}`);
+  }
+  for (const [tier, rule] of Object.entries(policy.tiers)) {
+    if (!ROUTING_TIER_SET.has(tier)) throw new Error(`Unsupported routing tier '${tier}'`);
+    for (const capability of rule?.requiredCapabilities ?? []) {
+      if (!ROUTING_CAPABILITY_SET.has(capability)) throw new Error(`Unsupported required capability '${capability}'`);
+    }
+    for (const [capability, value] of Object.entries(rule?.preferredCapabilities ?? {})) {
+      if (!ROUTING_CAPABILITY_SET.has(capability)) throw new Error(`Unsupported preferred capability '${capability}'`);
+      assertFiniteNumber(value, `tiers.${tier}.preferredCapabilities.${capability}`);
+    }
+    for (const [mode, weights] of Object.entries(rule?.modeWeights ?? {})) {
+      if (!ROUTING_MODE_SET.has(mode)) throw new Error(`Unsupported routing mode '${mode}'`);
+      validatePartialWeights(weights, `tiers.${tier}.modeWeights.${mode}`);
+    }
+  }
+  return policy;
 }
 
 function mergeRoutingPolicy(base: RoutingPolicy, override: Partial<RoutingPolicy> = {}): RoutingPolicy {
@@ -619,6 +665,38 @@ function mergeRoutingPolicy(base: RoutingPolicy, override: Partial<RoutingPolicy
     defaultModeWeights,
     tiers,
   };
+}
+
+function validateWeights(weights: RoutingModeWeights, path: string): void {
+  for (const key of ["quality", "latency", "health", "capabilityPreference"] as const) {
+    assertFiniteNumber(weights[key], `${path}.${key}`);
+  }
+}
+
+function validatePartialWeights(weights: Partial<RoutingModeWeights>, path: string): void {
+  for (const [key, value] of Object.entries(weights)) {
+    if (!["quality", "latency", "health", "capabilityPreference"].includes(key)) {
+      throw new Error(`Unsupported routing weight '${path}.${key}'`);
+    }
+    assertFiniteNumber(value, `${path}.${key}`);
+  }
+}
+
+function assertFiniteNumber(value: unknown, path: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`Routing policy value '${path}' must be finite`);
+  }
+}
+
+function assertPositiveFiniteNumber(value: unknown, path: string): asserts value is number {
+  assertFiniteNumber(value, path);
+  if (value <= 0) throw new Error(`Routing policy value '${path}' must be positive`);
+}
+
+function assertNonnegativeInteger(value: unknown, path: string): asserts value is number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
+    throw new Error(`Routing policy value '${path}' must be a nonnegative integer`);
+  }
 }
 
 function validateStructuredResponse(value: unknown, schema: Record<string, unknown>): string | undefined {

@@ -17,6 +17,12 @@ const {
 } = await import("../dist/index.js");
 
 const usage = { promptTokens: 1, completionTokens: 1, totalTokens: 2 };
+const QUALITY_ROUTING_POLICY = {
+  defaultModeWeights: {
+    AUTOMATIC: { quality: 1, latency: 0, health: 0, capabilityPreference: 0 },
+    CUSTOM: { quality: 1, latency: 0, health: 0, capabilityPreference: 0 },
+  },
+};
 
 class FixtureProvider extends BaseAiProvider {
   constructor(id, behavior = {}) {
@@ -256,40 +262,55 @@ test("Sprint 11 router: routing policy changes ranking and deep policy can prefe
       AUTOMATIC: { quality: 2, latency: 0.1, health: 0, capabilityPreference: 0 },
     },
   };
-  const latencyRouter = routerFor(providerId, {
-    text: { [fastModel]: "fast response", [deepModel]: "deep response" },
-  }, { routingPolicy: latencyPolicy });
-  const qualityRouter = routerFor(providerId, {
-    text: { [fastModel]: "fast response", [deepModel]: "deep response" },
-  }, { routingPolicy: qualityPolicy });
+  const previousPolicy = process.env.AI_ROUTING_POLICY_JSON;
+  try {
+    process.env.AI_ROUTING_POLICY_JSON = JSON.stringify(latencyPolicy);
+    const latencyRouter = routerFor(providerId, {
+      text: { [fastModel]: "fast response", [deepModel]: "deep response" },
+    });
 
-  const routine = await latencyRouter.execute({
-    taskType: "language_generation",
-    requiredCapability: "text_generation",
-    tier: "TIER_1_EVERYDAY",
-    prompt: "routine",
-  });
-  assert.equal(routine.ok, true);
-  assert.equal(routine.decision?.modelId, fastModel);
+    const routine = await latencyRouter.execute({
+      taskType: "language_generation",
+      requiredCapability: "text_generation",
+      tier: "TIER_1_EVERYDAY",
+      prompt: "routine",
+    });
+    assert.equal(routine.ok, true);
+    assert.equal(routine.decision?.modelId, fastModel);
 
-  const qualityBiased = await qualityRouter.execute({
-    taskType: "language_generation",
-    requiredCapability: "text_generation",
-    tier: "TIER_1_EVERYDAY",
-    prompt: "routine",
-  });
-  assert.equal(qualityBiased.ok, true);
-  assert.equal(qualityBiased.decision?.modelId, deepModel);
+    process.env.AI_ROUTING_POLICY_JSON = JSON.stringify(qualityPolicy);
+    const qualityRouter = routerFor(providerId, {
+      text: { [fastModel]: "fast response", [deepModel]: "deep response" },
+    });
+    const qualityBiased = await qualityRouter.execute({
+      taskType: "language_generation",
+      requiredCapability: "text_generation",
+      tier: "TIER_1_EVERYDAY",
+      prompt: "routine",
+    });
+    assert.equal(qualityBiased.ok, true);
+    assert.equal(qualityBiased.decision?.modelId, deepModel);
 
-  const deep = await latencyRouter.execute({
-    taskType: "reasoning",
-    requiredCapability: "text_generation",
-    tier: "TIER_3_DEEP_INTELLIGENCE",
-    prompt: "analyze",
-  });
-  assert.equal(deep.ok, true);
-  assert.equal(deep.decision?.modelId, deepModel);
-  assert.equal(deep.evidence.requirements.capabilities.includes("reasoning"), false);
+    process.env.AI_ROUTING_POLICY_JSON = JSON.stringify(latencyPolicy);
+    const deepRouter = routerFor(providerId, {
+      text: { [fastModel]: "fast response", [deepModel]: "deep response" },
+    });
+    const deep = await deepRouter.execute({
+      taskType: "reasoning",
+      requiredCapability: "text_generation",
+      tier: "TIER_3_DEEP_INTELLIGENCE",
+      prompt: "analyze",
+    });
+    assert.equal(deep.ok, true);
+    assert.equal(deep.decision?.modelId, deepModel);
+    assert.equal(deep.evidence.requirements.capabilities.includes("reasoning"), false);
+  } finally {
+    if (previousPolicy === undefined) {
+      delete process.env.AI_ROUTING_POLICY_JSON;
+    } else {
+      process.env.AI_ROUTING_POLICY_JSON = previousPolicy;
+    }
+  }
 });
 
 test("Sprint 11 router: credential scoped availability and health remain isolated", async () => {
@@ -435,7 +456,7 @@ test("Sprint 11 router: bounded fallback handles transient, auth, language, and 
       ],
       [secondary]: "The fallback answer is ready.",
     },
-  });
+  }, { routingPolicy: QUALITY_ROUTING_POLICY });
 
   const transient = await transientRouter.execute({
     taskType: "language_generation",
@@ -449,12 +470,42 @@ test("Sprint 11 router: bounded fallback handles transient, auth, language, and 
   assert.equal(transient.content, "The fallback answer is ready.");
   assert.equal(transient.evidence.attempts.length, 2);
 
+  const policyLimitedRouter = routerFor(providerId, {
+    text: {
+      [primary]: new AiProviderError("temporary outage", providerId, "TEMPORARY", true),
+      [secondary]: "The fallback answer is ready.",
+    },
+  }, { routingPolicy: { ...QUALITY_ROUTING_POLICY, maxFallbackAttempts: 0 } });
+  const policyLimited = await policyLimitedRouter.execute({
+    taskType: "language_generation",
+    requiredCapability: "text_generation",
+    tier: "TIER_1_EVERYDAY",
+    prompt: "answer",
+  });
+  assert.equal(policyLimited.ok, false);
+  assert.equal(policyLimited.evidence.attempts.length, 1);
+
+  const policyFallbackRouter = routerFor(providerId, {
+    text: {
+      [primary]: new AiProviderError("temporary outage", providerId, "TEMPORARY", true),
+      [secondary]: "The fallback answer is ready.",
+    },
+  }, { routingPolicy: { ...QUALITY_ROUTING_POLICY, maxFallbackAttempts: 1 } });
+  const policyFallback = await policyFallbackRouter.execute({
+    taskType: "language_generation",
+    requiredCapability: "text_generation",
+    tier: "TIER_1_EVERYDAY",
+    prompt: "answer",
+  });
+  assert.equal(policyFallback.ok, true);
+  assert.equal(policyFallback.content, "The fallback answer is ready.");
+
   const limitedRouter = routerFor(providerId, {
     text: {
       [primary]: new AiProviderError("temporary outage", providerId, "TEMPORARY", true),
       [secondary]: "The fallback answer is ready.",
     },
-  });
+  }, { routingPolicy: QUALITY_ROUTING_POLICY });
   const limited = await limitedRouter.execute({
     taskType: "language_generation",
     requiredCapability: "text_generation",
@@ -472,7 +523,7 @@ test("Sprint 11 router: bounded fallback handles transient, auth, language, and 
         : "这是中文输出，应当被英文目标拒绝。",
       [secondary]: "The fallback answer is ready.",
     },
-  });
+  }, { routingPolicy: QUALITY_ROUTING_POLICY });
   const language = await languageRouter.execute({
     taskType: "language_generation",
     requiredCapability: "text_generation",
@@ -488,7 +539,7 @@ test("Sprint 11 router: bounded fallback handles transient, auth, language, and 
 
   const authRouter = routerFor(providerId, {
     text: { [authOnly]: new AiAuthenticationError(providerId) },
-  });
+  }, { routingPolicy: QUALITY_ROUTING_POLICY });
   const auth = await authRouter.execute({
     taskType: "language_generation",
     preferredProviderId: providerId,
@@ -501,6 +552,28 @@ test("Sprint 11 router: bounded fallback handles transient, auth, language, and 
   });
   assert.equal(auth.ok, false);
   assert.equal(auth.error?.code, "AUTHENTICATION_ERROR");
+});
+
+test("Sprint 11 router: malformed routing policy is rejected before ranking", async () => {
+  const gateway = new AiGateway();
+  const registry = new ModelRegistryService();
+
+  assert.throws(
+    () => new AiRouter(registry, gateway, { routingPolicy: { maxFallbackAttempts: -1 } }),
+    /maxFallbackAttempts/,
+  );
+  assert.throws(
+    () => new AiRouter(registry, gateway, { routingPolicy: { latencyReferenceMs: 0 } }),
+    /latencyReferenceMs/,
+  );
+  assert.throws(
+    () => new AiRouter(registry, gateway, { routingPolicy: { defaultModeWeights: { AUTOMATIC: { quality: Number.NaN } } } }),
+    /defaultModeWeights\.AUTOMATIC\.quality/,
+  );
+  assert.throws(
+    () => new AiRouter(registry, gateway, { routingPolicy: { tiers: { TIER_1_EVERYDAY: { preferredCapabilities: { unsupported: 1 } } } } }),
+    /Unsupported preferred capability/,
+  );
 });
 
 test("Sprint 11 router: language guard supports target language and protected short content", async () => {
@@ -571,6 +644,7 @@ test("Sprint 11 router: language guard supports target language and protected sh
     targetLanguage: "en",
     languagePolicy: { minimumTextCharacters: 4, minimumConfidence: 0.45, maxRetryAttempts: 1 },
     prompt: "answer",
+    maxFallbackAttempts: 1,
   });
   assert.equal(spanishRejectedThenCorrected.ok, true);
   assert.equal(spanishRejectedThenCorrected.evidence.attempts[0].languageGuard?.outputLanguage, "es");
@@ -585,6 +659,7 @@ test("Sprint 11 router: language guard supports target language and protected sh
     targetLanguage: "en",
     languagePolicy: { minimumTextCharacters: 4, minimumConfidence: 0.45, maxRetryAttempts: 1 },
     prompt: "answer",
+    maxFallbackAttempts: 1,
   });
   assert.equal(frenchRejectedThenCorrected.ok, true);
   assert.equal(frenchRejectedThenCorrected.evidence.attempts[0].languageGuard?.outputLanguage, "fr");
@@ -681,7 +756,7 @@ test("Sprint 11 router: malformed structured output fails and eligible fallback 
       [enumConstraintModel]: { status: "ok", profile: { name: "Ada", role: "owner", tags: ["alpha"], score: 0 } },
       [goodModel]: { status: "ok", profile: { name: "Ada", role: "member", tags: ["alpha"], score: 2 } },
     },
-  });
+  }, { routingPolicy: QUALITY_ROUTING_POLICY });
 
   const result = await router.execute({
     taskType: "semantic_extraction",

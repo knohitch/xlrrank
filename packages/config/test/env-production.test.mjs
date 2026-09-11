@@ -30,6 +30,7 @@ test("production env: valid with all required secrets", async () => {
     NODE_ENV: "production",
     SESSION_SIGNING_SECRET: "a".repeat(32),
     ENCRYPTION_MASTER_KEY: "a".repeat(32),
+    AI_ROUTING_POLICY_JSON: "{}",
   });
   assert.equal(result.success, true, "Should accept production with all required secrets");
 });

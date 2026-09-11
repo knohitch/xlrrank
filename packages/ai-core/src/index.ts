@@ -81,12 +81,18 @@ export type {
   RoutingMode,
   RoutingOutcomeStatus,
   RoutingPolicy,
+  RoutingPolicyProvider,
   RoutingPolicyTierRule,
   RoutingRequest,
   RuntimeProviderResolver,
   StructuredOutputRequirement,
 } from "./router/ai-router.js";
-export { DEFAULT_ROUTING_POLICY } from "./router/ai-router.js";
+export {
+  STRUCTURAL_ROUTING_POLICY,
+  loadRoutingPolicyFromEnv,
+  resolveRoutingPolicy,
+  validateRoutingPolicy,
+} from "./router/ai-router.js";
 
 export {
   languageGuard,

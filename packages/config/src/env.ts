@@ -73,6 +73,7 @@ const baseEnvSchema = z.object({
   AI_MODEL_DISCOVERY_MISSED_THRESHOLD: z.coerce.number().int().positive().max(10).default(2),
   AI_MODEL_PROBE_MAX_MODELS_PER_RUN: z.coerce.number().int().nonnegative().max(50).default(10),
   AI_MODEL_PROBE_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(10_000),
+  AI_ROUTING_POLICY_JSON: z.string().optional(),
   SOCIAL_SYNC_SHUTDOWN_GRACE_MS: z.coerce.number().int().positive().default(30_000),
   SOCIAL_SYNC_BULLMQ_LOCK_MS: z.coerce.number().int().positive().default(30_000),
   SOCIAL_SYNC_BULLMQ_STALLED_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
@@ -125,6 +126,33 @@ export const envSchema = baseEnvSchema.superRefine((env, ctx) => {
       path: ["RATE_LIMIT_STORE"],
       message: "RATE_LIMIT_STORE=redis is required in production",
     });
+  }
+
+  if (env.NODE_ENV === "production" && !env.AI_ROUTING_POLICY_JSON) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["AI_ROUTING_POLICY_JSON"],
+      message: "AI_ROUTING_POLICY_JSON is required in production",
+    });
+  }
+
+  if (env.AI_ROUTING_POLICY_JSON) {
+    try {
+      const parsed = JSON.parse(env.AI_ROUTING_POLICY_JSON) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["AI_ROUTING_POLICY_JSON"],
+          message: "AI_ROUTING_POLICY_JSON must be a JSON object",
+        });
+      }
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["AI_ROUTING_POLICY_JSON"],
+        message: "AI_ROUTING_POLICY_JSON must be valid JSON",
+      });
+    }
   }
 });
 
