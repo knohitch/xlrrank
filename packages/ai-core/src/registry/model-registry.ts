@@ -613,6 +613,9 @@ export class ModelRegistryService {
         );
         const modelUuid = upsert.rows[0]?.id;
         if (!modelUuid) throw new Error("AI model upsert failed");
+        if (materialChange) {
+          await client.query("DELETE FROM ai_model_capability_validations WHERE model_id = $1", [modelUuid]);
+        }
         await client.query(
           `
           INSERT INTO ai_model_availability (
@@ -647,7 +650,8 @@ export class ModelRegistryService {
             !prior ||
             materialChange ||
             prior.lifecycle_stage === "DISCOVERED" ||
-            prior.lifecycle_stage === "PROBING",
+            prior.lifecycle_stage === "PROBING" ||
+            prior.lifecycle_stage === "QUARANTINED",
         });
       }
       await this.markMissingModelsTx(client, ctx, persisted.map((item) => item.modelUuid));

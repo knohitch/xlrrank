@@ -743,6 +743,91 @@ test("Sprint 10 registry: same canonical model remains usable for credential A w
   }
 });
 
+test("Sprint 10 registry: capability validations are invalidated across material model revisions", async () => {
+  await runMigrations();
+  const pool = getPool();
+  const suffix = randomUUID().slice(0, 8);
+  const sharedModelId = `revision-bound-model-${suffix}`;
+  const state = {
+    accounts: new Map([
+      [
+        "revision-a",
+        {
+          failList: false,
+          models: [{ id: sharedModelId, object: "model", version: "v1", serverCapabilities: ["text_generation"] }],
+        },
+      ],
+      [
+        "revision-b",
+        {
+          failList: false,
+          models: [{ id: sharedModelId, object: "model", version: "v2", serverCapabilities: [] }],
+        },
+      ],
+    ]),
+  };
+  const fixture = await startOpenAiFixture(state);
+  try {
+    const registry = new ModelRegistryService();
+    const providerId = await insertProvider(pool, {
+      name: `Revision Bound ${suffix}`,
+      slug: `revision-bound-${suffix}`,
+      protocol: "openai-compatible",
+      baseUrl: fixture.baseUrl,
+      config: { allowPrivateNetwork: true, probeCapabilities: ["text_generation"] },
+    });
+    const credentialA = await registry.createCredential({ providerId, apiKey: "revision-a", scopeKind: "USER", scopeId: randomUUID() });
+    const credentialB = await registry.createCredential({ providerId, apiKey: "revision-b", scopeKind: "USER", scopeId: randomUUID() });
+
+    await registry.refresh({ providerId, credentialId: credentialA.id, maxProbeModels: 1 });
+    let canonical = await registry.get(providerId, sharedModelId);
+    assert.equal(canonical?.version, "v1");
+    assert.equal(canonical?.lifecycleStage, "VALIDATED");
+    let availableForA = await registry.listAvailableModels({
+      credentialId: credentialA.id,
+      capability: "text_generation",
+      lifecycleStage: "VALIDATED",
+    });
+    assert.ok(availableForA.some((model) => model.modelId === sharedModelId), "credential A validates revision v1");
+
+    await registry.refresh({ providerId, credentialId: credentialB.id, maxProbeModels: 0 });
+    canonical = await registry.get(providerId, sharedModelId);
+    assert.equal(canonical?.version, "v2");
+    assert.equal(canonical?.lifecycleStage, "PROBING", "material revision change moves canonical model to PROBING");
+    availableForA = await registry.listAvailableModels({
+      credentialId: credentialA.id,
+      capability: "text_generation",
+    });
+    assert.equal(availableForA.some((model) => model.modelId === sharedModelId), false, "v1 validation does not make v2 routable");
+
+    await registry.refresh({ providerId, credentialId: credentialB.id, maxProbeModels: 1 });
+    canonical = await registry.get(providerId, sharedModelId);
+    assert.equal(canonical?.version, "v2");
+    assert.notEqual(canonical?.lifecycleStage, "VALIDATED", "failed v2 probe is not rescued by stale v1 validation");
+    availableForA = await registry.listAvailableModels({
+      credentialId: credentialA.id,
+      capability: "text_generation",
+      lifecycleStage: "VALIDATED",
+    });
+    assert.equal(availableForA.some((model) => model.modelId === sharedModelId), false, "old runtime evidence remains unavailable after failed v2 probe");
+
+    state.accounts.get("revision-a").models[0].version = "v2";
+    await registry.refresh({ providerId, credentialId: credentialA.id, maxProbeModels: 1 });
+    canonical = await registry.get(providerId, sharedModelId);
+    assert.equal(canonical?.version, "v2");
+    assert.equal(canonical?.lifecycleStage, "VALIDATED", "current revision validation restores VALIDATED");
+    assert.notEqual(canonical?.lifecycleStage, "ACTIVE", "current revision validation does not auto-promote to ACTIVE");
+    availableForA = await registry.listAvailableModels({
+      credentialId: credentialA.id,
+      capability: "text_generation",
+      lifecycleStage: "VALIDATED",
+    });
+    assert.ok(availableForA.some((model) => model.modelId === sharedModelId), "current v2 validation is routable for credential A");
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("Sprint 10 registry: concurrent refresh request idempotency is serialized", async () => {
   await runMigrations();
   const pool = getPool();
