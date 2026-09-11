@@ -7,12 +7,14 @@ const skip = !DATABASE_URL || !isAuditDb;
 
 let pool;
 let api;
+let intelligence;
 
 async function setup() {
   if (pool) return;
   process.env.ENCRYPTION_MASTER_KEY ??= "sprint-12-intelligence-key-32-bytes";
   const { Pool } = await import("pg");
   api = await import("../dist/index.js");
+  intelligence = await import("../../intelligence/dist/index.js");
   await api.runMigrations?.();
   pool = new Pool({ connectionString: DATABASE_URL });
 }
@@ -179,6 +181,32 @@ async function currentDna(personId) {
     [personId],
   );
   return result.rows[0];
+}
+
+async function assertNoStaleLinkedCandidates(scopeId) {
+  const stale = await pool.query(
+    `
+      SELECT c.id
+      FROM identity_resolution_candidates c
+      LEFT JOIN canonical_person_accounts left_membership
+        ON left_membership.scope_id = c.scope_id
+       AND left_membership.external_account_id = c.account_a_id
+       AND left_membership.status = 'CONFIRMED'
+      LEFT JOIN canonical_person_accounts right_membership
+        ON right_membership.scope_id = c.scope_id
+       AND right_membership.external_account_id = c.account_b_id
+       AND right_membership.status = 'CONFIRMED'
+      WHERE c.scope_id = $1
+        AND c.status = 'LINKED'
+        AND (
+          left_membership.person_id IS NULL
+          OR right_membership.person_id IS NULL
+          OR left_membership.person_id <> right_membership.person_id
+        )
+    `,
+    [scopeId],
+  );
+  assert.equal(stale.rowCount, 0);
 }
 
 const policyA = {
@@ -826,4 +854,314 @@ test("Sprint 12 closure: Social DNA stated provenance and split invalidation are
   assert.equal(dnaB.profile.evidence.some((item) => item.externalAccountId === accountA || item.contentItemId === contentA), false);
   assert.equal((await pool.query("SELECT count(*) FROM social_external_accounts WHERE id = ANY($1::uuid[])", [[accountA, accountB]])).rows[0].count, "2");
   assert.equal((await pool.query("SELECT count(*) FROM social_content_items WHERE id = ANY($1::uuid[])", [[contentA, contentB]])).rows[0].count, "2");
+});
+
+test("Sprint 12 graph closure: split invalidates stale linked candidates and DNA", { skip }, async () => {
+  await reset();
+  const userId = await user("graph-split@example.test");
+  const scope = await api.ensurePersonalScope(userId);
+  const xPlatform = await platform("sprint12-graph-x");
+  const inPlatform = await platform("sprint12-graph-in");
+  const xConnection = await connection(scope.scopeId, xPlatform, "graph-x-owner");
+  const inConnection = await connection(scope.scopeId, inPlatform, "graph-in-owner");
+  await api.persistIdentityResolutionPolicy({ policy: policyA });
+  await api.persistSocialDnaPolicy({ policy: socialPolicyA });
+
+  const accountA = await account(scope.scopeId, xConnection, {
+    platformId: xPlatform,
+    externalId: "graph-a",
+    handle: "graph-a",
+    displayName: "Graph Person",
+    bio: "AI automation software engineering.",
+    location: "London",
+    website: "https://graph.example",
+    metadata: { company: "Graph Co", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  const accountB = await account(scope.scopeId, inConnection, {
+    platformId: inPlatform,
+    externalId: "graph-b",
+    handle: "graph-b",
+    displayName: "Graph Person",
+    bio: "AI automation software engineering.",
+    location: "London",
+    website: "https://graph.example",
+    metadata: { company: "Graph Co", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  const accountC = await account(scope.scopeId, xConnection, {
+    platformId: xPlatform,
+    externalId: "graph-c",
+    handle: "graph-c",
+    displayName: "Graph Person",
+    bio: "AI automation software engineering.",
+    location: "London",
+    website: "https://graph.example",
+    metadata: { company: "Graph Co", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  await content(scope.scopeId, xConnection, {
+    platformId: xPlatform,
+    authorExternalAccountId: accountA,
+    externalId: "graph-a-post",
+    body: "Software engineering and AI automation.",
+  });
+
+  const ab = await api.resolveIdentityCandidate({ scopeId: scope.scopeId, accountAId: accountA, accountBId: accountB, policyKey: "sprint-12" });
+  const bc = await api.resolveIdentityCandidate({ scopeId: scope.scopeId, accountAId: accountB, accountBId: accountC, policyKey: "sprint-12" });
+  assert.equal(ab.status, "LINKED");
+  assert.equal(bc.status, "LINKED");
+  const oneCluster = await pool.query(
+    "SELECT count(DISTINCT person_id) AS people FROM canonical_person_accounts WHERE external_account_id = ANY($1::uuid[]) AND status = 'CONFIRMED'",
+    [[accountA, accountB, accountC]],
+  );
+  assert.equal(oneCluster.rows[0].people, "1");
+  const aggregate = await api.recomputeSocialDnaForPerson({
+    scopeId: scope.scopeId,
+    personId: ab.personId,
+    policyKey: "sprint-12-social",
+    algorithmVersion: "graph-split-v1",
+  });
+
+  await api.splitIdentityCandidate({ candidateId: ab.candidateId, actorUserId: userId, reason: "Manual graph split" });
+  const memberships = await pool.query(
+    "SELECT external_account_id, person_id FROM canonical_person_accounts WHERE external_account_id = ANY($1::uuid[]) AND status = 'CONFIRMED'",
+    [[accountA, accountB, accountC]],
+  );
+  const byAccount = new Map(memberships.rows.map((row) => [row.external_account_id, row.person_id]));
+  assert.notEqual(byAccount.get(accountA), byAccount.get(accountB));
+  const bcRow = await pool.query("SELECT status FROM identity_resolution_candidates WHERE id = $1", [bc.candidateId]);
+  assert.equal(bcRow.rows[0].status, "PENDING");
+  await assertNoStaleLinkedCandidates(scope.scopeId);
+  assert.equal(
+    (await pool.query("SELECT count(*) FROM identity_resolution_decisions WHERE candidate_id = $1 AND action = 'INVALIDATE_LINK'", [bc.candidateId]))
+      .rows[0].count,
+    "1",
+  );
+  assert.equal((await pool.query("SELECT is_current FROM social_dna_profiles WHERE id = $1", [aggregate.profileId])).rows[0].is_current, false);
+
+  const accountD = await account(scope.scopeId, inConnection, {
+    platformId: inPlatform,
+    externalId: "graph-d",
+    handle: "graph-d",
+    displayName: "Larger Graph",
+    bio: "AI automation software engineering.",
+    location: "Paris",
+    website: "https://larger-graph.example",
+    metadata: { company: "Graph Co", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  const accountE = await account(scope.scopeId, xConnection, {
+    platformId: xPlatform,
+    externalId: "graph-e",
+    handle: "graph-e",
+    displayName: "Larger Graph",
+    bio: "AI automation software engineering.",
+    location: "Paris",
+    website: "https://larger-graph.example",
+    metadata: { company: "Graph Co", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  const accountF = await account(scope.scopeId, inConnection, {
+    platformId: inPlatform,
+    externalId: "graph-f",
+    handle: "graph-f",
+    displayName: "Larger Graph",
+    bio: "AI automation software engineering.",
+    location: "Paris",
+    website: "https://larger-graph.example",
+    metadata: { company: "Graph Co", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  const accountG = await account(scope.scopeId, xConnection, {
+    platformId: xPlatform,
+    externalId: "graph-g",
+    handle: "graph-g",
+    displayName: "Larger Graph",
+    bio: "AI automation software engineering.",
+    location: "Paris",
+    website: "https://larger-graph.example",
+    metadata: { company: "Graph Co", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  const de = await api.resolveIdentityCandidate({ scopeId: scope.scopeId, accountAId: accountD, accountBId: accountE, policyKey: "sprint-12" });
+  const ef = await api.resolveIdentityCandidate({ scopeId: scope.scopeId, accountAId: accountE, accountBId: accountF, policyKey: "sprint-12" });
+  const fg = await api.resolveIdentityCandidate({ scopeId: scope.scopeId, accountAId: accountF, accountBId: accountG, policyKey: "sprint-12" });
+  await api.splitIdentityCandidate({ candidateId: ef.candidateId, actorUserId: userId, reason: "Split middle of larger cluster" });
+  assert.equal((await pool.query("SELECT status FROM identity_resolution_candidates WHERE id = $1", [de.candidateId])).rows[0].status, "PENDING");
+  assert.equal((await pool.query("SELECT status FROM identity_resolution_candidates WHERE id = $1", [fg.candidateId])).rows[0].status, "PENDING");
+  await assertNoStaleLinkedCandidates(scope.scopeId);
+});
+
+test("Sprint 12 graph closure: scope membership lock serializes conflicting cluster unions", { skip }, async () => {
+  await reset();
+  const userId = await user("graph-concurrency@example.test");
+  const scope = await api.ensurePersonalScope(userId);
+  const xPlatform = await platform("sprint12-lock-x");
+  const inPlatform = await platform("sprint12-lock-in");
+  const xConnection = await connection(scope.scopeId, xPlatform, "lock-x-owner");
+  const inConnection = await connection(scope.scopeId, inPlatform, "lock-in-owner");
+  await api.persistIdentityResolutionPolicy({ policy: policyA });
+
+  const leftPerson = await person("Left Cluster");
+  const rightPerson = await person("Right Cluster");
+  const leftA = await account(scope.scopeId, xConnection, {
+    platformId: xPlatform,
+    externalId: "left-a",
+    handle: "left-a",
+    displayName: "Scope Lock Person",
+    bio: "AI automation software engineering.",
+    location: "Madrid",
+    website: "https://scope-lock.example",
+    metadata: { company: "Scope Lock", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  const leftB = await account(scope.scopeId, inConnection, {
+    platformId: inPlatform,
+    externalId: "left-b",
+    handle: "left-b",
+    displayName: "Scope Lock Person",
+    bio: "AI automation software engineering.",
+    location: "Madrid",
+    website: "https://scope-lock.example",
+    metadata: { company: "Scope Lock", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  const rightA = await account(scope.scopeId, xConnection, {
+    platformId: xPlatform,
+    externalId: "right-a",
+    handle: "right-a",
+    displayName: "Scope Lock Person",
+    bio: "AI automation software engineering.",
+    location: "Madrid",
+    website: "https://scope-lock.example",
+    metadata: { company: "Scope Lock", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  const rightB = await account(scope.scopeId, inConnection, {
+    platformId: inPlatform,
+    externalId: "right-b",
+    handle: "right-b",
+    displayName: "Scope Lock Person",
+    bio: "AI automation software engineering.",
+    location: "Madrid",
+    website: "https://scope-lock.example",
+    metadata: { company: "Scope Lock", role: "CTO", topics: ["ai_automation", "software_engineering"] },
+  });
+  await linkFixture(scope.scopeId, leftPerson, leftA);
+  await linkFixture(scope.scopeId, leftPerson, leftB);
+  await linkFixture(scope.scopeId, rightPerson, rightA);
+  await linkFixture(scope.scopeId, rightPerson, rightB);
+
+  const results = await Promise.all([
+    api.resolveIdentityCandidate({ scopeId: scope.scopeId, accountAId: leftA, accountBId: rightA, policyKey: "sprint-12" }),
+    api.resolveIdentityCandidate({ scopeId: scope.scopeId, accountAId: rightB, accountBId: leftB, policyKey: "sprint-12" }),
+  ]);
+  assert.equal(results.every((result) => result.status === "LINKED"), true);
+  const cluster = await pool.query(
+    "SELECT count(DISTINCT person_id) AS people, count(*) AS confirmed_rows, count(DISTINCT external_account_id) AS accounts FROM canonical_person_accounts WHERE external_account_id = ANY($1::uuid[]) AND status = 'CONFIRMED'",
+    [[leftA, leftB, rightA, rightB]],
+  );
+  assert.equal(cluster.rows[0].people, "1");
+  assert.equal(cluster.rows[0].confirmed_rows, "4");
+  assert.equal(cluster.rows[0].accounts, "4");
+  await assertNoStaleLinkedCandidates(scope.scopeId);
+});
+
+test("Sprint 12 graph closure: business policy is explicit for Social DNA and identity similarity", { skip }, async () => {
+  await reset();
+  await assert.rejects(
+    () =>
+      api.persistIdentityResolutionPolicy({
+        policy: {
+          ...policyA,
+          policyKey: "missing-threshold",
+          version: "v1",
+          signals: [{ key: "name_similarity", weight: 100 }],
+        },
+      }),
+    /threshold is required/,
+  );
+
+  const noPolicy = intelligence.generateSocialDna({
+    personId: "no-policy",
+    content: [{ body: "AI automation software engineering? This is a long enough text to tempt hidden thresholds." }],
+  });
+  assert.deepEqual(noPolicy.topics, []);
+  assert.equal(noPolicy.communicationStyle, "unknown");
+  assert.equal(noPolicy.complexity, "unknown");
+
+  const looseStyle = intelligence.generateSocialDna({
+    personId: "style-policy",
+    policy: {
+      ...socialPolicyA,
+      policyKey: "style",
+      version: "loose",
+      communicationStyle: { inquisitiveQuestionRatio: 1 },
+      complexity: { mediumFormMinTokens: 3, longFormMinTokens: 6 },
+    },
+    content: [{ body: "AI automation software engineering?" }],
+  });
+  const strictStyle = intelligence.generateSocialDna({
+    personId: "style-policy",
+    policy: {
+      ...socialPolicyA,
+      policyKey: "style",
+      version: "strict",
+      communicationStyle: { inquisitiveQuestionRatio: 0.1 },
+      complexity: { mediumFormMinTokens: 20, longFormMinTokens: 40 },
+    },
+    content: [{ body: "AI automation software engineering?" }],
+  });
+  assert.equal(looseStyle.communicationStyle, "informational");
+  assert.equal(looseStyle.complexity, "medium_form");
+  assert.equal(strictStyle.communicationStyle, "inquisitive");
+  assert.equal(strictStyle.complexity, "short_form");
+
+  const left = { ...looseStyle, topics: ["software_engineering"], interests: ["fashion_beauty"] };
+  const right = { ...strictStyle, topics: ["software_engineering"], interests: [] };
+  const topicWeighted = intelligence.compareDnaProfiles(left, right, { comparisonWeights: { topics: 0.9, interests: 0.1 } });
+  const interestWeighted = intelligence.compareDnaProfiles(left, right, { comparisonWeights: { topics: 0.1, interests: 0.9 } });
+  assert.ok(topicWeighted.similarity > interestWeighted.similarity);
+
+  await api.persistIdentityResolutionPolicy({
+    policy: {
+      ...policyA,
+      policyKey: "threshold-explicit",
+      version: "low",
+      autoLinkThreshold: 80,
+      manualReviewThreshold: 50,
+      minimumPositiveSignals: 1,
+      signals: [{ key: "name_similarity", weight: 100, threshold: 0.3 }],
+    },
+  });
+  const userId = await user("business-policy@example.test");
+  const scope = await api.ensurePersonalScope(userId);
+  const xPlatform = await platform("business-policy-x");
+  const inPlatform = await platform("business-policy-in");
+  const xConnection = await connection(scope.scopeId, xPlatform, "business-x-owner");
+  const inConnection = await connection(scope.scopeId, inPlatform, "business-in-owner");
+  const accountA = await account(scope.scopeId, xConnection, {
+    platformId: xPlatform,
+    externalId: "business-a",
+    handle: "business-a",
+    displayName: "Ada Lovelace",
+    bio: "Engineering.",
+    location: "London",
+    website: null,
+  });
+  const accountB = await account(scope.scopeId, inConnection, {
+    platformId: inPlatform,
+    externalId: "business-b",
+    handle: "business-b",
+    displayName: "Ada Byron",
+    bio: "Engineering.",
+    location: "London",
+    website: null,
+  });
+  const low = await api.resolveIdentityCandidate({ scopeId: scope.scopeId, accountAId: accountA, accountBId: accountB, policyKey: "threshold-explicit" });
+  assert.equal(low.status, "LINKED");
+  await api.persistIdentityResolutionPolicy({
+    policy: {
+      ...policyA,
+      policyKey: "threshold-explicit",
+      version: "high",
+      autoLinkThreshold: 80,
+      manualReviewThreshold: 50,
+      minimumPositiveSignals: 1,
+      signals: [{ key: "name_similarity", weight: 100, threshold: 0.8 }],
+    },
+  });
+  const high = await api.resolveIdentityCandidate({ scopeId: scope.scopeId, accountAId: accountA, accountBId: accountB, policyKey: "threshold-explicit" });
+  assert.equal(high.status, "PENDING");
 });

@@ -118,9 +118,6 @@ const STRUCTURAL_SOCIAL_DNA_POLICY: SocialDnaPolicy = {
   interestTopics: [],
   commercialTopics: [],
   audienceRules: [],
-  communicationStyle: { inquisitiveQuestionRatio: 0.5 },
-  complexity: { mediumFormMinTokens: 10, longFormMinTokens: 30 },
-  comparisonWeights: { topics: 0.5, interests: 0.5 },
 };
 
 export function validateSocialDnaPolicy(policy: SocialDnaPolicy): SocialDnaPolicy {
@@ -339,10 +336,15 @@ export function compareDnaProfiles(
   b: SocialDnaProfile,
   policy?: Pick<SocialDnaPolicy, "comparisonWeights">,
 ): { similarity: number; sharedTopics: string[]; sharedInterests: string[] } {
-  const weights = policy?.comparisonWeights ?? STRUCTURAL_SOCIAL_DNA_POLICY.comparisonWeights ?? { topics: 0.5, interests: 0.5 };
-  const totalWeight = weights.topics + weights.interests;
   const sharedTopics = a.topics.filter((t) => b.topics.includes(t));
   const sharedInterests = a.interests.filter((i) => b.interests.includes(i));
+  if (!policy?.comparisonWeights) {
+    const left = new Set([...a.topics.map((item) => `topic:${item}`), ...a.interests.map((item) => `interest:${item}`)]);
+    const right = new Set([...b.topics.map((item) => `topic:${item}`), ...b.interests.map((item) => `interest:${item}`)]);
+    return { similarity: Math.round(setJaccard(left, right) * 100), sharedTopics, sharedInterests };
+  }
+  const weights = policy.comparisonWeights;
+  const totalWeight = weights.topics + weights.interests;
   const maxTopics = Math.max(a.topics.length, b.topics.length, 1);
   const maxInterests = Math.max(a.interests.length, b.interests.length, 1);
   const similarity = Math.round(
@@ -451,19 +453,27 @@ function inferAudienceTypes(topics: string[], policy: SocialDnaPolicy): string[]
 }
 
 function inferCommunicationStyle(content: Array<{ body: string }>, policy: SocialDnaPolicy): string {
-  if (content.length === 0) return "unknown";
-  const ratio = policy.communicationStyle?.inquisitiveQuestionRatio ?? 0.5;
+  if (content.length === 0 || !policy.communicationStyle) return "unknown";
+  const ratio = policy.communicationStyle.inquisitiveQuestionRatio;
   const questionCount = content.filter((item) => item.body.includes("?")).length;
   return questionCount / content.length > ratio ? "inquisitive" : "informational";
 }
 
 function inferComplexity(content: Array<{ body: string }>, policy: SocialDnaPolicy): string {
-  if (content.length === 0) return "unknown";
-  const rules = policy.complexity ?? STRUCTURAL_SOCIAL_DNA_POLICY.complexity ?? { mediumFormMinTokens: 10, longFormMinTokens: 30 };
+  if (content.length === 0 || !policy.complexity) return "unknown";
+  const rules = policy.complexity;
   const averageLength = content.reduce((sum, item) => sum + tokenize(item.body, policy.tokenMinLength).length, 0) / content.length;
   if (averageLength >= rules.longFormMinTokens) return "long_form";
   if (averageLength >= rules.mediumFormMinTokens) return "medium_form";
   return "short_form";
+}
+
+function setJaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 1;
+  if (a.size === 0 || b.size === 0) return 0;
+  const intersection = [...a].filter((item) => b.has(item)).length;
+  const union = new Set([...a, ...b]).size;
+  return union === 0 ? 0 : intersection / union;
 }
 
 function assertPositive(value: unknown, path: string): asserts value is number {

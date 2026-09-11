@@ -219,12 +219,20 @@ export async function linkIdentityCandidate(input: ManualIdentityDecisionInput):
 export async function splitIdentityCandidate(input: ManualIdentityDecisionInput): Promise<void> {
   await withDecisionTransaction(input.candidateId, async (client, candidate) => {
     const accounts = await candidateAccounts(client, input.candidateId);
+    await lockMembershipScope(client, accounts.scopeId);
     await lockMembershipAccounts(client, accounts.scopeId, [accounts.accountAId, accounts.accountBId]);
     const priorMemberships = await loadConfirmedMemberships(client, accounts.scopeId, [accounts.accountAId, accounts.accountBId]);
+    const priorPersonIds = uniqueSortedStrings(priorMemberships.map((row) => row.person_id));
+    const priorClusterAccounts = await loadConfirmedAccountsForPeople(client, accounts.scopeId, priorPersonIds);
+    const affectedAccountIds = uniqueSortedStrings([
+      accounts.accountAId,
+      accounts.accountBId,
+      ...priorClusterAccounts.map((row) => row.external_account_id),
+    ]);
     await invalidateCurrentSocialDnaForPeople(
       client,
       accounts.scopeId,
-      priorMemberships.map((row) => row.person_id),
+      priorPersonIds,
     );
     await client.query(
       `
@@ -234,12 +242,21 @@ export async function splitIdentityCandidate(input: ManualIdentityDecisionInput)
       `,
       [accounts.scopeId, accounts.accountAId, accounts.accountBId],
     );
+    const newPersonIds: string[] = [];
     for (const accountId of [accounts.accountAId, accounts.accountBId]) {
       const personId = await createPersonFromAccount(client, accountId);
+      newPersonIds.push(personId);
       await insertConfirmedAccountLink(client, accounts.scopeId, personId, accountId, input.candidateId);
     }
     await updateCandidateStatus(client, input.candidateId, "SPLIT", input.actorUserId ?? null);
     await recordDecision(client, input.candidateId, input.actorUserId ?? null, "SPLIT", candidate.status, "SPLIT", input.reason);
+    await invalidateCurrentSocialDnaForPeople(client, accounts.scopeId, [...priorPersonIds, ...newPersonIds]);
+    await invalidateStaleLinkedCandidates(client, {
+      scopeId: accounts.scopeId,
+      affectedAccountIds,
+      sourceCandidateId: input.candidateId,
+      actorUserId: input.actorUserId ?? null,
+    });
   });
 }
 
@@ -420,6 +437,7 @@ async function withDecisionTransaction<T>(
 
 async function linkCandidateAccounts(executor: Executor, candidateId: string): Promise<string> {
   const accounts = await candidateAccounts(executor, candidateId);
+  await lockMembershipScope(executor, accounts.scopeId);
   await lockMembershipAccounts(executor, accounts.scopeId, [accounts.accountAId, accounts.accountBId]);
   const directMemberships = await loadConfirmedMemberships(executor, accounts.scopeId, [accounts.accountAId, accounts.accountBId]);
   let candidatePersonIds = uniqueSortedStrings(directMemberships.map((row) => row.person_id));
@@ -527,6 +545,10 @@ async function lockMembershipAccounts(executor: Executor, scopeId: string, accou
   }
 }
 
+async function lockMembershipScope(executor: Executor, scopeId: string): Promise<void> {
+  await executor.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`identity-membership-scope:${scopeId}`]);
+}
+
 async function loadConfirmedMemberships(
   executor: Executor,
   scopeId: string,
@@ -594,6 +616,51 @@ async function assertCandidateAccountsSharePerson(
   );
   if (result.rows.length !== 1) {
     throw new Error(`Linked identity candidate '${candidateId}' did not converge to one canonical person`);
+  }
+}
+
+async function invalidateStaleLinkedCandidates(
+  executor: Executor,
+  input: { scopeId: string; affectedAccountIds: string[]; sourceCandidateId: string; actorUserId: string | null },
+): Promise<void> {
+  if (input.affectedAccountIds.length === 0) return;
+  const stale = await executor.query<{ id: string }>(
+    `
+      SELECT c.id
+      FROM identity_resolution_candidates c
+      LEFT JOIN canonical_person_accounts left_membership
+        ON left_membership.scope_id = c.scope_id
+       AND left_membership.external_account_id = c.account_a_id
+       AND left_membership.status = 'CONFIRMED'
+      LEFT JOIN canonical_person_accounts right_membership
+        ON right_membership.scope_id = c.scope_id
+       AND right_membership.external_account_id = c.account_b_id
+       AND right_membership.status = 'CONFIRMED'
+      WHERE c.scope_id = $1
+        AND c.status = 'LINKED'
+        AND c.id <> $3
+        AND (c.account_a_id = ANY($2::uuid[]) OR c.account_b_id = ANY($2::uuid[]))
+        AND (
+          left_membership.person_id IS NULL
+          OR right_membership.person_id IS NULL
+          OR left_membership.person_id <> right_membership.person_id
+        )
+      ORDER BY c.id
+      FOR UPDATE OF c
+    `,
+    [input.scopeId, uniqueSortedStrings(input.affectedAccountIds), input.sourceCandidateId],
+  );
+  for (const row of stale.rows) {
+    await updateCandidateStatus(executor, row.id, "PENDING", input.actorUserId);
+    await recordDecision(
+      executor,
+      row.id,
+      input.actorUserId,
+      "INVALIDATE_LINK",
+      "LINKED",
+      "PENDING",
+      `Invalidated by split candidate ${input.sourceCandidateId}`,
+    );
   }
 }
 

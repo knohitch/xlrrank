@@ -81,6 +81,7 @@ const SUPPORTED_SIGNALS = new Set([
   "bio_similarity",
   "topic_similarity",
 ]);
+const SIMILARITY_SIGNALS = new Set(["name_similarity", "handle_similarity", "bio_similarity", "topic_similarity"]);
 
 export function validateIdentityResolutionPolicy(policy: IdentityResolutionPolicy): IdentityResolutionPolicy {
   assertThreshold(policy.autoLinkThreshold, "autoLinkThreshold");
@@ -98,6 +99,9 @@ export function validateIdentityResolutionPolicy(policy: IdentityResolutionPolic
     if (seen.has(signal.key)) throw new Error(`Duplicate identity signal '${signal.key}'`);
     seen.add(signal.key);
     assertFiniteNonnegative(signal.weight, `signals.${signal.key}.weight`);
+    if (SIMILARITY_SIGNALS.has(signal.key) && signal.threshold === undefined) {
+      throw new Error(`signals.${signal.key}.threshold is required for similarity signals`);
+    }
     if (signal.threshold !== undefined) assertThreshold(signal.threshold, `signals.${signal.key}.threshold`);
   }
   return policy;
@@ -163,11 +167,11 @@ function signalMatched(
   const key = policy.key;
   if (key === "name_similarity") {
     const similarity = textSimilarity(a.name, b.name);
-    return thresholdMatch("normalized display-name similarity", similarity, policy.threshold);
+    return thresholdMatch("normalized display-name similarity", similarity, requiredThreshold(policy));
   }
   if (key === "handle_similarity") {
     const similarity = textSimilarity(normalizeHandle(a.handle), normalizeHandle(b.handle));
-    return thresholdMatch("normalized handle similarity", similarity, policy.threshold);
+    return thresholdMatch("normalized handle similarity", similarity, requiredThreshold(policy));
   }
   if (key === "company_match") return exactTextMatch(key, a.company, b.company);
   if (key === "role_match") return exactTextMatch(key, a.role, b.role);
@@ -189,23 +193,25 @@ function signalMatched(
   if (key === "location_match") return exactTextMatch(key, a.location, b.location);
   if (key === "bio_similarity") {
     const similarity = tokenJaccard(a.bio, b.bio);
-    return thresholdMatch("bio token similarity", similarity, policy.threshold);
+    return thresholdMatch("bio token similarity", similarity, requiredThreshold(policy));
   }
   if (key === "topic_similarity") {
     const similarity = setJaccard(new Set(a.topics ?? []), new Set(b.topics ?? []));
-    return thresholdMatch("topic similarity", similarity, policy.threshold);
+    return thresholdMatch("topic similarity", similarity, requiredThreshold(policy));
   }
   throw new Error(`Unsupported identity signal '${key}'`);
+}
+
+function requiredThreshold(policy: IdentitySignalPolicy): number {
+  if (policy.threshold === undefined) throw new Error(`signals.${policy.key}.threshold is required for similarity signals`);
+  return policy.threshold;
 }
 
 function thresholdMatch(
   label: string,
   value: number,
-  configuredThreshold: number | undefined,
+  configuredThreshold: number,
 ): { matched: boolean; description: string } {
-  if (configuredThreshold === undefined) {
-    return { matched: value > 0, description: `${label} ${value.toFixed(4)} above structural zero threshold` };
-  }
   return { matched: value >= configuredThreshold, description: `${label} ${value.toFixed(4)} threshold ${configuredThreshold.toFixed(4)}` };
 }
 
