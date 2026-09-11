@@ -4,6 +4,7 @@ import {
   JOB_TYPES,
   PROVIDER_DATA_DELETION_PAYLOAD_VERSION,
   QUEUE_NAMES,
+  parseProviderDataDeletionPayload,
   type JobStatus,
   type ProviderDataDeletionPayload,
 } from "@xlrrank/queue";
@@ -83,6 +84,18 @@ export class MissingProviderDeletionDeadlinePolicyError extends Error {
   }
 }
 
+function providerDataDeletionIdempotencyKey(input: CreateProviderDataDeletionInput): string {
+  const scopeIdentity =
+    input.scopeId ?? (input.metadata?.privilegedProviderDeletion === true ? "provider-wide" : "unspecified");
+  return [
+    "provider-deletion:v2",
+    `provider:${input.providerFamily}`,
+    `scope:${scopeIdentity}`,
+    `connection:${input.connectionId ?? "all"}`,
+    `authorization:${input.providerAuthorizationId ?? "all"}`,
+  ].join(":");
+}
+
 export async function calculateProviderDataDeletionDeadline(
   providerFamily: string,
   requestedAt = new Date(),
@@ -149,10 +162,10 @@ export async function createProviderDataDeletionRequest(
       input.deadlineAt ??
       (await calculateProviderDataDeletionDeadline(input.providerFamily, requestedAt, client));
 
-    const idempotencyKey = `provider-deletion:${input.providerFamily}:${input.scopeId ?? "global"}:${input.connectionId ?? "all"}`;
-    const active = await client.query<{ id: string; status: JobStatus }>(
+    const idempotencyKey = providerDataDeletionIdempotencyKey(input);
+    const active = await client.query<{ id: string; status: JobStatus; payload: unknown }>(
       `
-        SELECT id, status
+        SELECT id, status, payload
         FROM jobs
         WHERE type = $1
           AND idempotency_key = $2
@@ -164,26 +177,39 @@ export async function createProviderDataDeletionRequest(
     );
 
     if (active.rows[0]) {
-      const existingReq = await client.query<{ id: string }>(
+      const activeJob = active.rows[0];
+      const activePayload = parseProviderDataDeletionPayload(activeJob.payload);
+      if (activePayload.jobRequestId !== activeJob.id) {
+        throw new Error(`Active provider data deletion job '${activeJob.id}' has mismatched payload jobRequestId`);
+      }
+
+      const existingReq = await client.query<{
+        id: string;
+        provider_family: string;
+        deadline_at: Date;
+      }>(
         `
-          SELECT id
+          SELECT id, provider_family, deadline_at
           FROM provider_data_deletion_requests
-          WHERE provider_family = $1
-            AND ($2::uuid IS NULL OR scope_id = $2)
+          WHERE id = $1
             AND status IN ('PENDING_DISPATCH', 'QUEUED', 'RUNNING')
-          ORDER BY created_at ASC
           LIMIT 1
         `,
-        [input.providerFamily, input.scopeId ?? null],
+        [activePayload.deletionRequestId],
       );
+      if (!existingReq.rows[0]) {
+        throw new Error(
+          `Active provider data deletion job '${activeJob.id}' references missing or inactive deletion request '${activePayload.deletionRequestId}'`,
+        );
+      }
 
       if (ownsClient) await client.query("COMMIT");
       return {
-        deletionRequestId: existingReq.rows[0]?.id ?? "",
-        jobId: active.rows[0].id,
-        providerFamily: input.providerFamily,
-        deadlineAt,
-        status: active.rows[0].status,
+        deletionRequestId: existingReq.rows[0].id,
+        jobId: activeJob.id,
+        providerFamily: existingReq.rows[0].provider_family,
+        deadlineAt: existingReq.rows[0].deadline_at,
+        status: activeJob.status,
         accepted: false,
         duplicate: true,
       };

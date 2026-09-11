@@ -86,12 +86,12 @@ Reddit deletion reconciliation revalidates persisted content and accounts agains
 - Endpoints:
   - Links and Comments: `GET /api/info` using `id` parameter with prefixed fullnames (`t3_` for submissions, `t1_` for comments) in bounded batches (up to 100 items).
   - User Accounts: `GET /user/{username}/about.json` using generic `lookupKey` / handle under `read` OAuth scope (official Reddit Data API specification restricts `/api/info` to `t1`, `t3`, and `t5`; `t2_*` accounts are queried via the about endpoint).
-- States: Distinguishes `EXISTS`, `DELETED`, `ACCOUNT_DELETED`, and `UNKNOWN`. Transient network errors (429, 5xx, timeouts, missing handles) return `UNKNOWN` and never trigger destructive scrubbing.
+- States: Distinguishes `EXISTS`, `DELETED`, `ACCOUNT_DELETED`, and `UNKNOWN`. Confirmed deleted-account evidence may trigger deletion/anonymization. Suspended accounts and HTTP 404 account responses are treated as `UNKNOWN`; `UNKNOWN` is non-destructive.
 - Safe claiming: Database candidates are claimed with `FOR UPDATE SKIP LOCKED` and durable cursor tracking in `provider_reconciliation_checkpoints`.
 - Non-locking execution: Candidates are claimed in a short database transaction; network requests execute outside open transactions; final state updates and checkpoint advancements commit in a separate short transaction.
-- Work budget & Rate-limiting: Reconciliation sweeps enforce per-run batch budgets (`maxBatchesPerRun = 5`) and respect upstream rate-limit headers (`rateLimit.remaining === 0` or `retryAfter > 0`), gracefully preserving the checkpoint cursor. Sweeps are bounded by `AbortSignal.timeout(env.PROVIDER_RECONCILIATION_SWEEP_TIMEOUT_MS)`.
+- Work budget & Rate-limiting: Reconciliation sweeps enforce per-run batch budgets (`maxBatchesPerRun = 5`, configurable up to 100) and respect upstream rate-limit headers (`rateLimit.remaining === 0` or `retryAfter > 0`). Rate-limited or deferred account candidates are retried later; the checkpoint does not advance past candidates that were not definitively attempted against the provider. Sweeps are bounded by `AbortSignal.timeout(env.PROVIDER_RECONCILIATION_SWEEP_TIMEOUT_MS)`.
 - Upstream removal: Items missing from the `/api/info` response or marked with `removed_by_category`, `[deleted]`, or `[removed]` have their observations purged. Orphan canonical items and interactions are removed only if no observation from another provider references them (preserving multi-provider provenance).
-- Author account deletion: Suspended or deleted user accounts trigger author anonymization (`author_handle = '[deleted]'`, `author_external_id = NULL`, removal of author fullname from metadata) across stored posts and interactions.
+- Author account deletion: Confirmed deleted user accounts may trigger author anonymization (`author_handle = '[deleted]'`, `author_external_id = NULL`, removal of author fullname from metadata) across stored posts and interactions. Suspended or 404-only account states remain `UNKNOWN` and do not trigger destructive changes.
 
 ## Provider Data Deletion Requests (DPA Compliance)
 
@@ -99,7 +99,9 @@ Reddit Developer Terms and Data Protection Addendum (DPA) require deletion of Pe
 - Queue: `QUEUE_NAMES.ingestion`, job type `JOB_TYPES.providerDataDeletion` (`provider.data.deletion`).
 - Deadline calculation: `calculateProviderDataDeletionDeadline` dynamically evaluates provider retention policy metadata (`deletionRequestDeadlineSeconds: 864000`, exactly 10 days for Reddit) or environment overrides. It fails closed with `MissingProviderDeletionDeadlinePolicyError` if provider policy metadata is absent.
 - Durability: Requests, domain jobs, and outbox entries are committed atomically in the database within a single transaction prior to Redis transport.
-- Bounded phased execution: `executeProviderDataDeletion` runs in configurable bounded batches (`batchSize`, default 100) across 8 distinct phases:
+- Bounded phased execution: Each worker execution performs one bounded destructive unit (`batchSize`, default 100) and commits that unit with its progress checkpoint and any continuation job. A continuation uses a new durable job and outbox identity that references the same deletion request.
+- Relational workset: Canonical cleanup provenance is stored in `provider_data_deletion_targets`, keyed by deletion request, entity type, and entity ID. `provider_data_deletion_requests.metadata.deletionProgress` stores phase and counts only, not target UUID arrays.
+- Phases:
   1. `CONTENT_OBSERVATIONS`
   2. `CANONICAL_ITEMS` (orphaned items cleaned only if no observation from any provider remains)
   3. `INTERACTION_OBSERVATIONS`
@@ -108,7 +110,8 @@ Reddit Developer Terms and Data Protection Addendum (DPA) require deletion of Pe
   6. `ACCOUNTS` (orphaned external accounts sanitized)
   7. `ACCOUNT_HANDLES` (orphaned handles purged)
   8. `CONTENT_METRICS` (derivatives purged)
-- Progress checkpointing & Idempotency: Execution progress is checkpointed in `provider_data_deletion_requests.metadata.deletionProgress` after each phase/batch, enabling safe resumption upon restart and idempotent replay. Callers omitting `scopeId` for connection-scoped deletions have `scopeId` resolved automatically from `social_connections`.
+- Scope and authorization safety: Scoped requests do not sweep unrelated provider-family orphan records. Connection requests validate connection existence, scope, and provider family before destructive work. Authorization-only requests fail closed unless authoritative connection provenance is available.
+- Request idempotency: Idempotency is based on provider family plus the actual requested target identifiers: supplied scope, connection, provider authorization, or explicit privileged provider-wide deletion. Duplicate responses return the exact deletion request referenced by the active durable job payload.
 
 ## Disconnect & Durable Token Revocation
 

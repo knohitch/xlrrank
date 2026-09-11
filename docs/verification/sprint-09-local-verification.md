@@ -1,71 +1,38 @@
 # Sprint 09 Local Verification
 
-Date: 2026-09-10
+Date: 2026-09-11
 
-## Sprint 09 Closure Repair Verification
+## Final Sprint 09 Evidence
 
-Repair verification date: 2026-09-10
+- Reddit account state safety: reconciliation uses `/api/info` for links/comments and `/user/{username}/about.json` for accounts. Suspended accounts and HTTP 404 account responses resolve to `UNKNOWN`, and `UNKNOWN` is non-destructive. Confirmed deleted-account evidence remains the path that may trigger anonymization.
+- Durable authorization cleanup: `processProviderAuthorizationCleanup()` is covered by a real worker fixture path with canonical cleanup ID/AAD and credential wipe on terminal outcomes.
+- Approved-use retention: Reddit retention is policy-driven through approved-use metadata; the generic 30-day default was removed.
+- Provider deletion deadline: Reddit deletion requests resolve the 10-day deadline from policy metadata (`864000` seconds) and fail closed without policy or override.
+- Bounded data deletion: each provider deletion worker execution performs one bounded destructive unit and commits that unit with phase/count checkpointing.
+- Relational deletion workset: `provider_data_deletion_targets` stores bounded request/entity work records; request metadata stores phase and counts, not target UUID arrays.
+- Real worker continuation: PostgreSQL-backed test uses more than 100 rows, exercises `processProviderDataDeletion()`, observes `IN_PROGRESS`, follows new durable job/outbox identities, and completes through continuation.
+- Scope isolation: connection/scoped deletion preserves unrelated scope/provider data and does not sweep unrelated provider-family orphan records.
+- Authorization isolation: authorization-only deletion fails closed unless authoritative connection provenance exists; same-scope two-authorization identity tests prove separate request/job identity.
+- Reconciliation global budget: `PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN` remains provider-neutral, defaults to 5, and is capped at 100.
+- Deferred cursor behavior: rate-limited/deferred reconciliation candidates remain eligible for retry; checkpoints do not advance past candidates that were not definitively attempted.
+- Configuration maximum: config schema rejects zero, negative, and values above 100 for `PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN`.
 
-### 1. Defect 1: Reddit Account Reconciliation & Resource State Discrimination
-- Separated reconciliation into official Reddit endpoints: `/api/info` for Links (`t3`) and Comments (`t1`), and `GET /user/{username}/about.json` under `read` scope for Accounts (`t2`).
-- Added provider-neutral `lookupKey?: string` to `ReconcileResourceItem`.
-- State discrimination: correctly identifies `EXISTS`, `DELETED`, `ACCOUNT_DELETED`, and `UNKNOWN`.
-- Transient errors (429, 5xx, timeouts, missing handles) return `UNKNOWN` and never trigger destructive scrubbing.
-- Verified in `packages/social-core/test/reddit-connector.test.mjs`.
-
-### 2. Defect 2: Durable Authorization Cleanup Canonical ID & Schema Column Fix
-- Fixed UUID mismatch: single canonical `cleanupId` allocated in `platforms.service.ts` passed to `createProviderAuthorizationCleanupRequestTx({ id: cleanupId })`, matching encryption AAD, database row `id`, queue payload, and worker decryption.
-- Fixed schema column mismatch: worker processor queries `pac.connection_id` matching `provider_authorization_cleanups.connection_id`.
-- Verified in PostgreSQL integration test `packages/database/test/sprint-09-closure-integration.test.mjs`: creation, AAD encryption, worker decrypt, mock revoke, credential wipe to NULL, and retryable failure.
-
-### 3. Defect 3: Bounded Phased Data Deletion & Connection Scoping
-- `executeProviderDataDeletion` runs in bounded batches (`batchSize`, default 100) across 8 distinct phases: `CONTENT_OBSERVATIONS`, `CANONICAL_ITEMS`, `INTERACTION_OBSERVATIONS`, `CANONICAL_INTERACTIONS`, `ACCOUNT_OBSERVATIONS`, `ACCOUNTS`, `ACCOUNT_HANDLES`, `CONTENT_METRICS`.
-- Checkpointing: progress tracked in `metadata.deletionProgress` for safe resume and idempotency.
-- Connection-scoping: dynamic SQL parameter index construction (`$1, $2, ...`) and automatic `scopeId` resolution from `social_connections` when callers omit `scopeId`.
-- Multi-provider preservation: canonical items and interactions preserved if another provider or connection still references them.
-- Verified in PostgreSQL integration test `packages/database/test/sprint-09-closure-integration.test.mjs`.
-
-### 4. Defect 4: Fail-Closed Deletion Deadline (No 30-Day Hardcoded Fallback)
-- Removed generic hardcoded 30-day default fallback from `calculateProviderDataDeletionDeadline`.
-- Fails closed with `MissingProviderDeletionDeadlinePolicyError` when no policy metadata or environment override exists.
-- Reddit 10-day deadline resolved from policy metadata (`deletionRequestDeadlineSeconds = 864000`).
-- Verified in `packages/database/test/sprint-09-closure-repair.test.mjs`.
-
-### 5. Defect 5: Bounded Rate-Limit Aware Reconciliation Sweep
-- Work budget: capped at `maxBatchesPerRun` (default 5 batches per sweep run).
-- Rate-limit aware: inspects `reconcileResult.rateLimit` and cleanly breaks if remaining is 0 or backoff requested, preserving checkpoint cursor.
-- Timeout protection: protected with `AbortSignal.timeout(env.PROVIDER_RECONCILIATION_SWEEP_TIMEOUT_MS)`.
-- Transaction isolation: claims candidates in short transaction, executes network calls outside transaction, and finalizes/checkpoints in a separate transaction.
-- Verified in `apps/worker/src/provider-reconciliation-sweep.ts`.
-
-### Targeted Repair Test Verification
+## Focused Tests
 
 ```sh
-pnpm --filter @xlrrank/social-core run test
-pnpm --filter @xlrrank/database run test
-pnpm --filter @xlrrank/worker run test
-pnpm --filter @xlrrank/api run test
+$env:DATABASE_URL='postgresql://xlrrank:xlrrank@127.0.0.1:5434/xlrrank_audit'; $env:ENCRYPTION_MASTER_KEY='integration-test-master-key-32b!'; node --test packages/database/test/sprint-09-bounded-deletion.test.mjs
 ```
 
-Observed:
-- `@xlrrank/social-core`: 26/26 tests passing.
-- `@xlrrank/database`: 30 tests (22 passing, 8 skipped for audit db env), including both PostgreSQL integration tests.
-- `@xlrrank/worker`: 3/3 tests passing (22 skipped e2e).
-- `@xlrrank/api`: 6/6 tests passing.
+Observed: 10/10 passing.
 
-
-## Source Verification
-
-Official Reddit sources checked on 2026-09-10:
-- Responsible Builder Policy, updated June 05, 2026: https://support.reddithelp.com/hc/en-us/articles/42728983564564-Responsible-Builder-Policy
-- Data API Terms, last revised July 20, 2026: https://redditinc.com/policies/data-api-terms
-- Reddit API index: https://www.reddit.com/dev/api/
-- OAuth 2 technical reference: https://github.com/reddit-archive/reddit/wiki/oauth2
+Previously accepted focused coverage remains in:
+- `apps/worker/test/sprint-09-reconciliation-cursor.test.mjs`: deferred cursor preservation.
+- `packages/config/test/env.test.mjs`: reconciliation batch cap.
+- `apps/worker/test/sprint-09-closure-e2e.test.mjs`: Reddit account state safety and durable authorization cleanup.
 
 ## Final Matrix
 
 ```sh
-pnpm install --frozen-lockfile
 pnpm lint --concurrency=2
 pnpm typecheck --concurrency=2
 pnpm build
@@ -74,15 +41,18 @@ pnpm audit --prod
 git diff --check
 ```
 
-Observed:
-- `pnpm install --frozen-lockfile`: pass, already up to date
-- `pnpm lint --concurrency=2`: pass with existing warnings
-- `pnpm typecheck --concurrency=2`: pass
-- `pnpm build`: pass
-- `pnpm test --concurrency=2`: pass
-- `pnpm audit --prod`: pass, no known vulnerabilities
-- `git diff --check`: pass; line-ending warnings only
+Observed on 2026-09-11:
+- `pnpm lint --concurrency=2`: pass with existing warnings only.
+- `pnpm typecheck --concurrency=2`: pass.
+- `pnpm build`: pass.
+- `pnpm test --concurrency=2`: pass, 27 turbo tasks successful. Notable package counts: `@xlrrank/database` 40 tests (32 pass, 8 skipped), `@xlrrank/worker` 28 tests (6 pass, 22 skipped), `@xlrrank/config` 9/9 pass.
+- `pnpm audit --prod`: pass, no known vulnerabilities.
+- `git diff --check`: pass; line-ending warnings only.
 
-Remote CI was not triggered or polled.
+## External Blockers
 
-Docker was not installed or used.
+- `REMOTE CI: BLOCKED_INFRA`
+- `WORKER DOCKER RUNTIME: BLOCKED_LOCAL_INFRA`
+- `REDDIT LIVE PROVIDER GATE: BLOCKED_EXTERNAL`
+
+Remote CI was not triggered or polled. Docker was not installed or used. No live Reddit verification is claimed.

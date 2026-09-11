@@ -2,6 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
+import {
+  JOB_TYPES,
+  PROVIDER_DATA_DELETION_PAYLOAD_VERSION,
+  QUEUE_NAMES,
+} from "@xlrrank/queue";
 
 process.env.DATABASE_URL =
   process.env.DATABASE_URL || "postgresql://xlrrank:xlrrank@127.0.0.1:5434/xlrrank_audit";
@@ -31,10 +36,193 @@ async function createTestAccount(executor, platformId, handle = "u/testuser") {
   return acctId;
 }
 
+async function ensureDeletionPolicy(executor, providerFamily, dataCategory = `identity_${randomUUID()}`) {
+  await executor.query(
+    `INSERT INTO provider_data_retention_policies (provider_family, data_category, retention_class, retention_mode, metadata)
+     VALUES ($1, $2, 'APPROVED_USE_CONTENT', 'APPROVED_USE_CASE', '{"deletionRequestDeadlineSeconds": 864000}'::jsonb)
+     ON CONFLICT (provider_family, data_category) DO UPDATE SET metadata = EXCLUDED.metadata`,
+    [providerFamily, dataCategory],
+  );
+}
+
+function deletionIdentityKey({ providerFamily, scopeId, connectionId = null, providerAuthorizationId = null }) {
+  return [
+    "provider-deletion:v2",
+    `provider:${providerFamily}`,
+    `scope:${scopeId ?? "unspecified"}`,
+    `connection:${connectionId ?? "all"}`,
+    `authorization:${providerAuthorizationId ?? "all"}`,
+  ].join(":");
+}
+
 import {
   createProviderDataDeletionRequest,
   executeProviderDataDeletion,
 } from "../dist/index.js";
+
+test("Data deletion identity: two connections in the same scope deduplicate only exact retries", async () => {
+  const pool = new Pool({ connectionString: DATABASE_URL });
+  try {
+    const scopeId = await createTestScope(pool);
+    const platformId = randomUUID();
+    const connectionA = randomUUID();
+    const connectionB = randomUUID();
+    await ensureDeletionPolicy(pool, "reddit");
+    await pool.query(
+      `INSERT INTO platforms (id, slug, display_name, enabled, provider_family)
+       VALUES ($1, $2, 'Reddit Identity', true, 'reddit')`,
+      [platformId, `reddit-identity-${randomUUID()}`],
+    );
+    await pool.query(
+      `INSERT INTO social_connections (id, scope_id, platform_id, status, credentials_encrypted)
+       VALUES ($1, $2, $3, 'CONNECTED', 'enc:v2:a'),
+              ($4, $2, $3, 'CONNECTED', 'enc:v2:b')`,
+      [connectionA, scopeId, platformId, connectionB],
+    );
+
+    const requestA = await createProviderDataDeletionRequest({
+      providerFamily: "reddit",
+      scopeId,
+      connectionId: connectionA,
+      reason: "identity connection a",
+      source: "TEST",
+    });
+    const requestB = await createProviderDataDeletionRequest({
+      providerFamily: "reddit",
+      scopeId,
+      connectionId: connectionB,
+      reason: "identity connection b",
+      source: "TEST",
+    });
+
+    assert.notEqual(requestA.deletionRequestId, requestB.deletionRequestId);
+    assert.notEqual(requestA.jobId, requestB.jobId);
+
+    const retryA = await createProviderDataDeletionRequest({
+      providerFamily: "reddit",
+      scopeId,
+      connectionId: connectionA,
+      reason: "identity connection a retry",
+      source: "TEST",
+    });
+    assert.equal(retryA.duplicate, true);
+    assert.equal(retryA.deletionRequestId, requestA.deletionRequestId);
+    assert.equal(retryA.jobId, requestA.jobId);
+
+    const retryB = await createProviderDataDeletionRequest({
+      providerFamily: "reddit",
+      scopeId,
+      connectionId: connectionB,
+      reason: "identity connection b retry",
+      source: "TEST",
+    });
+    assert.equal(retryB.duplicate, true);
+    assert.equal(retryB.deletionRequestId, requestB.deletionRequestId);
+    assert.equal(retryB.jobId, requestB.jobId);
+  } finally {
+    await pool.end();
+  }
+});
+
+test("Data deletion identity: two authorizations in the same scope do not deduplicate each other", async () => {
+  const pool = new Pool({ connectionString: DATABASE_URL });
+  try {
+    const scopeId = await createTestScope(pool);
+    const platformId = randomUUID();
+    const authA = randomUUID();
+    const authB = randomUUID();
+    await ensureDeletionPolicy(pool, "reddit");
+    await pool.query(
+      `INSERT INTO platforms (id, slug, display_name, enabled, provider_family)
+       VALUES ($1, $2, 'Reddit Auth Identity', true, 'reddit')`,
+      [platformId, `reddit-auth-identity-${randomUUID()}`],
+    );
+    await pool.query(
+      `INSERT INTO provider_authorizations (id, provider_family, scope_id, platform_id, provider_user_id, status, granted_scopes)
+       VALUES ($1, 'reddit', $2, $3, 'identity_auth_a', 'ACTIVE', '[]'::jsonb),
+              ($4, 'reddit', $2, $3, 'identity_auth_b', 'ACTIVE', '[]'::jsonb)`,
+      [authA, scopeId, platformId, authB],
+    );
+
+    const requestA = await createProviderDataDeletionRequest({
+      providerFamily: "reddit",
+      scopeId,
+      providerAuthorizationId: authA,
+      reason: "identity auth a",
+      source: "TEST",
+    });
+    const requestB = await createProviderDataDeletionRequest({
+      providerFamily: "reddit",
+      scopeId,
+      providerAuthorizationId: authB,
+      reason: "identity auth b",
+      source: "TEST",
+    });
+
+    assert.notEqual(requestA.deletionRequestId, requestB.deletionRequestId);
+    assert.notEqual(requestA.jobId, requestB.jobId);
+
+    const retryA = await createProviderDataDeletionRequest({
+      providerFamily: "reddit",
+      scopeId,
+      providerAuthorizationId: authA,
+      reason: "identity auth a retry",
+      source: "TEST",
+    });
+    assert.equal(retryA.duplicate, true);
+    assert.equal(retryA.deletionRequestId, requestA.deletionRequestId);
+    assert.equal(retryA.jobId, requestA.jobId);
+  } finally {
+    await pool.end();
+  }
+});
+
+test("Data deletion identity: malformed active job payload fails closed", async () => {
+  const pool = new Pool({ connectionString: DATABASE_URL });
+  try {
+    const scopeId = await createTestScope(pool);
+    const platformId = randomUUID();
+    const connectionId = randomUUID();
+    const jobId = randomUUID();
+    await ensureDeletionPolicy(pool, "reddit");
+    await pool.query(
+      `INSERT INTO platforms (id, slug, display_name, enabled, provider_family)
+       VALUES ($1, $2, 'Reddit Malformed Identity', true, 'reddit')`,
+      [platformId, `reddit-malformed-identity-${randomUUID()}`],
+    );
+    await pool.query(
+      `INSERT INTO social_connections (id, scope_id, platform_id, status, credentials_encrypted)
+       VALUES ($1, $2, $3, 'CONNECTED', 'enc:v2:malformed')`,
+      [connectionId, scopeId, platformId],
+    );
+    await pool.query(
+      `INSERT INTO jobs (id, type, queue_name, status, payload, payload_version, idempotency_key, max_attempts)
+       VALUES ($1, $2, $3, 'PENDING_DISPATCH', $4::jsonb, $5, $6, 3)`,
+      [
+        jobId,
+        JOB_TYPES.providerDataDeletion,
+        QUEUE_NAMES.ingestion,
+        JSON.stringify({ version: PROVIDER_DATA_DELETION_PAYLOAD_VERSION, jobRequestId: jobId }),
+        PROVIDER_DATA_DELETION_PAYLOAD_VERSION,
+        deletionIdentityKey({ providerFamily: "reddit", scopeId, connectionId }),
+      ],
+    );
+
+    await assert.rejects(
+      () =>
+        createProviderDataDeletionRequest({
+          providerFamily: "reddit",
+          scopeId,
+          connectionId,
+          reason: "malformed active job protection",
+          source: "TEST",
+        }),
+      /deletionRequestId must be a UUID/,
+    );
+  } finally {
+    await pool.end();
+  }
+});
 
 // ─── Defect 1 + 8: Bounded deletion ─────────────────────────────────────────
 
