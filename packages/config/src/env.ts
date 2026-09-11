@@ -65,7 +65,7 @@ const baseEnvSchema = z.object({
   PROVIDER_RETENTION_SWEEP_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
   PROVIDER_RECONCILIATION_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
   PROVIDER_RECONCILIATION_SWEEP_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
-  PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: z.coerce.number().int().positive().default(5),
+  PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: z.coerce.number().int().positive().max(100).default(5),
   SOCIAL_SYNC_SHUTDOWN_GRACE_MS: z.coerce.number().int().positive().default(30_000),
   SOCIAL_SYNC_BULLMQ_LOCK_MS: z.coerce.number().int().positive().default(30_000),
   SOCIAL_SYNC_BULLMQ_STALLED_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),

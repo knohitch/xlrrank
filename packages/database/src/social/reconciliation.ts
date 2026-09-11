@@ -69,11 +69,12 @@ export async function claimReconciliationCandidates(
       metadata: Record<string, unknown> | null;
     }>(
       `
-        SELECT sci.id, sci.external_id, sci.author_external_id, sci.author_handle, sci.metadata
+        SELECT sci.id, sci.external_id, sea.external_id AS author_external_id, sea.current_handle AS author_handle, sci.metadata
         FROM social_content_items sci
         JOIN social_content_observations sco ON sco.content_item_id = sci.id
         JOIN social_connections sc ON sc.id = sco.connection_id
         JOIN platforms p ON p.id = sc.platform_id
+        JOIN social_external_accounts sea ON sea.id = sci.author_external_account_id
         WHERE sco.connection_id = $1
           AND sco.scope_id = $2
           AND sc.status = 'CONNECTED'
@@ -107,11 +108,12 @@ export async function claimReconciliationCandidates(
       metadata: Record<string, unknown> | null;
     }>(
       `
-        SELECT si.id, si.external_id, si.author_external_id, si.author_handle, si.metadata
+        SELECT si.id, si.external_id, sea.external_id AS author_external_id, sea.current_handle AS author_handle, si.metadata
         FROM social_interactions si
         JOIN social_interaction_observations sio ON sio.interaction_id = si.id
         JOIN social_connections sc ON sc.id = sio.connection_id
         JOIN platforms p ON p.id = sc.platform_id
+        JOIN social_external_accounts sea ON sea.id = si.from_external_account_id
         WHERE sio.connection_id = $1
           AND sio.scope_id = $2
           AND sc.status = 'CONNECTED'

@@ -1338,6 +1338,35 @@ export const providerDataDeletionRequests = pgTable(
   ],
 );
 
+export const providerDataDeletionTargets = pgTable(
+  "provider_data_deletion_targets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    deletionRequestId: uuid("deletion_request_id")
+      .notNull()
+      .references(() => providerDataDeletionRequests.id, { onDelete: "cascade" }),
+    entityType: text("entity_type").notNull(),
+    entityId: uuid("entity_id").notNull(),
+    status: text("status").notNull().default("PENDING"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("provider_data_deletion_targets_request_entity_unique").on(
+      t.deletionRequestId,
+      t.entityType,
+      t.entityId,
+    ),
+    index("provider_data_deletion_targets_claim_idx").on(
+      t.deletionRequestId,
+      t.entityType,
+      t.status,
+      t.entityId,
+    ),
+    index("provider_data_deletion_targets_entity_idx").on(t.entityType, t.entityId),
+  ],
+);
+
 export const providerAuthorizationCleanups = pgTable(
   "provider_authorization_cleanups",
   {

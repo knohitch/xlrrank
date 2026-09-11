@@ -216,7 +216,15 @@ export async function runProviderReconciliationSweepOnce(
             break;
           }
 
-          run.itemsReconciled += claimResult.candidates.length;
+          const attemptedCandidateIds = new Set<string>();
+          for (const candidate of claimResult.candidates) {
+            const status = reconcileResult.statuses.find((item) => item.externalId === candidate.externalId);
+            if (!status) break;
+            if (status.state === "UNKNOWN" && status.details?.reason === "DEFERRED_RATE_LIMIT") break;
+            attemptedCandidateIds.add(candidate.id);
+          }
+
+          run.itemsReconciled += attemptedCandidateIds.size;
 
           // Step 3: Finalize & Checkpoint in a short transaction
           await client.query("BEGIN");
@@ -297,13 +305,22 @@ export async function runProviderReconciliationSweepOnce(
               }
             }
 
-            const lastId = claimResult.candidates[claimResult.candidates.length - 1]?.id ?? null;
+            let lastAttemptedCandidate = null;
+            for (let i = claimResult.candidates.length - 1; i >= 0; i -= 1) {
+              const candidate = claimResult.candidates[i];
+              if (candidate && attemptedCandidateIds.has(candidate.id)) {
+                lastAttemptedCandidate = candidate;
+                break;
+              }
+            }
+            const lastId = lastAttemptedCandidate?.id ?? claimResult.lastProcessedId ?? null;
             await advanceReconciliationCheckpoint(client, {
               checkpointId: claimResult.checkpointId,
               lastProcessedId: lastId,
-              hasMore: claimResult.hasMore,
+              hasMore: claimResult.hasMore || attemptedCandidateIds.size < claimResult.candidates.length,
               metadata: {
                 reconciledCount: claimResult.candidates.length,
+                attemptedCount: attemptedCandidateIds.size,
                 statusesCount: reconcileResult.statuses.length,
               },
             });

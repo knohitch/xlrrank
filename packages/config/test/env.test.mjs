@@ -64,4 +64,7 @@ test("env schema validates PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN", async (
 
   const invalidNegative = envSchema.safeParse({ PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: "-3" });
   assert.equal(invalidNegative.success, false);
+
+  const invalidTooLarge = envSchema.safeParse({ PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: "101" });
+  assert.equal(invalidTooLarge.success, false);
 });

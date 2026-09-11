@@ -13,13 +13,27 @@ export async function processProviderDataDeletion(job: Job): Promise<void> {
   const payload = parseProviderDataDeletionPayload(job.data);
   const pool = getPool();
 
-  await pool.query(
-    "UPDATE jobs SET status = 'RUNNING', started_at = COALESCE(started_at, now()) WHERE id = $1",
+  const durableJob = await pool.query<{ status: string }>(
+    `
+      UPDATE jobs
+      SET status = 'RUNNING',
+          started_at = COALESCE(started_at, now()),
+          updated_at = now()
+      WHERE id = $1
+        AND status <> 'COMPLETED'
+      RETURNING status
+    `,
     [payload.jobRequestId],
   );
+  if (!durableJob.rows[0]) {
+    logger.info({ jobRequestId: payload.jobRequestId }, "Provider data deletion job already completed");
+    return;
+  }
 
   try {
-    const result = await executeProviderDataDeletion(payload.deletionRequestId);
+    const result = await executeProviderDataDeletion(payload.deletionRequestId, {
+      currentJobId: payload.jobRequestId,
+    });
 
     if (result.status === "IN_PROGRESS") {
       logger.info(
@@ -29,15 +43,7 @@ export async function processProviderDataDeletion(job: Job): Promise<void> {
           providerFamily: result.providerFamily,
           result,
         },
-        "Provider data deletion partially complete, re-enqueuing for continuation",
-      );
-      await pool.query(
-        "UPDATE jobs SET status = 'QUEUED', updated_at = now() WHERE id = $1",
-        [payload.jobRequestId],
-      );
-      await pool.query(
-        "INSERT INTO job_outbox (job_id, queue_name, job_type, payload) VALUES ($1, $2, $3, $4::jsonb)",
-        [payload.jobRequestId, job.queueName ?? "ingestion", JOB_TYPES.providerDataDeletion, JSON.stringify(payload)],
+        "Provider data deletion partially complete, durable continuation scheduled",
       );
       return;
     }
