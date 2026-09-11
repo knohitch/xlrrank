@@ -200,6 +200,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@xlrrank/ai-core':
+        specifier: workspace:*
+        version: link:../../packages/ai-core
       '@xlrrank/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -234,6 +237,12 @@ importers:
 
   packages/ai-core:
     dependencies:
+      '@xlrrank/config':
+        specifier: workspace:*
+        version: link:../config
+      '@xlrrank/database':
+        specifier: workspace:*
+        version: link:../database
       '@xlrrank/shared':
         specifier: workspace:*
         version: link:../shared

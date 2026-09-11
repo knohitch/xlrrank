@@ -155,3 +155,19 @@ export function providerAuthorizationCleanupAssociatedData(input: {
 }): string {
   return `provider-authorization-cleanup:${input.cleanupId}:${input.scopeId}:${input.platformSlug}:credentials:v1`;
 }
+
+export function aiProviderCredentialAssociatedData(input: {
+  credentialId: string;
+  providerId: string;
+  scopeKind: string;
+  scopeId?: string | null;
+}): string {
+  return [
+    "ai-provider-credential",
+    input.credentialId,
+    input.providerId,
+    input.scopeKind,
+    input.scopeId ?? "system",
+    "v1",
+  ].join(":");
+}

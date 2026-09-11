@@ -21,6 +21,9 @@ import {
   getQueue,
   JOB_TYPES,
   QUEUE_NAMES,
+  type QueueName,
+  aiModelRegistryRefreshBullMqJobId,
+  parseAiModelRegistryRefreshPayload,
   parseProviderAuthorizationCleanupPayload,
   parseProviderDataDeletionPayload,
   parseProviderSubscriptionCleanupPayload,
@@ -32,6 +35,7 @@ import {
   socialSyncBullMqJobId,
   socialWebhookBullMqJobId,
 } from "@xlrrank/queue";
+import { processAiModelRegistryRefresh } from "./ai-model-registry-refresh-processor.js";
 import { processProviderAuthorizationCleanup } from "./provider-authorization-cleanup-processor.js";
 import { processProviderDataDeletion } from "./provider-data-deletion-processor.js";
 import { processProviderSubscriptionCleanup } from "./provider-subscription-cleanup-processor.js";
@@ -79,7 +83,9 @@ export async function dispatchOutboxOnce(dispatcherId: string): Promise<number> 
   for (const entry of entries) {
     try {
       const payload =
-        entry.jobType === JOB_TYPES.socialWebhookProcess
+        entry.jobType === JOB_TYPES.aiModelRegistryRefresh
+          ? parseAiModelRegistryRefreshPayload(entry.payload)
+          : entry.jobType === JOB_TYPES.socialWebhookProcess
           ? parseSocialWebhookProcessPayload(entry.payload)
           : entry.jobType === JOB_TYPES.providerSubscriptionCleanup
             ? parseProviderSubscriptionCleanupPayload(entry.payload)
@@ -88,9 +94,11 @@ export async function dispatchOutboxOnce(dispatcherId: string): Promise<number> 
               : entry.jobType === JOB_TYPES.providerDataDeletion
                 ? parseProviderDataDeletionPayload(entry.payload)
                 : parseSocialConnectionSyncPayload(entry.payload);
-      const queue = getQueue(QUEUE_NAMES.ingestion);
+      const queue = getQueue(entry.queueName as QueueName);
       const bullmqJobId =
-        entry.jobType === JOB_TYPES.socialWebhookProcess
+        entry.jobType === JOB_TYPES.aiModelRegistryRefresh
+          ? aiModelRegistryRefreshBullMqJobId(entry.jobId)
+          : entry.jobType === JOB_TYPES.socialWebhookProcess
           ? socialWebhookBullMqJobId(entry.jobId)
           : entry.jobType === JOB_TYPES.providerSubscriptionCleanup
             ? providerSubscriptionCleanupBullMqJobId(entry.jobId)
@@ -205,6 +213,19 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
         throw new UnimplementedJobProcessorError(QUEUE_NAMES.intelligence, job.name);
       },
       env.WORKER_CONCURRENCY,
+    ),
+  );
+  workers.push(
+    createWorker(
+      QUEUE_NAMES.modelManagement,
+      async (job) => {
+        if (job.name === JOB_TYPES.aiModelRegistryRefresh) {
+          return processAiModelRegistryRefresh(job);
+        }
+        logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented model-management job");
+        throw new UnimplementedJobProcessorError(QUEUE_NAMES.modelManagement, job.name);
+      },
+      Math.min(2, env.WORKER_CONCURRENCY),
     ),
   );
 

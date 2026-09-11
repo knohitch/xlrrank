@@ -14,6 +14,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@xlrrank/ai-core": "workspace:*",
     "@xlrrank/config": "workspace:*",
     "@xlrrank/database": "workspace:*",
     "@xlrrank/observability": "workspace:*",

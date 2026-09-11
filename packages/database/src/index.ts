@@ -105,3 +105,8 @@ export type {
   ClaimReconciliationCandidatesInput,
   ClaimReconciliationCandidatesResult,
 } from "./social/reconciliation.js";
+export { createAiModelRegistryRefreshRequest } from "./ai/model-registry-jobs.js";
+export type {
+  CreateAiModelRegistryRefreshInput,
+  DurableAiModelRegistryRefreshRequest,
+} from "./ai/model-registry-jobs.js";

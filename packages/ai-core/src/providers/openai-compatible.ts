@@ -25,7 +25,16 @@ interface OpenAIChatResponse {
 }
 
 interface OpenAIModelsResponse {
-  data: Array<{ id: string; object: string }>;
+  data: Array<{
+    id: string;
+    object: string;
+    name?: string;
+    version?: string;
+    fingerprint?: string;
+    context_length?: number;
+    max_output_tokens?: number;
+    capabilities?: AiCapability[];
+  }>;
 }
 
 interface OpenAIEmbeddingResponse {
@@ -243,17 +252,19 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
   }
 
   override async listModels(): Promise<AiModelDescriptor[]> {
-    try {
-      const data = await this.fetchJson<OpenAIModelsResponse>(
-        `${this.getBaseUrl()}/models`,
-      );
-      return data.data.map((m) => ({
+    const data = await this.fetchJson<OpenAIModelsResponse>(
+      `${this.getBaseUrl()}/models`,
+    );
+    return data.data.map((m) => {
+      const descriptor: AiModelDescriptor = {
         providerId: this.manifest.id,
         modelId: m.id,
-        displayName: m.id,
-      }));
-    } catch {
-      return [];
-    }
+        displayName: m.name ?? m.id,
+      };
+      if (m.version !== undefined) descriptor.version = m.version;
+      if (m.capabilities !== undefined) descriptor.capabilities = m.capabilities;
+      if (m.context_length !== undefined) descriptor.contextLimit = m.context_length;
+      return descriptor;
+    });
   }
 }

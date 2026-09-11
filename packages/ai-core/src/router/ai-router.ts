@@ -33,7 +33,7 @@ export class AiRouter {
     private readonly gateway: AiGateway,
   ) {}
 
-  route(request: RoutingRequest): RoutingDecision {
+  async route(request: RoutingRequest): Promise<RoutingDecision> {
     const mode = request.mode ?? "AUTOMATIC";
 
     if (mode === "CUSTOM" && request.preferredProviderId && request.preferredModelId) {
@@ -47,7 +47,7 @@ export class AiRouter {
       };
     }
 
-    const candidates = this.findCandidates(request);
+    const candidates = await this.findCandidates(request);
     if (candidates.length === 0) {
       return this.fallbackDecision(request);
     }
@@ -69,8 +69,8 @@ export class AiRouter {
     };
   }
 
-  private findCandidates(request: RoutingRequest): ModelRegistryEntry[] {
-    const models = this.registry.list({ lifecycleStage: "ACTIVE" });
+  private async findCandidates(request: RoutingRequest): Promise<ModelRegistryEntry[]> {
+    const models = await this.registry.list({ lifecycleStage: "ACTIVE" });
     return models.filter((m) => {
       const provider = this.gateway.getProvider(m.providerId);
       if (!provider || provider.getStatus() !== "connected") return false;

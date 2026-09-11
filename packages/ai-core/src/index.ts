@@ -40,6 +40,15 @@ export type {
 } from "./providers/types.js";
 
 export { ModelRegistryService, modelRegistry } from "./registry/model-registry.js";
+export type {
+  AiProviderCredentialDto,
+  AvailableModelQuery,
+  CreateAiProviderCredentialInput,
+  ModelRegistryRefreshResult,
+  RefreshModelRegistryInput,
+  RuntimeRefreshResult,
+} from "./registry/model-registry.js";
+export { validateProviderBaseUrl } from "./registry/endpoint-policy.js";
 export { ModelProber } from "./registry/model-probe.js";
 export type {
   ModelRegistryEntry,

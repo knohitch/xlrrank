@@ -36,7 +36,7 @@ export abstract class BaseAiProvider {
   configure(config: ProviderConfig): void {
     this.config = config;
     if (config.apiKey || config.baseUrl) {
-      this.status = "connected";
+      this.status = "degraded";
     }
   }
 
@@ -103,7 +103,7 @@ export abstract class BaseAiProvider {
       );
     }
     throw new AiProviderError(
-      `HTTP ${status}: ${body.slice(0, 500)}`,
+      `Provider request failed with HTTP ${status}`,
       this.manifest.id,
       "HTTP_ERROR",
       status >= 500,

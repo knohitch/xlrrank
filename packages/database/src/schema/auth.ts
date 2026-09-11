@@ -188,11 +188,46 @@ export const aiProviders = pgTable(
     baseUrl: text("base_url"),
     apiKeyEncrypted: text("api_key_encrypted"),
     enabled: boolean("enabled").notNull().default(true),
+    status: text("status").notNull().default("CONFIGURATION_MISSING"),
+    health: jsonb("health"),
+    lastDiscoveryAttemptAt: timestamp("last_discovery_attempt_at", { withTimezone: true }),
+    lastSuccessfulDiscoveryAt: timestamp("last_successful_discovery_at", { withTimezone: true }),
+    lastDiscoveryError: jsonb("last_discovery_error"),
     config: jsonb("config"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [uniqueIndex("ai_providers_slug_unique").on(t.slug)],
+);
+
+export const aiProviderCredentials = pgTable(
+  "ai_provider_credentials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerId: uuid("provider_id")
+      .notNull()
+      .references(() => aiProviders.id, { onDelete: "cascade" }),
+    scopeKind: text("scope_kind").notNull().default("SYSTEM"),
+    scopeId: uuid("scope_id"),
+    label: text("label").notNull().default("default"),
+    credentialsEncrypted: text("credentials_encrypted").notNull(),
+    status: text("status").notNull().default("CONFIGURED"),
+    health: jsonb("health"),
+    lastValidatedAt: timestamp("last_validated_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_provider_credentials_provider_idx").on(t.providerId),
+    index("ai_provider_credentials_scope_idx").on(t.scopeKind, t.scopeId),
+    uniqueIndex("ai_provider_credentials_identity_unique").on(
+      t.providerId,
+      t.scopeKind,
+      t.scopeId,
+      t.label,
+    ),
+  ],
 );
 
 export const aiModels = pgTable(
@@ -208,9 +243,13 @@ export const aiModels = pgTable(
     fingerprint: text("fingerprint"),
     lifecycleStage: text("lifecycle_stage").notNull().default("DISCOVERED"),
     capabilities: jsonb("capabilities"),
+    capabilityEvidence: jsonb("capability_evidence"),
     contextLimit: integer("context_limit"),
+    outputLimit: integer("output_limit"),
     pricing: jsonb("pricing"),
+    providerMetadata: jsonb("provider_metadata"),
     health: jsonb("health"),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
     lastProbedAt: timestamp("last_probed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -219,6 +258,65 @@ export const aiModels = pgTable(
   (t) => [
     uniqueIndex("ai_models_provider_model_unique").on(t.providerId, t.modelId),
     index("ai_models_stage_idx").on(t.lifecycleStage),
+  ],
+);
+
+export const aiModelAvailability = pgTable(
+  "ai_model_availability",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    providerId: uuid("provider_id")
+      .notNull()
+      .references(() => aiProviders.id, { onDelete: "cascade" }),
+    modelId: uuid("model_id")
+      .notNull()
+      .references(() => aiModels.id, { onDelete: "cascade" }),
+    credentialId: uuid("credential_id").references(() => aiProviderCredentials.id, {
+      onDelete: "cascade",
+    }),
+    runtimeKey: text("runtime_key").notNull(),
+    status: text("status").notNull().default("AVAILABLE"),
+    capabilityEvidence: jsonb("capability_evidence"),
+    health: jsonb("health"),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    lastProbedAt: timestamp("last_probed_at", { withTimezone: true }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ai_model_availability_runtime_unique").on(t.modelId, t.runtimeKey),
+    index("ai_model_availability_provider_idx").on(t.providerId),
+    index("ai_model_availability_credential_idx").on(t.credentialId),
+    index("ai_model_availability_status_idx").on(t.status),
+  ],
+);
+
+export const aiModelCapabilityValidations = pgTable(
+  "ai_model_capability_validations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    modelId: uuid("model_id")
+      .notNull()
+      .references(() => aiModels.id, { onDelete: "cascade" }),
+    credentialId: uuid("credential_id").references(() => aiProviderCredentials.id, {
+      onDelete: "cascade",
+    }),
+    runtimeKey: text("runtime_key").notNull(),
+    capability: text("capability").notNull(),
+    status: text("status").notNull(),
+    quality: integer("quality"),
+    latencyMs: integer("latency_ms"),
+    safeError: jsonb("safe_error"),
+    checkedAt: timestamp("checked_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ai_model_capability_runtime_unique").on(t.modelId, t.runtimeKey, t.capability),
+    index("ai_model_capability_status_idx").on(t.capability, t.status),
+    index("ai_model_capability_credential_idx").on(t.credentialId),
   ],
 );
 

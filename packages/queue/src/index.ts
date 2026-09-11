@@ -18,6 +18,7 @@ export const JOB_TYPES = {
   providerSubscriptionCleanup: "provider.subscription.cleanup",
   providerAuthorizationCleanup: "provider.authorization.cleanup",
   providerDataDeletion: "provider.data.deletion",
+  aiModelRegistryRefresh: "ai.model_registry.refresh",
 } as const;
 
 export type JobType = (typeof JOB_TYPES)[keyof typeof JOB_TYPES];
@@ -27,6 +28,7 @@ export const SOCIAL_WEBHOOK_PROCESS_PAYLOAD_VERSION = 1 as const;
 export const PROVIDER_SUBSCRIPTION_CLEANUP_PAYLOAD_VERSION = 1 as const;
 export const PROVIDER_AUTHORIZATION_CLEANUP_PAYLOAD_VERSION = 1 as const;
 export const PROVIDER_DATA_DELETION_PAYLOAD_VERSION = 1 as const;
+export const AI_MODEL_REGISTRY_REFRESH_PAYLOAD_VERSION = 1 as const;
 
 export const SOCIAL_SYNC_REASONS = ["MANUAL", "SCHEDULED", "RETRY"] as const;
 export type SocialSyncReason = (typeof SOCIAL_SYNC_REASONS)[number];
@@ -71,6 +73,16 @@ export interface ProviderDataDeletionPayloadV1 {
 }
 
 export type ProviderDataDeletionPayload = ProviderDataDeletionPayloadV1;
+
+export interface AiModelRegistryRefreshPayloadV1 {
+  version: typeof AI_MODEL_REGISTRY_REFRESH_PAYLOAD_VERSION;
+  jobRequestId: string;
+  providerId?: string;
+  credentialId?: string;
+  reason: "SCHEDULED" | "MANUAL" | "RETRY";
+}
+
+export type AiModelRegistryRefreshPayload = AiModelRegistryRefreshPayloadV1;
 
 export const JOB_STATUSES = [
   "PENDING_DISPATCH",
@@ -283,6 +295,46 @@ export function parseProviderDataDeletionPayload(
   };
 }
 
+export function parseAiModelRegistryRefreshPayload(
+  payload: unknown,
+): AiModelRegistryRefreshPayload {
+  assertNoCredentialsInPayload(payload);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new InvalidJobPayloadError("AI model registry refresh payload must be an object");
+  }
+  const item = payload as Record<string, unknown>;
+  if (item.version !== AI_MODEL_REGISTRY_REFRESH_PAYLOAD_VERSION) {
+    throw new InvalidJobPayloadError("Unsupported AI model registry refresh payload version");
+  }
+  if (typeof item.jobRequestId !== "string" || !UUID_RE.test(item.jobRequestId)) {
+    throw new InvalidJobPayloadError("AI model registry refresh payload jobRequestId must be a UUID");
+  }
+  if (item.providerId !== undefined && (typeof item.providerId !== "string" || !UUID_RE.test(item.providerId))) {
+    throw new InvalidJobPayloadError("AI model registry refresh payload providerId must be a UUID");
+  }
+  if (
+    item.credentialId !== undefined &&
+    (typeof item.credentialId !== "string" || !UUID_RE.test(item.credentialId))
+  ) {
+    throw new InvalidJobPayloadError("AI model registry refresh payload credentialId must be a UUID");
+  }
+  if (
+    item.reason !== "SCHEDULED" &&
+    item.reason !== "MANUAL" &&
+    item.reason !== "RETRY"
+  ) {
+    throw new InvalidJobPayloadError("AI model registry refresh payload reason is invalid");
+  }
+  const result: AiModelRegistryRefreshPayload = {
+    version: AI_MODEL_REGISTRY_REFRESH_PAYLOAD_VERSION,
+    jobRequestId: item.jobRequestId,
+    reason: item.reason,
+  };
+  if (typeof item.providerId === "string") result.providerId = item.providerId;
+  if (typeof item.credentialId === "string") result.credentialId = item.credentialId;
+  return result;
+}
+
 export function socialSyncBullMqJobId(jobRequestId: string): string {
   return `${JOB_TYPES.socialConnectionSync.replaceAll(".", "-")}-${jobRequestId}`;
 }
@@ -301,6 +353,10 @@ export function providerAuthorizationCleanupBullMqJobId(jobRequestId: string): s
 
 export function providerDataDeletionBullMqJobId(jobRequestId: string): string {
   return `${JOB_TYPES.providerDataDeletion.replaceAll(".", "-")}-${jobRequestId}`;
+}
+
+export function aiModelRegistryRefreshBullMqJobId(jobRequestId: string): string {
+  return `${JOB_TYPES.aiModelRegistryRefresh.replaceAll(".", "-")}-${jobRequestId}`;
 }
 
 export function defaultSocialSyncJobOptions(): JobsOptions {

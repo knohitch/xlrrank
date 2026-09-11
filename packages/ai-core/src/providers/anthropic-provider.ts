@@ -17,6 +17,18 @@ interface AnthropicResponse {
   usage: { input_tokens: number; output_tokens: number };
 }
 
+interface AnthropicModelsResponse {
+  data: Array<{
+    id: string;
+    display_name?: string;
+    max_input_tokens?: number;
+    max_tokens?: number;
+    capabilities?: Record<string, { supported?: boolean }>;
+  }>;
+  has_more?: boolean;
+  last_id?: string;
+}
+
 export class AnthropicProvider extends BaseAiProvider {
   protected override manifest: AiProviderManifest = {
     id: "anthropic",
@@ -143,9 +155,49 @@ export class AnthropicProvider extends BaseAiProvider {
   }
 
   override async listModels(): Promise<AiModelDescriptor[]> {
-    return [
-      { providerId: "anthropic", modelId: "claude-sonnet-4-20250514", displayName: "Claude Sonnet 4" },
-      { providerId: "anthropic", modelId: "claude-opus-4-20250514", displayName: "Claude Opus 4" },
-    ];
+    const models: AiModelDescriptor[] = [];
+    let afterId: string | undefined;
+    for (let page = 0; page < 20; page += 1) {
+      const suffix = afterId ? `?after_id=${encodeURIComponent(afterId)}&limit=100` : "?limit=100";
+      const headers: Record<string, string> = {
+        "x-api-key": this.config.apiKey ?? "",
+        "anthropic-version": "2023-06-01",
+        ...this.config.headers,
+      };
+      const data = await this.fetchJson<AnthropicModelsResponse>(
+        `${this.getBaseUrl()}/v1/models${suffix}`,
+        { headers },
+      );
+      models.push(
+        ...data.data.map((model) => {
+          const descriptor: AiModelDescriptor = {
+            providerId: this.manifest.id,
+            modelId: model.id,
+            displayName: model.display_name ?? model.id,
+          };
+          if (model.max_input_tokens !== undefined) descriptor.contextLimit = model.max_input_tokens;
+          descriptor.capabilities = Object.entries(model.capabilities ?? {})
+            .filter(([, value]) => value.supported === true)
+            .map(([capability]) =>
+              capability === "structured_outputs" ? "structured_output" : capability,
+            )
+            .filter((capability): capability is NonNullable<AiModelDescriptor["capabilities"]>[number] =>
+              [
+                "text_generation",
+                "reasoning",
+                "structured_output",
+                "tool_calling",
+                "vision",
+                "embeddings",
+                "streaming",
+              ].includes(capability),
+            );
+          return descriptor;
+        }),
+      );
+      if (!data.has_more || !data.last_id) break;
+      afterId = data.last_id;
+    }
+    return models;
   }
 }
