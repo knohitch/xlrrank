@@ -46,6 +46,9 @@ export type {
   CreateAiProviderCredentialInput,
   ModelRegistryRefreshResult,
   RefreshModelRegistryInput,
+  RoutingCandidateQuery,
+  RoutingCapabilityValidation,
+  RoutingModelCandidate,
   RuntimeRefreshResult,
 } from "./registry/model-registry.js";
 export {
@@ -67,7 +70,17 @@ export type { TierDefinition } from "./router/reasoning-tiers.js";
 export { estimateComplexity } from "./router/complexity-estimator.js";
 export type { ComplexitySignal, ComplexityEstimate } from "./router/complexity-estimator.js";
 export { AiRouter } from "./router/ai-router.js";
-export type { RoutingRequest, RoutingDecision, RoutingMode } from "./router/ai-router.js";
+export type {
+  RoutingAttemptEvidence,
+  RoutingDecision,
+  RoutingExecutionEvidence,
+  RoutingExecutionKind,
+  RoutingExecutionResult,
+  RoutingMode,
+  RoutingOutcomeStatus,
+  RoutingRequest,
+  StructuredOutputRequirement,
+} from "./router/ai-router.js";
 
 export {
   languageGuard,

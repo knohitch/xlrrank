@@ -2,97 +2,121 @@ export type SupportedLanguage = "en" | "zh" | "ja" | "ko" | "es" | "fr" | "de" |
 
 export interface LanguagePolicy {
   defaultLanguage: SupportedLanguage;
+  targetLanguage: SupportedLanguage;
   allowedLanguages: SupportedLanguage[];
+  enforcementEnabled: boolean;
   strictMode: boolean;
   maxRepairAttempts: number;
+  maxRetryAttempts: number;
+  minimumTextCharacters: number;
+  minimumConfidence: number;
+  allowFallback: boolean;
 }
 
 export const DEFAULT_LANGUAGE_POLICY: LanguagePolicy = {
   defaultLanguage: "en",
+  targetLanguage: "en",
   allowedLanguages: ["en"],
+  enforcementEnabled: true,
   strictMode: true,
   maxRepairAttempts: 2,
+  maxRetryAttempts: 2,
+  minimumTextCharacters: 24,
+  minimumConfidence: 0.55,
+  allowFallback: true,
 };
 
 export interface LanguageDetectionResult {
   detected: SupportedLanguage;
   confidence: number;
   scripts: string[];
+  meaningfulCharacters: number;
 }
 
 export interface LanguageGuardResult {
   passed: boolean;
   originalLanguage: SupportedLanguage | null;
   outputLanguage: SupportedLanguage | null;
-  repaired: boolean;
+  repaired: false;
   repairAttempts: number;
   content: string;
+  targetLanguage: SupportedLanguage;
+  confidence: number;
+  reason?: string;
 }
 
-const CJK_RANGES = [
+const SCRIPT_RANGES = [
   { start: 0x4e00, end: 0x9fff, name: "CJK Unified" },
   { start: 0x3400, end: 0x4dbf, name: "CJK Extension A" },
   { start: 0x3040, end: 0x309f, name: "Hiragana" },
   { start: 0x30a0, end: 0x30ff, name: "Katakana" },
   { start: 0xac00, end: 0xd7af, name: "Hangul" },
-];
+  { start: 0x0600, end: 0x06ff, name: "Arabic" },
+  { start: 0x0400, end: 0x04ff, name: "Cyrillic" },
+  { start: 0x0041, end: 0x007a, name: "Latin" },
+  { start: 0x00c0, end: 0x024f, name: "Latin" },
+] as const;
 
-function detectScripts(text: string): string[] {
-  const scripts = new Set<string>();
+function stripProtectedContent(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`]*`/g, " ")
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[\w.-]+@[\w.-]+\.\w+/g, " ")
+    .replace(/@[A-Za-z0-9_]+/g, " ")
+    .replace(/\b[A-Z][A-Za-z0-9_.-]{1,}\b/g, " ")
+    .replace(/\b[A-Z_]{2,}\b/g, " ");
+}
+
+function scriptCounts(text: string): Map<string, number> {
+  const counts = new Map<string, number>();
   for (const char of text) {
     const code = char.codePointAt(0) ?? 0;
-    for (const range of CJK_RANGES) {
+    for (const range of SCRIPT_RANGES) {
       if (code >= range.start && code <= range.end) {
-        scripts.add(range.name);
+        counts.set(range.name, (counts.get(range.name) ?? 0) + 1);
         break;
       }
     }
-    if (code >= 0x0600 && code <= 0x06ff) scripts.add("Arabic");
-    if (code >= 0x0400 && code <= 0x04ff) scripts.add("Cyrillic");
-    if ((code >= 0x0041 && code <= 0x007a) || (code >= 0x00c0 && code <= 0x024f)) {
-      scripts.add("Latin");
-    }
   }
-  return [...scripts];
+  return counts;
 }
 
 export function detectLanguage(text: string): LanguageDetectionResult {
-  const scripts = detectScripts(text);
-  if (scripts.includes("Hiragana") || scripts.includes("Katakana")) {
-    return { detected: "ja", confidence: 0.9, scripts };
-  }
-  if (scripts.includes("Hangul")) {
-    return { detected: "ko", confidence: 0.9, scripts };
-  }
-  if (scripts.includes("CJK Unified")) {
-    if (scripts.includes("Hiragana") || scripts.includes("Katakana")) {
-      return { detected: "ja", confidence: 0.85, scripts };
-    }
-    return { detected: "zh", confidence: 0.7, scripts };
-  }
-  if (scripts.includes("Arabic")) {
-    return { detected: "ar", confidence: 0.8, scripts };
-  }
-  if (scripts.includes("Cyrillic")) {
-    return { detected: "ru", confidence: 0.8, scripts };
-  }
-  return { detected: "en", confidence: 0.6, scripts };
-}
+  const normalized = stripProtectedContent(text);
+  const counts = scriptCounts(normalized);
+  const meaningfulCharacters = [...counts.values()].reduce((sum, count) => sum + count, 0);
+  const scripts = [...counts.entries()].filter(([, count]) => count > 0).map(([script]) => script);
 
-function isProtectedToken(word: string): boolean {
-  return /^https?:\/\//.test(word) ||
-    /^[\w.-]+@[\w.-]+\.\w+$/.test(word) ||
-    /^@\w+$/.test(word) ||
-    /^\d+[\d.,]*$/.test(word) ||
-    /^[A-Z_]{2,}$/.test(word) ||
-    /^`[^`]+`$/.test(word);
+  if (meaningfulCharacters === 0) {
+    return { detected: "en", confidence: 0, scripts, meaningfulCharacters };
+  }
+
+  const ratio = (script: string): number => (counts.get(script) ?? 0) / meaningfulCharacters;
+  if (ratio("Hiragana") + ratio("Katakana") >= 0.15) {
+    return { detected: "ja", confidence: ratio("Hiragana") + ratio("Katakana") + ratio("CJK Unified") * 0.5, scripts, meaningfulCharacters };
+  }
+  if (ratio("Hangul") >= 0.25) {
+    return { detected: "ko", confidence: ratio("Hangul"), scripts, meaningfulCharacters };
+  }
+  if (ratio("CJK Unified") + ratio("CJK Extension A") >= 0.25) {
+    return { detected: "zh", confidence: ratio("CJK Unified") + ratio("CJK Extension A"), scripts, meaningfulCharacters };
+  }
+  if (ratio("Arabic") >= 0.25) {
+    return { detected: "ar", confidence: ratio("Arabic"), scripts, meaningfulCharacters };
+  }
+  if (ratio("Cyrillic") >= 0.25) {
+    return { detected: "ru", confidence: ratio("Cyrillic"), scripts, meaningfulCharacters };
+  }
+  return { detected: "en", confidence: Math.max(0.6, ratio("Latin")), scripts, meaningfulCharacters };
 }
 
 export function languageGuard(
   content: string,
   policy: LanguagePolicy,
 ): LanguageGuardResult {
-  if (!content.trim()) {
+  const targetLanguage = policy.targetLanguage ?? policy.defaultLanguage;
+  if (!policy.enforcementEnabled || !policy.strictMode || !content.trim()) {
     return {
       passed: true,
       originalLanguage: null,
@@ -100,13 +124,13 @@ export function languageGuard(
       repaired: false,
       repairAttempts: 0,
       content,
+      targetLanguage,
+      confidence: 0,
     };
   }
 
   const detection = detectLanguage(content);
-  const isAllowed = policy.allowedLanguages.includes(detection.detected);
-
-  if (isAllowed) {
+  if (detection.meaningfulCharacters < policy.minimumTextCharacters) {
     return {
       passed: true,
       originalLanguage: detection.detected,
@@ -114,71 +138,35 @@ export function languageGuard(
       repaired: false,
       repairAttempts: 0,
       content,
+      targetLanguage,
+      confidence: detection.confidence,
+      reason: "below_minimum_text_threshold",
     };
   }
 
-  if (!policy.strictMode) {
-    return {
-      passed: true,
-      originalLanguage: detection.detected,
-      outputLanguage: detection.detected,
-      repaired: false,
-      repairAttempts: 0,
-      content,
-    };
-  }
-
-  const repaired = repairLanguageContent(content, policy);
+  const allowed = new Set(policy.allowedLanguages.length > 0 ? policy.allowedLanguages : [targetLanguage]);
+  allowed.add(targetLanguage);
+  const passed = allowed.has(detection.detected) || detection.confidence < policy.minimumConfidence;
   return {
-    passed: repaired.success,
+    passed,
     originalLanguage: detection.detected,
-    outputLanguage: repaired.success ? policy.defaultLanguage : detection.detected,
-    repaired: repaired.success,
-    repairAttempts: repaired.attempts,
-    content: repaired.success ? repaired.content : content,
+    outputLanguage: detection.detected,
+    repaired: false,
+    repairAttempts: 0,
+    content,
+    targetLanguage,
+    confidence: detection.confidence,
+    ...(passed ? {} : { reason: "target_language_mismatch" }),
   };
 }
 
-function repairLanguageContent(
-  content: string,
-  policy: LanguagePolicy,
-): { success: boolean; content: string; attempts: number } {
-  const lines = content.split("\n");
-  const repairedLines: string[] = [];
-
-  for (const line of lines) {
-    const words = line.split(/(\s+)/);
-    const repairedWords: string[] = [];
-    let hasNonProtectedContent = false;
-
-    for (const word of words) {
-      if (isProtectedToken(word)) {
-        repairedWords.push(word);
-      } else {
-        const detection = detectLanguage(word);
-        if (detection.detected !== policy.defaultLanguage && detection.confidence > 0.5) {
-          hasNonProtectedContent = true;
-          repairedWords.push(`[${policy.defaultLanguage}]`);
-        } else {
-          repairedWords.push(word);
-        }
-      }
-    }
-
-    if (hasNonProtectedContent) {
-      repairedLines.push(repairedWords.join(""));
-    } else {
-      repairedLines.push(line);
-    }
-  }
-
-  const result = repairedLines.join("\n");
-  const finalDetection = detectLanguage(result);
-  const success = policy.allowedLanguages.includes(finalDetection.detected);
-
-  return { success, content: result, attempts: 1 };
-}
-
 export function configureLanguagePolicy(overrides: Partial<LanguagePolicy>): LanguagePolicy {
-  return { ...DEFAULT_LANGUAGE_POLICY, ...overrides };
+  const targetLanguage = overrides.targetLanguage ?? overrides.defaultLanguage ?? DEFAULT_LANGUAGE_POLICY.targetLanguage;
+  return {
+    ...DEFAULT_LANGUAGE_POLICY,
+    ...overrides,
+    targetLanguage,
+    defaultLanguage: overrides.defaultLanguage ?? targetLanguage,
+    allowedLanguages: overrides.allowedLanguages ?? [targetLanguage],
+  };
 }

@@ -118,6 +118,37 @@ export interface AvailableModelQuery {
   scopeId?: string;
 }
 
+export interface RoutingCandidateQuery {
+  providerId?: string;
+  credentialId?: string;
+  scopeId?: string;
+  capabilities: AiCapability[];
+  lifecycleStages?: ModelLifecycleStage[];
+}
+
+export interface RoutingCapabilityValidation {
+  capability: AiCapability;
+  quality: number | null;
+  latencyMs: number | null;
+  checkedAt: string;
+}
+
+export interface RoutingModelCandidate extends ModelRegistryEntry {
+  modelUuid: string;
+  runtimeKey: string;
+  credentialId: string | null;
+  availabilityStatus: string;
+  availabilityHealth: unknown;
+  providerStatus: string;
+  providerHealth: unknown;
+  credentialStatus: string | null;
+  credentialScopeKind: string | null;
+  credentialScopeId: string | null;
+  validations: RoutingCapabilityValidation[];
+  validationQuality: number | null;
+  validationLatencyMs: number | null;
+}
+
 interface RuntimeContext {
   provider: ProviderRow;
   credential?: CredentialRow;
@@ -164,6 +195,27 @@ function runtimeKey(credential?: CredentialRow): string {
 function dateIso(value: Date | string | null | undefined): string {
   if (!value) return new Date().toISOString();
   return value instanceof Date ? value.toISOString() : value;
+}
+
+function numberOrNull(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseRoutingValidations(value: unknown): RoutingCapabilityValidation[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    if (typeof record.capability !== "string") return [];
+    return [{
+      capability: record.capability as AiCapability,
+      quality: numberOrNull(record.quality as string | number | null | undefined),
+      latencyMs: numberOrNull(record.latencyMs as string | number | null | undefined),
+      checkedAt: dateIso(record.checkedAt as string | Date | null | undefined),
+    }];
+  });
 }
 
 export class ModelRegistryService {
@@ -289,6 +341,133 @@ export class ModelRegistryService {
       params,
     );
     return result.rows.map((row) => this.rowToEntry(row));
+  }
+
+  async listRoutingCandidates(query: RoutingCandidateQuery): Promise<RoutingModelCandidate[]> {
+    const params: unknown[] = [];
+    const clauses = ["ama.status = 'AVAILABLE'"];
+    const capabilities = [...new Set(query.capabilities)];
+    const lifecycleStages = query.lifecycleStages ?? ["VALIDATED", "ACTIVE"];
+
+    params.push(lifecycleStages);
+    clauses.push(`am.lifecycle_stage = ANY($${params.length}::text[])`);
+
+    if (query.providerId) {
+      params.push(query.providerId);
+      clauses.push(`am.provider_id = $${params.length}`);
+    }
+    if (query.credentialId) {
+      params.push(query.credentialId);
+      clauses.push(`ama.credential_id = $${params.length}`);
+      params.push(`credential:${query.credentialId}`);
+      clauses.push(`ama.runtime_key = $${params.length}`);
+    }
+    if (query.scopeId) {
+      params.push(query.scopeId);
+      clauses.push(`(
+        ama.runtime_key = 'system'
+        OR (
+          apc.id IS NOT NULL
+          AND (apc.scope_kind = 'SYSTEM' OR apc.scope_id = $${params.length})
+        )
+      )`);
+    }
+
+    let validationJoin = "";
+    let validationHaving = "";
+    if (capabilities.length > 0) {
+      params.push(capabilities);
+      const capabilityParam = params.length;
+      validationJoin = `
+        JOIN ai_model_capability_validations acv
+          ON acv.model_id = am.id
+         AND acv.runtime_key = ama.runtime_key
+         AND acv.status = 'VALIDATED'
+         AND acv.capability = ANY($${capabilityParam}::text[])
+      `;
+      params.push(capabilities.length);
+      validationHaving = `HAVING COUNT(DISTINCT acv.capability) = $${params.length}`;
+    } else {
+      validationJoin = `
+        LEFT JOIN ai_model_capability_validations acv
+          ON acv.model_id = am.id
+         AND acv.runtime_key = ama.runtime_key
+         AND acv.status = 'VALIDATED'
+      `;
+    }
+
+    const result = await this.db.query<
+      ModelRow & {
+        model_uuid: string;
+        runtime_key: string;
+        credential_id: string | null;
+        availability_status: string;
+        availability_health: unknown;
+        provider_status: string;
+        provider_health: unknown;
+        credential_status: string | null;
+        credential_scope_kind: string | null;
+        credential_scope_id: string | null;
+        validation_quality: string | number | null;
+        validation_latency_ms: string | number | null;
+        validations: unknown;
+      }
+    >(
+      `
+      SELECT
+        am.*,
+        am.id AS model_uuid,
+        ama.runtime_key,
+        ama.credential_id,
+        ama.status AS availability_status,
+        ama.health AS availability_health,
+        ap.status AS provider_status,
+        ap.health AS provider_health,
+        apc.status AS credential_status,
+        apc.scope_kind AS credential_scope_kind,
+        apc.scope_id AS credential_scope_id,
+        AVG(acv.quality) AS validation_quality,
+        AVG(acv.latency_ms) AS validation_latency_ms,
+        COALESCE(
+          jsonb_agg(
+            DISTINCT jsonb_build_object(
+              'capability', acv.capability,
+              'quality', acv.quality,
+              'latencyMs', acv.latency_ms,
+              'checkedAt', acv.checked_at
+            )
+          ) FILTER (WHERE acv.capability IS NOT NULL),
+          '[]'::jsonb
+        ) AS validations
+      FROM ai_models am
+      JOIN ai_model_availability ama ON ama.model_id = am.id
+      JOIN ai_providers ap ON ap.id = am.provider_id
+      LEFT JOIN ai_provider_credentials apc ON apc.id = ama.credential_id
+      ${validationJoin}
+      WHERE ${clauses.join(" AND ")}
+      GROUP BY am.id, ama.id, ap.id, apc.id
+      ${validationHaving}
+      ORDER BY am.provider_id, am.model_id, ama.runtime_key
+      `,
+      params,
+    );
+
+    return result.rows.map((row) => ({
+      ...this.rowToEntry(row),
+      modelUuid: row.model_uuid,
+      runtimeKey: row.runtime_key,
+      credentialId: row.credential_id,
+      availabilityStatus: row.availability_status,
+      availabilityHealth: row.availability_health,
+      providerStatus: row.provider_status,
+      providerHealth: row.provider_health,
+      credentialStatus: row.credential_status,
+      credentialScopeKind: row.credential_scope_kind,
+      credentialScopeId: row.credential_scope_id,
+      validations: parseRoutingValidations(row.validations),
+      validationQuality: numberOrNull(row.validation_quality),
+      validationLatencyMs: numberOrNull(row.validation_latency_ms),
+    }));
   }
 
   async get(providerId: string, modelId: string): Promise<ModelRegistryEntry | undefined> {
