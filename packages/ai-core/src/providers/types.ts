@@ -31,6 +31,7 @@ export interface ToolDefinition {
 export interface TextGenerationRequest {
   model: string;
   messages: AiMessage[];
+  signal?: AbortSignal;
   maxTokens?: number;
   temperature?: number;
   topP?: number;
@@ -50,6 +51,7 @@ export interface StructuredRequest {
   model: string;
   messages: AiMessage[];
   schema: Record<string, unknown>;
+  signal?: AbortSignal;
   schemaName?: string;
   maxTokens?: number;
   temperature?: number;
@@ -65,6 +67,7 @@ export interface StructuredResponse {
 export interface EmbeddingRequest {
   model: string;
   input: string | string[];
+  signal?: AbortSignal;
   dimensions?: number;
 }
 

@@ -74,10 +74,12 @@ test("env schema validates bounded AI model discovery and probe limits", async (
   const defaults = envSchema.parse({});
   assert.equal(defaults.AI_MODEL_DISCOVERY_MAX_PROVIDERS_PER_RUN, 10);
   assert.equal(defaults.AI_MODEL_DISCOVERY_MAX_MODELS_PER_PROVIDER, 50);
+  assert.equal(defaults.AI_MODEL_DISCOVERY_MISSED_THRESHOLD, 2);
   assert.equal(defaults.AI_MODEL_PROBE_MAX_MODELS_PER_RUN, 10);
 
   assert.equal(envSchema.safeParse({ AI_MODEL_DISCOVERY_MAX_PROVIDERS_PER_RUN: "51" }).success, false);
   assert.equal(envSchema.safeParse({ AI_MODEL_DISCOVERY_MAX_MODELS_PER_PROVIDER: "201" }).success, false);
+  assert.equal(envSchema.safeParse({ AI_MODEL_DISCOVERY_MISSED_THRESHOLD: "11" }).success, false);
   assert.equal(envSchema.safeParse({ AI_MODEL_PROBE_MAX_MODELS_PER_RUN: "51" }).success, false);
   assert.equal(envSchema.safeParse({ AI_MODEL_PROBE_TIMEOUT_MS: "60001" }).success, false);
 });

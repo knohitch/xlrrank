@@ -13,8 +13,8 @@ Tracking completion of each prompt from the Build Prompt Pack.
 | 4      | Core Domain Database                      | HARDENED       | VERIFIED (ownership/isolation PostgreSQL integration)              | PARTIAL          |
 | 5      | Social Platform Connector Framework       | HARDENED       | VERIFIED CONTRACT (Reference, X, Meta, LinkedIn)                   | PARTIAL          |
 | 6      | Platform Connection UI and Data Ingestion | HARDENED       | VERIFIED (Reference, X, Meta, LinkedIn worker ingestion)           | PARTIAL          |
-| 7      | AI Provider Framework                     | HARDENED       | VERIFIED LOCALLY (fixture provider runtime + health)               | NO               |
-| 8      | Dynamic Model Registry                    | HARDENED       | VERIFIED LOCALLY (persistent dynamic registry fixtures)             | NO               |
+| 7      | AI Provider Framework                     | HARDENED       | VERIFIED LOCALLY (fixture runtime, credentials, health, SSRF)       | NO               |
+| 8      | Dynamic Model Registry                    | HARDENED       | VERIFIED LOCALLY (persistent dynamic registry + durable refresh)    | NO               |
 | 9      | Reasoning Tier Engine and AI Router       | DONE           | SCAFFOLD ONLY                                                      | NO               |
 | 10     | Language Guard                            | DONE           | SCAFFOLD ONLY                                                      | NO               |
 | 11     | AI Evaluation and Prompt Registry         | DONE           | SCAFFOLD ONLY                                                      | NO               |
@@ -192,10 +192,10 @@ Tracking completion of each prompt from the Build Prompt Pack.
 - **Persistent Registry**: Discovered models persist in PostgreSQL `ai_models`; scoped runtime availability and per-capability validation persist in relational tables.
 - **Credential Isolation**: BYOK/system credentials are separated from canonical provider metadata, encrypted with AAD context binding, and resolved server-side only.
 - **Endpoint Safety**: Custom base URLs fail closed for private/local network SSRF unless trusted configuration explicitly allows them.
-- **Capability Validation**: Probing is bounded and capability-specific. Text-only and embedding-only models no longer fail because unrelated capabilities are unsupported.
-- **Lifecycle and Health**: Discovery failures record safe provider/credential health evidence without erasing prior registry state; discovered models do not become `ACTIVE` without explicit promotion.
-- **Durable Refresh**: AI model refresh uses durable `jobs` + `job_outbox` with ID-only payloads and a model-management worker processor.
-- **Verification**: AI-core fixture suite 2/2 pass; config suite 10/10 pass.
+- **Capability Validation**: Probing is bounded, abortable, and capability-specific. Text-only and embedding-only models no longer fail because unrelated capabilities are unsupported.
+- **Lifecycle and Health**: Discovery failures record safe provider/credential health evidence without erasing prior registry state; discovered models do not become `ACTIVE` without explicit promotion; runtime availability uses a missed-discovery grace threshold.
+- **Durable Refresh**: AI model refresh uses durable `jobs` + `job_outbox` with ID-only payloads, truthful worker ledger transitions, and bounded scheduled refresh orchestration.
+- **Verification**: AI-core fixture suite 4/4 pass; config suite 10/10 pass; worker model-management suite 8/30 pass with 22 Redis/Docker-gated skips; broad local lint/typecheck/build/test/audit/diff-check matrix passed.
 - **Live provider state**: `AI LIVE PROVIDER GATE: BLOCKED_EXTERNAL` because no real AI provider credentials were supplied.
 - **Production Ready**: NO.
 

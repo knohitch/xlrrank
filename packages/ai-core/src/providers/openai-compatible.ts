@@ -11,6 +11,7 @@ import type {
   AiMessage,
   UsageInfo,
 } from "./types.js";
+import { assertSafeProviderRequestUrl, type DnsLookup } from "../registry/endpoint-policy.js";
 import { BaseAiProvider } from "./base.js";
 import { ModelNotFoundError, SchemaValidationError } from "./errors.js";
 
@@ -92,7 +93,11 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
 
     const data = await this.fetchJson<OpenAIChatResponse>(
       `${this.getBaseUrl()}/chat/completions`,
-      { method: "POST", body: JSON.stringify(body) },
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      },
     );
 
     const choice = data.choices[0];
@@ -135,7 +140,11 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
 
     const data = await this.fetchJson<OpenAIChatResponse>(
       `${this.getBaseUrl()}/chat/completions`,
-      { method: "POST", body: JSON.stringify(body) },
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      },
     );
 
     const choice = data.choices[0];
@@ -170,7 +179,11 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
 
     const data = await this.fetchJson<OpenAIEmbeddingResponse>(
       `${this.getBaseUrl()}/embeddings`,
-      { method: "POST", body: JSON.stringify(body) },
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      },
     );
 
     return {
@@ -201,10 +214,17 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
       headers["Authorization"] = `Bearer ${this.config.apiKey}`;
     }
 
-    const response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
+    const url = `${this.getBaseUrl()}/chat/completions`;
+    await assertSafeProviderRequestUrl(url, {
+      allowPrivateNetwork: this.config.metadata?.allowPrivateNetwork === true,
+      lookup: this.config.metadata?.dnsLookup as DnsLookup | undefined,
+    });
+    const response = await fetch(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      redirect: "error",
+      ...(request.signal ? { signal: request.signal } : {}),
     });
 
     if (!response.ok) {

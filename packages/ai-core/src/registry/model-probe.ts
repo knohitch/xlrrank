@@ -13,50 +13,51 @@ export class ModelProber {
     const timeoutMs = options.timeoutMs ?? 10_000;
 
     if (requested.has("text_generation") || requested.has("reasoning") || requested.has("tool_calling")) {
-      results.push(await this.withTimeout(this.probeTextGeneration(provider, modelId), timeoutMs, "text_generation"));
+      results.push(await this.withAbort(this.probeTextGeneration.bind(this), provider, modelId, timeoutMs, "text_generation"));
     }
     if (requested.has("structured_output")) {
-      results.push(await this.withTimeout(this.probeStructuredOutput(provider, modelId), timeoutMs, "structured_output"));
+      results.push(await this.withAbort(this.probeStructuredOutput.bind(this), provider, modelId, timeoutMs, "structured_output"));
     }
     if (requested.has("streaming")) {
-      results.push(await this.withTimeout(this.probeStreaming(provider, modelId), timeoutMs, "streaming"));
+      results.push(await this.withAbort(this.probeStreaming.bind(this), provider, modelId, timeoutMs, "streaming"));
     }
     if (requested.has("embeddings")) {
-      results.push(await this.withTimeout(this.probeEmbeddings(provider, modelId), timeoutMs, "embeddings"));
+      results.push(await this.withAbort(this.probeEmbeddings.bind(this), provider, modelId, timeoutMs, "embeddings"));
     }
 
     return results;
   }
 
-  private async withTimeout(
-    probe: Promise<ModelProbeResult>,
+  private async withAbort(
+    probe: (provider: BaseAiProvider, modelId: string, signal: AbortSignal) => Promise<ModelProbeResult>,
+    provider: BaseAiProvider,
+    modelId: string,
     timeoutMs: number,
     capability: string,
   ): Promise<ModelProbeResult> {
-    let timer: NodeJS.Timeout | undefined;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const start = Date.now();
     try {
-      return await Promise.race([
-        probe,
-        new Promise<ModelProbeResult>((resolve) => {
-          timer = setTimeout(() => {
-            resolve({
-              capability,
-              quality: 0,
-              latencyMs: timeoutMs,
-              success: false,
-              error: "Probe timed out",
-            });
-          }, timeoutMs);
-        }),
-      ]);
+      return await probe(provider, modelId, controller.signal);
+    } catch (err) {
+      const timedOut = controller.signal.aborted;
+      return {
+        capability,
+        quality: 0,
+        latencyMs: Date.now() - start,
+        success: false,
+        error: timedOut ? "Probe timed out" : (err as Error).message,
+      };
     } finally {
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
     }
   }
 
   private async probeTextGeneration(
     provider: BaseAiProvider,
     modelId: string,
+    signal: AbortSignal,
   ): Promise<ModelProbeResult> {
     const start = Date.now();
     try {
@@ -65,6 +66,7 @@ export class ModelProber {
         messages: [{ role: "user", content: "Reply with exactly: OK" }],
         maxTokens: 10,
         temperature: 0,
+        signal,
       });
       return {
         capability: "text_generation",
@@ -86,6 +88,7 @@ export class ModelProber {
   private async probeStructuredOutput(
     provider: BaseAiProvider,
     modelId: string,
+    signal: AbortSignal,
   ): Promise<ModelProbeResult> {
     const start = Date.now();
     try {
@@ -97,6 +100,7 @@ export class ModelProber {
           properties: { status: { type: "string" } },
           required: ["status"],
         },
+        signal,
       });
       const data = response.data as Record<string, unknown>;
       return {
@@ -119,6 +123,7 @@ export class ModelProber {
   private async probeStreaming(
     provider: BaseAiProvider,
     modelId: string,
+    signal: AbortSignal,
   ): Promise<ModelProbeResult> {
     const start = Date.now();
     try {
@@ -127,6 +132,7 @@ export class ModelProber {
         model: modelId,
         messages: [{ role: "user", content: "Say hello" }],
         maxTokens: 10,
+        signal,
       })) {
         if (chunk.delta.length > 0) received = true;
         if (chunk.finished) break;
@@ -151,12 +157,14 @@ export class ModelProber {
   private async probeEmbeddings(
     provider: BaseAiProvider,
     modelId: string,
+    signal: AbortSignal,
   ): Promise<ModelProbeResult> {
     const start = Date.now();
     try {
       const response = await provider.generateEmbeddings({
         model: modelId,
         input: "ping",
+        signal,
       });
       return {
         capability: "embeddings",

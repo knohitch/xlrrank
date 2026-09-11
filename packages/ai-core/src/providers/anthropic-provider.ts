@@ -6,6 +6,7 @@ import type {
   AiMessage,
   UsageInfo,
 } from "./types.js";
+import { assertSafeProviderRequestUrl, type DnsLookup } from "../registry/endpoint-policy.js";
 import { BaseAiProvider } from "./base.js";
 import { ModelNotFoundError } from "./errors.js";
 
@@ -77,7 +78,12 @@ export class AnthropicProvider extends BaseAiProvider {
 
     const data = await this.fetchJson<AnthropicResponse>(
       `${this.getBaseUrl()}/v1/messages`,
-      { method: "POST", body: JSON.stringify(body), headers },
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+        headers,
+        ...(request.signal ? { signal: request.signal } : {}),
+      },
     );
 
     const textContent = data.content.find((c) => c.type === "text");
@@ -112,10 +118,17 @@ export class AnthropicProvider extends BaseAiProvider {
       ...this.config.headers,
     };
 
-    const response = await fetch(`${this.getBaseUrl()}/v1/messages`, {
+    const url = `${this.getBaseUrl()}/v1/messages`;
+    await assertSafeProviderRequestUrl(url, {
+      allowPrivateNetwork: this.config.metadata?.allowPrivateNetwork === true,
+      lookup: this.config.metadata?.dnsLookup as DnsLookup | undefined,
+    });
+    const response = await fetch(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      redirect: "error",
+      ...(request.signal ? { signal: request.signal } : {}),
     });
 
     if (!response.ok) await this.handleErrorResponse(response);

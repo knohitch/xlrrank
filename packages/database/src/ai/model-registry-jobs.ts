@@ -10,6 +10,12 @@ import { getPool } from "../client.js";
 
 interface Queryable {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
+  connect?(): Promise<TransactionClient>;
+}
+
+interface TransactionClient {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount?: number | null }>;
+  release(): void;
 }
 
 export interface CreateAiModelRegistryRefreshInput {
@@ -66,9 +72,10 @@ export async function createAiModelRegistryRefreshRequest(
   });
   assertNoCredentialsInPayload(body);
 
-  await db.query("BEGIN");
+  const client = await transactionClient(db);
+  await client.query("BEGIN");
   try {
-    await db.query(
+    await client.query(
       `
       INSERT INTO jobs (
         id, type, status, payload, queue_name, payload_version, reason,
@@ -87,15 +94,23 @@ export async function createAiModelRegistryRefreshRequest(
         getEnv().SOCIAL_SYNC_MAX_ATTEMPTS,
       ],
     );
-    await db.query(
+    await client.query(
       "INSERT INTO job_outbox (job_id, queue_name, job_type, payload) VALUES ($1, $2, $3, $4::jsonb)",
       [jobId, QUEUE_NAMES.modelManagement, JOB_TYPES.aiModelRegistryRefresh, JSON.stringify(body)],
     );
-    await db.query("COMMIT");
+    await client.query("COMMIT");
   } catch (err) {
-    await db.query("ROLLBACK").catch(() => {});
+    await client.query("ROLLBACK").catch(() => {});
     throw err;
+  } finally {
+    client.release();
   }
   return { jobId, duplicate: false };
 }
 
+async function transactionClient(db: Queryable): Promise<TransactionClient> {
+  if (!db.connect) {
+    throw new Error("AI model registry refresh request creation requires a transaction-capable database client");
+  }
+  return db.connect();
+}

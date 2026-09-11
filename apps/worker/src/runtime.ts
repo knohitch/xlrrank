@@ -6,7 +6,9 @@ import {
   claimDueSocialSyncSchedules,
   claimPendingOutboxEntries,
   closeDatabase,
+  createAiModelRegistryRefreshRequest,
   createSocialConnectionSyncRequest,
+  getPool,
   markOutboxDispatched,
   markOutboxFailed,
   markScheduleDispatched,
@@ -65,6 +67,7 @@ export interface WorkerRuntime {
   scheduleDueSyncsOnce(): Promise<number>;
   runRetentionSweepOnce(): Promise<unknown>;
   runReconciliationSweepOnce(): Promise<unknown>;
+  runAiModelRegistrySweepOnce(): Promise<number>;
 }
 
 export async function checkWorkerReadiness(): Promise<boolean> {
@@ -148,6 +151,63 @@ export async function scheduleDueSyncsOnce(schedulerId: string): Promise<number>
     });
     metrics.increment("worker.scheduler.dispatched");
     scheduled += 1;
+  }
+  return scheduled;
+}
+
+export async function scheduleDueAiModelRegistryRefreshesOnce(schedulerId: string): Promise<number> {
+  const env = getEnv();
+  const pool = getPool();
+  const client = await pool.connect();
+  const providerIds: string[] = [];
+  await client.query("BEGIN");
+  try {
+    const due = await client.query<{ id: string }>(
+      `
+      WITH due AS (
+        SELECT id
+        FROM ai_providers
+        WHERE enabled = true
+          AND (
+            last_discovery_attempt_at IS NULL
+            OR last_discovery_attempt_at <= now() - ($2::text || ' milliseconds')::interval
+          )
+        ORDER BY last_discovery_attempt_at NULLS FIRST, slug, id
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE ai_providers p
+      SET last_discovery_attempt_at = now(),
+          updated_at = now()
+      FROM due
+      WHERE p.id = due.id
+      RETURNING p.id
+      `,
+      [env.AI_MODEL_DISCOVERY_MAX_PROVIDERS_PER_RUN, env.AI_MODEL_DISCOVERY_SWEEP_INTERVAL_MS],
+    );
+    providerIds.push(...due.rows.map((row) => row.id));
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  let scheduled = 0;
+  for (const providerId of providerIds) {
+    const request = await createAiModelRegistryRefreshRequest({
+      providerId,
+      reason: "SCHEDULED",
+      idempotencyKey: `ai-model-registry:${providerId}:all:SCHEDULED`,
+    });
+    if (!request.duplicate) {
+      metrics.increment("worker.ai_model_registry.scheduled");
+      scheduled += 1;
+    }
+  }
+  if (providerIds.length > 0) {
+    logger.info({ schedulerId, providersClaimed: providerIds.length, scheduled }, "AI model registry refresh sweep scheduled");
   }
   return scheduled;
 }
@@ -257,6 +317,17 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     runReconciliationMaintenance,
     env.PROVIDER_RECONCILIATION_SWEEP_INTERVAL_MS,
   );
+  const runAiModelRegistryMaintenance = () => {
+    if (!stopping) {
+      scheduleDueAiModelRegistryRefreshesOnce(workerId).catch((err) =>
+        logger.error({ err }, "AI model registry refresh sweep failed"),
+      );
+    }
+  };
+  const aiModelRegistryTimer = setInterval(
+    runAiModelRegistryMaintenance,
+    env.AI_MODEL_DISCOVERY_SWEEP_INTERVAL_MS,
+  );
   const heartbeatTimer = setInterval(
     () => {
       if (!stopping) {
@@ -285,6 +356,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
   });
   runRetentionMaintenance();
   runReconciliationMaintenance();
+  runAiModelRegistryMaintenance();
   logger.info(
     {
       workerId,
@@ -292,6 +364,7 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
       queuePrefix: env.QUEUE_PREFIX,
       retentionSweepIntervalMs,
       reconciliationSweepIntervalMs: env.PROVIDER_RECONCILIATION_SWEEP_INTERVAL_MS,
+      aiModelDiscoverySweepIntervalMs: env.AI_MODEL_DISCOVERY_SWEEP_INTERVAL_MS,
     },
     "Worker runtime ready",
   );
@@ -303,12 +376,14 @@ export async function startWorkerRuntime(): Promise<WorkerRuntime> {
     scheduleDueSyncsOnce: () => scheduleDueSyncsOnce(workerId),
     runRetentionSweepOnce: () => runProviderRetentionSweepOnce(workerId),
     runReconciliationSweepOnce: () => runProviderReconciliationSweepOnce(workerId),
+    runAiModelRegistrySweepOnce: () => scheduleDueAiModelRegistryRefreshesOnce(workerId),
     async stop() {
       stopping = true;
       clearInterval(dispatcherTimer);
       clearInterval(schedulerTimer);
       clearInterval(retentionTimer);
       clearInterval(reconciliationTimer);
+      clearInterval(aiModelRegistryTimer);
       clearInterval(heartbeatTimer);
       await touchWorkerHeartbeat({
         workerId,

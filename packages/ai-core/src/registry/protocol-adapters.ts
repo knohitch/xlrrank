@@ -1,4 +1,5 @@
 import type { AiCapability } from "../capabilities.js";
+import { assertSafeProviderRequestUrl, type DnsLookup } from "./endpoint-policy.js";
 import { AiProviderError, AuthenticationError, ProviderUnavailableError, RateLimitError } from "../providers/errors.js";
 
 export type ProviderHealthStatus =
@@ -23,6 +24,8 @@ export interface ProviderRuntime {
   headers?: Record<string, string>;
   credential: RuntimeCredential;
   timeoutMs: number;
+  allowPrivateNetwork?: boolean;
+  dnsLookup?: DnsLookup;
 }
 
 export interface DiscoveredModel {
@@ -78,6 +81,29 @@ function normalizeCapabilities(value: unknown): AiCapability[] {
   return value.filter((item): item is AiCapability => typeof item === "string" && allowed.has(item as AiCapability));
 }
 
+function mapAnthropicCapability(key: string): AiCapability | null {
+  switch (key) {
+    case "text_generation":
+    case "text":
+    case "messages":
+      return "text_generation";
+    case "structured_outputs":
+    case "json_schema":
+      return "structured_output";
+    case "tool_use":
+      return "tool_calling";
+    case "thinking":
+    case "extended_thinking":
+    case "reasoning":
+      return "reasoning";
+    case "image_input":
+    case "vision":
+      return "vision";
+    default:
+      return null;
+  }
+}
+
 function safeProviderError(error: unknown, providerId: string): DiscoveryFailure {
   if (error instanceof AuthenticationError) {
     return {
@@ -127,7 +153,12 @@ async function fetchJson<T>(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), runtime.timeoutMs);
   try {
-    const response = await fetch(`${runtime.baseUrl}${path}`, {
+    const url = `${runtime.baseUrl}${path}`;
+    await assertSafeProviderRequestUrl(url, {
+      allowPrivateNetwork: runtime.allowPrivateNetwork === true,
+      lookup: runtime.dnsLookup,
+    });
+    const response = await fetch(url, {
       method: "GET",
       headers: {
         Accept: "application/json",
@@ -218,12 +249,13 @@ export class AnthropicAdapter implements ProtocolAdapter {
           const caps = model.capabilities && typeof model.capabilities === "object"
             ? Object.entries(model.capabilities as JsonObject)
                 .filter(([, value]) => Boolean((value as JsonObject | undefined)?.supported))
-                .map(([key]) => key)
+                .map(([key]) => mapAnthropicCapability(key))
+                .filter((capability): capability is AiCapability => Boolean(capability))
             : [];
           const item: DiscoveredModel = {
             providerModelId: model.id,
             displayName: typeof model.display_name === "string" ? model.display_name : model.id,
-            advertisedCapabilities: normalizeCapabilities(caps),
+            advertisedCapabilities: caps,
             providerMetadata: {
               type: model.type,
               createdAt: model.created_at,

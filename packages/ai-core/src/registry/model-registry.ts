@@ -11,7 +11,7 @@ import { AnthropicProvider } from "../providers/anthropic-provider.js";
 import { BaseAiProvider } from "../providers/base.js";
 import { OpenAICompatibleProvider } from "../providers/openai-compatible.js";
 import type { ModelLifecycleStage, ModelProbeResult, ModelRegistryEntry } from "./types.js";
-import { validateProviderBaseUrl } from "./endpoint-policy.js";
+import { validateProviderBaseUrl, type DnsLookup } from "./endpoint-policy.js";
 import { ModelProber } from "./model-probe.js";
 import {
   type DiscoveredModel,
@@ -28,6 +28,12 @@ interface QueryResult<T> {
 
 interface DbExecutor {
   query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<QueryResult<T>>;
+  connect?(): Promise<TransactionClient>;
+}
+
+interface TransactionClient {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<QueryResult<T>>;
+  release(): void;
 }
 
 interface ProviderRow {
@@ -118,6 +124,8 @@ interface RuntimeContext {
   runtimeKey: string;
   apiKey?: string;
   baseUrl: string;
+  allowPrivateNetwork: boolean;
+  dnsLookup?: DnsLookup;
 }
 
 function configBoolean(config: Record<string, unknown> | null, key: string): boolean {
@@ -126,6 +134,27 @@ function configBoolean(config: Record<string, unknown> | null, key: string): boo
 
 function providerCapabilities(model: DiscoveredModel): AiCapability[] {
   return [...new Set(model.advertisedCapabilities)];
+}
+
+function configCapabilities(config: Record<string, unknown> | null): AiCapability[] {
+  const raw = config?.probeCapabilities;
+  if (!Array.isArray(raw)) return [];
+  const allowed = new Set<AiCapability>([
+    "text_generation",
+    "reasoning",
+    "structured_output",
+    "tool_calling",
+    "vision",
+    "embeddings",
+    "streaming",
+  ]);
+  return raw.filter((item): item is AiCapability => typeof item === "string" && allowed.has(item as AiCapability));
+}
+
+function defaultProbeCapabilities(protocol: string): AiCapability[] {
+  if (protocol === "anthropic") return ["text_generation", "structured_output", "reasoning", "vision"];
+  if (protocol === "ollama") return ["text_generation", "embeddings"];
+  return ["text_generation", "structured_output", "embeddings"];
 }
 
 function runtimeKey(credential?: CredentialRow): string {
@@ -347,8 +376,9 @@ export class ModelRegistryService {
   }
 
   private resolveRuntime(provider: ProviderRow, credential?: CredentialRow): RuntimeContext {
+    const allowPrivateNetwork = configBoolean(provider.config, "allowPrivateNetwork");
     const baseUrl = validateProviderBaseUrl(provider.base_url, {
-      allowPrivateNetwork: configBoolean(provider.config, "allowPrivateNetwork"),
+      allowPrivateNetwork,
     });
     let apiKey: string | undefined;
     if (credential) {
@@ -371,6 +401,7 @@ export class ModelRegistryService {
       runtimeKey: runtimeKey(credential),
       ...(apiKey ? { apiKey } : {}),
       baseUrl,
+      allowPrivateNetwork,
     };
   }
 
@@ -405,6 +436,8 @@ export class ModelRegistryService {
         ...(ctx.apiKey ? { apiKey: ctx.apiKey } : {}),
       },
       timeoutMs: getEnv().AI_MODEL_DISCOVERY_SWEEP_TIMEOUT_MS,
+      allowPrivateNetwork: ctx.allowPrivateNetwork,
+      ...(ctx.dnsLookup ? { dnsLookup: ctx.dnsLookup } : {}),
     });
     if (!discovery.ok) {
       await this.recordDiscoveryFailure(ctx, discovery);
@@ -414,14 +447,14 @@ export class ModelRegistryService {
     const persisted = await this.persistDiscovery(ctx, discovery.models.slice(0, options.maxModelsPerProvider));
     const provider = this.createProbeProvider(ctx);
     const probeCandidates = persisted
-      .filter((candidate) => candidate.capabilities.length > 0 && candidate.needsProbe)
+      .filter((candidate) => candidate.probeCapabilities.length > 0 && candidate.needsProbe)
       .slice(0, options.maxProbeModels);
     let probedModels = 0;
     for (const candidate of probeCandidates) {
       const results = await this.prober.probe(
         provider,
         candidate.providerModelId,
-        candidate.capabilities,
+        candidate.probeCapabilities,
         { timeoutMs: options.probeTimeoutMs },
       );
       await this.persistProbeResults(ctx, candidate.modelUuid, results);
@@ -513,12 +546,13 @@ export class ModelRegistryService {
   private async persistDiscovery(
     ctx: RuntimeContext,
     models: DiscoveredModel[],
-  ): Promise<Array<{ modelUuid: string; providerModelId: string; capabilities: AiCapability[]; needsProbe: boolean }>> {
-    await this.db.query("BEGIN");
+  ): Promise<Array<{ modelUuid: string; providerModelId: string; probeCapabilities: AiCapability[]; needsProbe: boolean }>> {
+    const client = await this.transactionClient();
+    await client.query("BEGIN");
     try {
-      const persisted: Array<{ modelUuid: string; providerModelId: string; capabilities: AiCapability[]; needsProbe: boolean }> = [];
+      const persisted: Array<{ modelUuid: string; providerModelId: string; probeCapabilities: AiCapability[]; needsProbe: boolean }> = [];
       for (const model of models) {
-        const existing = await this.db.query<Pick<ModelRow, "id" | "version" | "fingerprint" | "lifecycle_stage">>(
+        const existing = await client.query<Pick<ModelRow, "id" | "version" | "fingerprint" | "lifecycle_stage">>(
           "SELECT id, version, fingerprint, lifecycle_stage FROM ai_models WHERE provider_id = $1 AND model_id = $2",
           [ctx.provider.id, model.providerModelId],
         );
@@ -534,7 +568,8 @@ export class ModelRegistryService {
             : prior.lifecycle_stage
           : "DISCOVERED";
         const capabilities = providerCapabilities(model);
-        const upsert = await this.db.query<{ id: string }>(
+        const probeCapabilities = this.planProbeCapabilities(ctx, model);
+        const upsert = await client.query<{ id: string }>(
           `
           INSERT INTO ai_models (
             provider_id, model_id, display_name, version, fingerprint, lifecycle_stage,
@@ -574,7 +609,7 @@ export class ModelRegistryService {
         );
         const modelUuid = upsert.rows[0]?.id;
         if (!modelUuid) throw new Error("AI model upsert failed");
-        await this.db.query(
+        await client.query(
           `
           INSERT INTO ai_model_availability (
             provider_id, model_id, credential_id, runtime_key, status,
@@ -597,13 +632,13 @@ export class ModelRegistryService {
             ctx.runtimeKey,
             JSON.stringify({ advertised: capabilities }),
             JSON.stringify({ healthy: true, lastChecked: new Date().toISOString() }),
-            JSON.stringify({ discovery: { source: ctx.provider.protocol } }),
+            JSON.stringify({ discovery: { source: ctx.provider.protocol, missedCount: 0 } }),
           ],
         );
         persisted.push({
           modelUuid,
           providerModelId: model.providerModelId,
-          capabilities,
+          probeCapabilities,
           needsProbe:
             !prior ||
             materialChange ||
@@ -611,11 +646,14 @@ export class ModelRegistryService {
             prior.lifecycle_stage === "PROBING",
         });
       }
-      await this.db.query("COMMIT");
+      await this.markMissingModelsTx(client, ctx, persisted.map((item) => item.modelUuid));
+      await client.query("COMMIT");
       return persisted;
     } catch (err) {
-      await this.db.query("ROLLBACK").catch(() => {});
+      await client.query("ROLLBACK").catch(() => {});
       throw err;
+    } finally {
+      client.release();
     }
   }
 
@@ -624,10 +662,11 @@ export class ModelRegistryService {
     modelUuid: string,
     results: ModelProbeResult[],
   ): Promise<void> {
-    await this.db.query("BEGIN");
+    const client = await this.transactionClient();
+    await client.query("BEGIN");
     try {
       for (const result of results) {
-        await this.db.query(
+        await client.query(
           `
           INSERT INTO ai_model_capability_validations (
             model_id, credential_id, runtime_key, capability, status, quality, latency_ms, safe_error, checked_at, updated_at
@@ -653,8 +692,8 @@ export class ModelRegistryService {
           ],
         );
       }
-      const allSucceeded = results.length > 0 && results.every((result) => result.success);
-      await this.db.query(
+      const anySucceeded = results.some((result) => result.success);
+      await client.query(
         `
         UPDATE ai_models
         SET lifecycle_stage = $2,
@@ -665,18 +704,20 @@ export class ModelRegistryService {
         `,
         [
           modelUuid,
-          allSucceeded ? "VALIDATED" : "QUARANTINED",
-          JSON.stringify({ healthy: allSucceeded, lastChecked: new Date().toISOString() }),
+          anySucceeded ? "VALIDATED" : "QUARANTINED",
+          JSON.stringify({ healthy: anySucceeded, lastChecked: new Date().toISOString() }),
         ],
       );
-      await this.db.query(
+      await client.query(
         "UPDATE ai_model_availability SET last_probed_at = now(), updated_at = now() WHERE model_id = $1 AND runtime_key = $2",
         [modelUuid, ctx.runtimeKey],
       );
-      await this.db.query("COMMIT");
+      await client.query("COMMIT");
     } catch (err) {
-      await this.db.query("ROLLBACK").catch(() => {});
+      await client.query("ROLLBACK").catch(() => {});
       throw err;
+    } finally {
+      client.release();
     }
   }
 
@@ -698,8 +739,85 @@ export class ModelRegistryService {
       baseUrl: ctx.baseUrl,
       ...(ctx.apiKey ? { apiKey: ctx.apiKey } : {}),
       timeout: getEnv().AI_MODEL_PROBE_TIMEOUT_MS,
+      metadata: {
+        allowPrivateNetwork: ctx.allowPrivateNetwork,
+        ...(ctx.dnsLookup ? { dnsLookup: ctx.dnsLookup } : {}),
+      },
     });
     return provider;
+  }
+
+  private planProbeCapabilities(ctx: RuntimeContext, model: DiscoveredModel): AiCapability[] {
+    const advertised = providerCapabilities(model);
+    if (advertised.length > 0) return advertised;
+    const configured = configCapabilities(ctx.provider.config);
+    return configured.length > 0 ? configured : defaultProbeCapabilities(ctx.provider.protocol);
+  }
+
+  private async markMissingModelsTx(
+    client: DbExecutor,
+    ctx: RuntimeContext,
+    seenModelUuids: string[],
+  ): Promise<void> {
+    const threshold = getEnv().AI_MODEL_DISCOVERY_MISSED_THRESHOLD;
+    const params: unknown[] = [ctx.provider.id, ctx.runtimeKey];
+    const seenClause =
+      seenModelUuids.length > 0
+        ? `AND ama.model_id <> ALL($3::uuid[])`
+        : "";
+    if (seenModelUuids.length > 0) params.push(seenModelUuids);
+    const missing = await client.query<{ model_id: string; metadata: unknown }>(
+      `
+      SELECT ama.model_id, ama.metadata
+      FROM ai_model_availability ama
+      WHERE ama.provider_id = $1
+        AND ama.runtime_key = $2
+        AND ama.status = 'AVAILABLE'
+        ${seenClause}
+      `,
+      params,
+    );
+    for (const row of missing.rows) {
+      const metadata = row.metadata && typeof row.metadata === "object"
+        ? (row.metadata as Record<string, unknown>)
+        : {};
+      const discovery = metadata.discovery && typeof metadata.discovery === "object"
+        ? (metadata.discovery as Record<string, unknown>)
+        : {};
+      const missedCount =
+        typeof discovery.missedCount === "number" ? discovery.missedCount + 1 : 1;
+      const updatedMetadata = {
+        ...metadata,
+        discovery: {
+          ...discovery,
+          missedCount,
+          lastMissedAt: new Date().toISOString(),
+        },
+      };
+      await client.query(
+        `
+        UPDATE ai_model_availability
+        SET status = $3,
+            metadata = $4::jsonb,
+            last_checked_at = now(),
+            updated_at = now()
+        WHERE model_id = $1 AND runtime_key = $2
+        `,
+        [
+          row.model_id,
+          ctx.runtimeKey,
+          missedCount >= threshold ? "UNAVAILABLE" : "AVAILABLE",
+          JSON.stringify(updatedMetadata),
+        ],
+      );
+    }
+  }
+
+  private async transactionClient(): Promise<TransactionClient> {
+    if (!this.db.connect) {
+      throw new Error("Model registry persistence requires a transaction-capable database client");
+    }
+    return this.db.connect();
   }
 
   private async setLifecycle(providerId: string, modelId: string, stage: ModelLifecycleStage): Promise<void> {

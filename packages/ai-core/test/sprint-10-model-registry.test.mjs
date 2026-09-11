@@ -9,9 +9,10 @@ process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ??= "postgres://xlrrank:xlrrank@127.0.0.1:5434/xlrrank_audit";
 process.env.ENCRYPTION_MASTER_KEY ??= "e".repeat(32);
 process.env.AI_MODEL_DISCOVERY_SWEEP_TIMEOUT_MS = "5000";
-process.env.AI_MODEL_PROBE_TIMEOUT_MS = "1500";
+process.env.AI_MODEL_PROBE_TIMEOUT_MS = "500";
 process.env.AI_MODEL_DISCOVERY_MAX_MODELS_PER_PROVIDER = "50";
 process.env.AI_MODEL_PROBE_MAX_MODELS_PER_RUN = "10";
+process.env.AI_MODEL_DISCOVERY_MISSED_THRESHOLD = "2";
 
 const {
   runMigrations,
@@ -19,7 +20,33 @@ const {
   closeDatabase,
   createAiModelRegistryRefreshRequest,
 } = await import("@xlrrank/database");
-const { ModelRegistryService, validateProviderBaseUrl } = await import("../dist/index.js");
+const { ModelRegistryService, assertSafeProviderRequestUrl, validateProviderBaseUrl } = await import("../dist/index.js");
+
+function publicModel(model) {
+  const { serverCapabilities, hangText, ...listed } = model;
+  return listed;
+}
+
+function serverCapabilities(model) {
+  return model?.serverCapabilities ?? model?.capabilities ?? [];
+}
+
+function txThrowingDb(pool, shouldThrow) {
+  return {
+    query: (...args) => pool.query(...args),
+    connect: async () => {
+      const client = await pool.connect();
+      return {
+        query: async (sql, params) => {
+          const text = typeof sql === "string" ? sql : sql.text;
+          if (shouldThrow(text)) throw new Error("forced transaction failure");
+          return client.query(sql, params);
+        },
+        release: () => client.release(),
+      };
+    },
+  };
+}
 
 function readJson(req) {
   return new Promise((resolve, reject) => {
@@ -55,13 +82,19 @@ async function startOpenAiFixture(state) {
         return;
       }
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ object: "list", data: account.models }));
+      res.end(JSON.stringify({ object: "list", data: account.models.map(publicModel) }));
       return;
     }
     if (req.method === "POST" && req.url === "/v1/chat/completions") {
       const body = await readJson(req);
       const model = account.models.find((item) => item.id === body.model);
-      if (!model?.capabilities?.includes("text_generation")) {
+      if (model?.hangText) {
+        req.socket.on("close", () => {
+          account.abortedTextRequest = true;
+        });
+        return;
+      }
+      if (!serverCapabilities(model).includes("text_generation")) {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: "no chat" } }));
         return;
@@ -87,7 +120,7 @@ async function startOpenAiFixture(state) {
     if (req.method === "POST" && req.url === "/v1/embeddings") {
       const body = await readJson(req);
       const model = account.models.find((item) => item.id === body.model);
-      if (!model?.capabilities?.includes("embeddings")) {
+      if (!serverCapabilities(model).includes("embeddings")) {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { message: "no embeddings" } }));
         return;
@@ -128,7 +161,11 @@ async function startAnthropicFixture(modelIds) {
           data: page.map((id) => ({
             id,
             display_name: id,
-            capabilities: { text_generation: { supported: true } },
+            capabilities: {
+              structured_outputs: { supported: true },
+              thinking: { supported: true },
+              image_input: { supported: true },
+            },
           })),
           has_more: !after && modelIds.length > 1,
           last_id: page.at(-1),
@@ -167,7 +204,7 @@ async function startOllamaFixture(modelId) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
-          models: [{ name: modelId, model: modelId, digest: randomUUID(), capabilities: ["text_generation"] }],
+          models: [{ name: modelId, model: modelId, digest: randomUUID() }],
         }),
       );
       return;
@@ -211,19 +248,20 @@ test("Sprint 10 registry: persistent discovery, scoped credentials, capability v
               object: "model",
               version: "v1",
               fingerprint: "f1",
-              capabilities: ["text_generation"],
+              serverCapabilities: ["text_generation"],
             },
             {
               id: `fixture-embedding-${suffix}`,
               object: "model",
               version: "v1",
-              capabilities: ["embeddings"],
+              serverCapabilities: ["embeddings"],
             },
             {
               id: `fixture-structured-bad-${suffix}`,
               object: "model",
               version: "v1",
               capabilities: ["text_generation", "structured_output"],
+              serverCapabilities: ["text_generation", "structured_output"],
             },
           ],
         },
@@ -237,7 +275,7 @@ test("Sprint 10 registry: persistent discovery, scoped credentials, capability v
               id: `fixture-b-only-${suffix}`,
               object: "model",
               version: "v1",
-              capabilities: ["text_generation"],
+              serverCapabilities: ["text_generation"],
             },
           ],
         },
@@ -251,6 +289,10 @@ test("Sprint 10 registry: persistent discovery, scoped credentials, capability v
       slug: `fixture-openai-${suffix}`,
       protocol: "openai-compatible",
       baseUrl: fixture.baseUrl,
+      config: {
+        allowPrivateNetwork: true,
+        probeCapabilities: ["text_generation", "structured_output", "embeddings"],
+      },
     });
     const registryA = new ModelRegistryService();
     const scopeA = randomUUID();
@@ -290,12 +332,22 @@ test("Sprint 10 registry: persistent discovery, scoped credentials, capability v
       [`fixture-structured-bad-${suffix}`],
     );
     assert.equal(failedCapability.rows[0]?.status, "FAILED");
+    const successfulTextCapability = await pool.query(
+      `
+      SELECT acv.status
+      FROM ai_model_capability_validations acv
+      JOIN ai_models am ON am.id = acv.model_id
+      WHERE am.model_id = $1 AND acv.capability = 'text_generation'
+      `,
+      [`fixture-structured-bad-${suffix}`],
+    );
+    assert.equal(successfulTextCapability.rows[0]?.status, "VALIDATED", "structured failure does not erase successful text validation");
 
     openAiState.accounts.get("key-a").models.push({
       id: `fixture-new-${suffix}`,
       object: "model",
       version: "v1",
-      capabilities: ["text_generation"],
+      serverCapabilities: ["text_generation"],
     });
     await registryAfterRestart.refresh({ providerId, credentialId: credentialA.id, maxProbeModels: 10 });
     const newModel = await registryAfterRestart.get(providerId, `fixture-new-${suffix}`);
@@ -316,12 +368,76 @@ test("Sprint 10 registry: persistent discovery, scoped credentials, capability v
     assert.equal(failed.runtimes[0].discovery.ok, false);
     const afterFailure = await registryAfterRestart.get(providerId, `fixture-text-${suffix}`);
     assert.equal(afterFailure?.modelId, beforeFailure?.modelId, "provider list failure preserves previous model state");
+    const availabilityAfterFailure = await pool.query(
+      `
+      SELECT status
+      FROM ai_model_availability ama
+      JOIN ai_models am ON am.id = ama.model_id
+      WHERE am.model_id = $1 AND ama.runtime_key = $2
+      `,
+      [`fixture-text-${suffix}`, `credential:${credentialA.id}`],
+    );
+    assert.equal(availabilityAfterFailure.rows[0]?.status, "AVAILABLE", "transient discovery failure preserves availability");
     openAiState.accounts.get("key-a").failList = false;
+
+    openAiState.accounts.get("key-a").models = openAiState.accounts
+      .get("key-a")
+      .models.filter((model) => model.id !== `fixture-new-${suffix}`);
+    await registryAfterRestart.refresh({ providerId, credentialId: credentialA.id, maxProbeModels: 0 });
+    const firstMiss = await pool.query(
+      `
+      SELECT status, metadata
+      FROM ai_model_availability ama
+      JOIN ai_models am ON am.id = ama.model_id
+      WHERE am.model_id = $1 AND ama.runtime_key = $2
+      `,
+      [`fixture-new-${suffix}`, `credential:${credentialA.id}`],
+    );
+    assert.equal(firstMiss.rows[0]?.status, "AVAILABLE", "first successful miss respects grace");
+    assert.equal(firstMiss.rows[0]?.metadata?.discovery?.missedCount, 1);
+    await registryAfterRestart.refresh({ providerId, credentialId: credentialA.id, maxProbeModels: 0 });
+    const secondMiss = await pool.query(
+      `
+      SELECT status
+      FROM ai_model_availability ama
+      JOIN ai_models am ON am.id = ama.model_id
+      WHERE am.model_id = $1 AND ama.runtime_key = $2
+      `,
+      [`fixture-new-${suffix}`, `credential:${credentialA.id}`],
+    );
+    assert.equal(secondMiss.rows[0]?.status, "UNAVAILABLE", "miss threshold marks runtime unavailable");
+    openAiState.accounts.get("key-a").models.push({
+      id: `fixture-new-${suffix}`,
+      object: "model",
+      version: "v1",
+      serverCapabilities: ["text_generation"],
+    });
+    await registryAfterRestart.refresh({ providerId, credentialId: credentialA.id, maxProbeModels: 0 });
+    const rediscovered = await pool.query(
+      `
+      SELECT status
+      FROM ai_model_availability ama
+      JOIN ai_models am ON am.id = ama.model_id
+      WHERE am.model_id = $1 AND ama.runtime_key = $2
+      `,
+      [`fixture-new-${suffix}`, `credential:${credentialA.id}`],
+    );
+    assert.equal(rediscovered.rows[0]?.status, "AVAILABLE", "rediscovery restores runtime availability");
 
     await registryAfterRestart.refresh({ providerId, credentialId: credentialB.id, maxProbeModels: 10 });
     const bModels = await registryAfterRestart.listAvailableModels({ credentialId: credentialB.id });
     assert.ok(bModels.some((model) => model.modelId === `fixture-b-only-${suffix}`));
     assert.ok(!bModels.some((model) => model.modelId === `fixture-text-${suffix}`), "scoped BYOK credentials are isolated");
+    const credentialAAvailability = await pool.query(
+      `
+      SELECT status
+      FROM ai_model_availability ama
+      JOIN ai_models am ON am.id = ama.model_id
+      WHERE am.model_id = $1 AND ama.runtime_key = $2
+      `,
+      [`fixture-b-only-${suffix}`, `credential:${credentialB.id}`],
+    );
+    assert.equal(credentialAAvailability.rows[0]?.status, "AVAILABLE", "another credential remains available while one runtime changes");
 
     const authFailure = await registryAfterRestart.refresh({ providerId, credentialId: badCredential.id });
     assert.equal(authFailure.runtimes[0].discovery.ok, false);
@@ -349,6 +465,31 @@ test("Sprint 10 registry: persistent discovery, scoped credentials, capability v
 
     assert.throws(() => validateProviderBaseUrl("http://127.0.0.1:11434"));
     assert.equal(validateProviderBaseUrl("http://127.0.0.1:11434", { allowPrivateNetwork: true }), "http://127.0.0.1:11434");
+    await assertSafeProviderRequestUrl("https://provider.example/v1/models", {
+      lookup: async () => [{ address: "93.184.216.34" }],
+    });
+    await assert.rejects(
+      assertSafeProviderRequestUrl("https://provider.example/v1/models", {
+        lookup: async () => [{ address: "10.0.0.12" }],
+      }),
+      /private\/reserved network/,
+    );
+    await assert.rejects(
+      assertSafeProviderRequestUrl("https://provider.example/v1/models", {
+        lookup: async () => [{ address: "127.0.0.1" }],
+      }),
+      /private\/reserved network/,
+    );
+    await assert.rejects(
+      assertSafeProviderRequestUrl("https://provider.example/v1/models", {
+        lookup: async () => [{ address: "169.254.169.254" }],
+      }),
+      /private\/reserved network/,
+    );
+    await assertSafeProviderRequestUrl("http://provider.example/v1/models", {
+      allowPrivateNetwork: true,
+      lookup: async () => [{ address: "127.0.0.1" }],
+    });
   } finally {
     await fixture.close();
   }
@@ -394,6 +535,133 @@ test("Sprint 10 registry: Anthropic pagination, Ollama tags, and no static produ
   } finally {
     await anthropic.close();
     await ollama.close();
+    await closeDatabase();
+  }
+});
+
+test("Sprint 10 registry: checked-out transactions roll back partial discovery, probes, and durable requests", async () => {
+  await runMigrations();
+  const pool = getPool();
+  const suffix = randomUUID().slice(0, 8);
+  const state = {
+    accounts: new Map([
+      [
+        "tx-key",
+        {
+          failList: false,
+          models: [
+            {
+              id: `tx-model-${suffix}`,
+              object: "model",
+              version: "v1",
+              serverCapabilities: ["text_generation", "structured_output"],
+            },
+          ],
+        },
+      ],
+    ]),
+  };
+  const fixture = await startOpenAiFixture(state);
+  try {
+    const providerId = await insertProvider(pool, {
+      name: `Tx Provider ${suffix}`,
+      slug: `tx-provider-${suffix}`,
+      protocol: "openai-compatible",
+      baseUrl: fixture.baseUrl,
+      config: { allowPrivateNetwork: true, probeCapabilities: ["text_generation", "structured_output"] },
+    });
+    const registry = new ModelRegistryService();
+    const credential = await registry.createCredential({ providerId, apiKey: "tx-key", scopeKind: "SYSTEM" });
+
+    const discoveryFailureRegistry = new ModelRegistryService(
+      txThrowingDb(pool, (sql) => sql.includes("INSERT INTO ai_model_availability")),
+    );
+    await assert.rejects(
+      discoveryFailureRegistry.refresh({ providerId, credentialId: credential.id }),
+      /forced transaction failure/,
+    );
+    const rolledBackModel = await pool.query("SELECT id FROM ai_models WHERE provider_id = $1 AND model_id = $2", [
+      providerId,
+      `tx-model-${suffix}`,
+    ]);
+    assert.equal(rolledBackModel.rowCount, 0, "model upsert rolled back when availability write failed");
+
+    await registry.refresh({ providerId, credentialId: credential.id, maxProbeModels: 0 });
+    await pool.query("DELETE FROM ai_model_capability_validations WHERE runtime_key = $1", [`credential:${credential.id}`]);
+    const probeFailureRegistry = new ModelRegistryService(
+      txThrowingDb(pool, (sql) => sql.includes("UPDATE ai_models")),
+    );
+    await assert.rejects(
+      probeFailureRegistry.refresh({ providerId, credentialId: credential.id, maxProbeModels: 1 }),
+      /forced transaction failure/,
+    );
+    const validations = await pool.query(
+      "SELECT count(*)::int AS count FROM ai_model_capability_validations WHERE runtime_key = $1",
+      [`credential:${credential.id}`],
+    );
+    assert.equal(validations.rows[0].count, 0, "probe validations rolled back when model stage update failed");
+
+    const failingJobDb = txThrowingDb(pool, (sql) => sql.includes("INSERT INTO job_outbox"));
+    const idempotencyKey = `tx-job-${suffix}`;
+    await assert.rejects(
+      createAiModelRegistryRefreshRequest({ providerId, credentialId: credential.id, idempotencyKey }, failingJobDb),
+      /forced transaction failure/,
+    );
+    const durableRows = await pool.query("SELECT id FROM jobs WHERE idempotency_key = $1", [idempotencyKey]);
+    assert.equal(durableRows.rowCount, 0, "durable job insert rolled back when outbox insert failed");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Sprint 10 registry: probe timeout aborts hanging provider request", async () => {
+  await runMigrations();
+  const pool = getPool();
+  const suffix = randomUUID().slice(0, 8);
+  const account = {
+    failList: false,
+    abortedTextRequest: false,
+    models: [
+      {
+        id: `hang-model-${suffix}`,
+        object: "model",
+        version: "v1",
+        hangText: true,
+        serverCapabilities: ["text_generation"],
+      },
+    ],
+  };
+  const fixture = await startOpenAiFixture({ accounts: new Map([["hang-key", account]]) });
+  try {
+    const providerId = await insertProvider(pool, {
+      name: `Hang Provider ${suffix}`,
+      slug: `hang-provider-${suffix}`,
+      protocol: "openai-compatible",
+      baseUrl: fixture.baseUrl,
+      config: { allowPrivateNetwork: true, probeCapabilities: ["text_generation"] },
+    });
+    const registry = new ModelRegistryService();
+    const credential = await registry.createCredential({ providerId, apiKey: "hang-key", scopeKind: "SYSTEM" });
+    const started = Date.now();
+    await registry.refresh({ providerId, credentialId: credential.id, maxProbeModels: 1 });
+    const elapsed = Date.now() - started;
+    for (let attempt = 0; attempt < 20 && !account.abortedTextRequest; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(elapsed < 2_000, `probe should be bounded, elapsed ${elapsed}ms`);
+    assert.equal(account.abortedTextRequest, true, "hanging provider request was cancelled");
+    const probe = await pool.query(
+      `
+      SELECT acv.status, acv.safe_error
+      FROM ai_model_capability_validations acv
+      JOIN ai_models am ON am.id = acv.model_id
+      WHERE am.model_id = $1 AND acv.capability = 'text_generation'
+      `,
+      [`hang-model-${suffix}`],
+    );
+    assert.equal(probe.rows[0]?.status, "FAILED");
+  } finally {
+    await fixture.close();
     await closeDatabase();
   }
 });

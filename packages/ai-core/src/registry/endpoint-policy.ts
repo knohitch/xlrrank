@@ -1,6 +1,9 @@
 import { isIP } from "node:net";
+import { lookup as dnsLookup } from "node:dns/promises";
 
 const LOCAL_HOSTNAMES = new Set(["localhost", "localhost.localdomain"]);
+
+export type DnsLookup = (hostname: string) => Promise<Array<{ address: string }>>;
 
 function isPrivateIpv4(parts: number[]): boolean {
   const [a = 0, b = 0] = parts;
@@ -24,9 +27,20 @@ function isPrivateIpv6(hostname: string): boolean {
   );
 }
 
+function isPrivateOrReservedHost(hostname: string): boolean {
+  const normalized = hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
+  const ipVersion = isIP(normalized);
+  return (
+    LOCAL_HOSTNAMES.has(normalized) ||
+    normalized.endsWith(".local") ||
+    (ipVersion === 4 && isPrivateIpv4(normalized.split(".").map((part) => Number(part)))) ||
+    (ipVersion === 6 && isPrivateIpv6(normalized))
+  );
+}
+
 export function validateProviderBaseUrl(
   rawBaseUrl: string | null | undefined,
-  options: { allowPrivateNetwork?: boolean } = {},
+  options: { allowPrivateNetwork?: boolean | undefined } = {},
 ): string {
   if (!rawBaseUrl) {
     throw new Error("Provider base URL is not configured");
@@ -38,15 +52,7 @@ export function validateProviderBaseUrl(
     throw new Error("Provider base URL must use HTTPS unless private-network access is trusted");
   }
 
-  const hostname = url.hostname.replace(/^\[(.*)\]$/, "$1").toLowerCase();
-  const ipVersion = isIP(hostname);
-  const isPrivate =
-    LOCAL_HOSTNAMES.has(hostname) ||
-    hostname.endsWith(".local") ||
-    (ipVersion === 4 && isPrivateIpv4(hostname.split(".").map((part) => Number(part)))) ||
-    (ipVersion === 6 && isPrivateIpv6(hostname));
-
-  if (isPrivate && !allowPrivateNetwork) {
+  if (isPrivateOrReservedHost(url.hostname) && !allowPrivateNetwork) {
     throw new Error("Provider base URL resolves to private/local network space");
   }
 
@@ -54,3 +60,22 @@ export function validateProviderBaseUrl(
   return url.toString().replace(/\/$/, "");
 }
 
+export async function assertSafeProviderRequestUrl(
+  rawUrl: string,
+  options: { allowPrivateNetwork?: boolean | undefined; lookup?: DnsLookup | undefined } = {},
+): Promise<void> {
+  const url = new URL(rawUrl);
+  const allowPrivateNetwork = options.allowPrivateNetwork === true;
+  if (url.protocol !== "https:" && !(allowPrivateNetwork && url.protocol === "http:")) {
+    throw new Error("Provider request URL must use HTTPS unless private-network access is trusted");
+  }
+  if (isPrivateOrReservedHost(url.hostname)) {
+    if (!allowPrivateNetwork) throw new Error("Provider request URL targets private/local network space");
+    return;
+  }
+  const resolver = options.lookup ?? (async (hostname: string) => dnsLookup(hostname, { all: true }));
+  const addresses = await resolver(url.hostname);
+  if (!allowPrivateNetwork && addresses.some((item) => isPrivateOrReservedHost(item.address))) {
+    throw new Error("Provider request hostname resolves to private/reserved network space");
+  }
+}
