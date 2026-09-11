@@ -699,11 +699,132 @@ export const socialDnaProfiles = pgTable(
     dimensions: jsonb("dimensions").notNull(),
     confidence: jsonb("confidence"),
     sourceKind: text("source_kind").notNull().default("DERIVED"),
+    statedSignals: jsonb("stated_signals").notNull().default([]),
+    observedSignals: jsonb("observed_signals").notNull().default([]),
+    evidence: jsonb("evidence").notNull().default([]),
+    algorithmVersion: text("algorithm_version").notNull().default("legacy"),
+    sourceFingerprint: text("source_fingerprint").notNull().default("legacy"),
+    sourceWindow: jsonb("source_window"),
+    isCurrent: boolean("is_current").notNull().default(true),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("social_dna_profiles_scope_idx").on(t.scopeId),
     index("social_dna_person_version_idx").on(t.personId, t.version),
+    index("social_dna_current_idx").on(t.personId, t.isCurrent),
+    uniqueIndex("social_dna_person_algorithm_fingerprint_unique").on(
+      t.personId,
+      t.algorithmVersion,
+      t.sourceFingerprint,
+    ),
+  ],
+);
+
+export const canonicalPersonAccounts = pgTable(
+  "canonical_person_accounts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    personId: uuid("person_id")
+      .notNull()
+      .references(() => people.id, { onDelete: "cascade" }),
+    externalAccountId: uuid("external_account_id")
+      .notNull()
+      .references(() => socialExternalAccounts.id, { onDelete: "restrict" }),
+    status: text("status").notNull().default("CONFIRMED"),
+    sourceCandidateId: uuid("source_candidate_id"),
+    linkedAt: timestamp("linked_at", { withTimezone: true }).notNull().defaultNow(),
+    splitAt: timestamp("split_at", { withTimezone: true }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("canonical_person_accounts_scope_idx").on(t.scopeId),
+    index("canonical_person_accounts_person_idx").on(t.personId),
+    uniqueIndex("canonical_person_accounts_active_unique").on(t.scopeId, t.externalAccountId, t.status),
+  ],
+);
+
+export const identityResolutionPolicies = pgTable(
+  "identity_resolution_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    policyKey: text("policy_key").notNull(),
+    version: text("version").notNull(),
+    config: jsonb("config").notNull(),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("identity_resolution_policies_key_version_unique").on(t.policyKey, t.version),
+    index("identity_resolution_policies_active_idx").on(t.policyKey, t.active),
+  ],
+);
+
+export const identityResolutionCandidates = pgTable(
+  "identity_resolution_candidates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    accountAId: uuid("account_a_id")
+      .notNull()
+      .references(() => socialExternalAccounts.id, { onDelete: "restrict" }),
+    accountBId: uuid("account_b_id")
+      .notNull()
+      .references(() => socialExternalAccounts.id, { onDelete: "restrict" }),
+    status: text("status").notNull().default("PENDING"),
+    confidence: text("confidence").notNull().default("LOW"),
+    score: doublePrecision("score").notNull().default(0),
+    reasons: jsonb("reasons").notNull().default([]),
+    contradictions: jsonb("contradictions").notNull().default([]),
+    policyKey: text("policy_key").notNull(),
+    policyVersion: text("policy_version").notNull(),
+    evidenceFingerprint: text("evidence_fingerprint").notNull(),
+    decidedByUserId: uuid("decided_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("identity_resolution_pair_evidence_unique").on(
+      t.scopeId,
+      t.accountAId,
+      t.accountBId,
+      t.policyKey,
+      t.policyVersion,
+      t.evidenceFingerprint,
+    ),
+    index("identity_resolution_candidates_scope_idx").on(t.scopeId),
+    index("identity_resolution_candidates_status_idx").on(t.status),
+  ],
+);
+
+export const identityResolutionDecisions = pgTable(
+  "identity_resolution_decisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    candidateId: uuid("candidate_id")
+      .notNull()
+      .references(() => identityResolutionCandidates.id, { onDelete: "cascade" }),
+    actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
+    action: text("action").notNull(),
+    previousStatus: text("previous_status"),
+    newStatus: text("new_status").notNull(),
+    reason: text("reason"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("identity_resolution_decisions_candidate_idx").on(t.candidateId),
+    index("identity_resolution_decisions_actor_idx").on(t.actorUserId),
   ],
 );
 

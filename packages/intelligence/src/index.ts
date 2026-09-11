@@ -4,8 +4,21 @@ export { DEFAULT_DISCOVERY_SCORING, computeDeterministicScore } from "./scoring.
 export type { SocialDnaDimension, SocialDnaProfile, SocialDnaInput } from "./social-dna.js";
 export { generateSocialDna, compareDnaProfiles } from "./social-dna.js";
 
-export type { IdentityConfidence, IdentityMatch, PersonIdentity } from "./identity-resolution.js";
-export { matchIdentity, shouldAutoMerge } from "./identity-resolution.js";
+export type {
+  IdentityAccountInput,
+  IdentityConfidence,
+  IdentityDecisionStatus,
+  IdentityMatch,
+  IdentityResolutionPolicy,
+  IdentitySignalPolicy,
+  PersonIdentity,
+} from "./identity-resolution.js";
+export {
+  matchIdentity,
+  orderedPair,
+  shouldAutoMerge,
+  validateIdentityResolutionPolicy,
+} from "./identity-resolution.js";
 
 export type { DiscoveryCandidate, DiscoveryResult } from "./discovery.js";
 export { scoreDiscoveryCandidate, rankCandidates } from "./discovery.js";

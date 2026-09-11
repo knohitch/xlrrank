@@ -282,6 +282,9 @@ importers:
       '@xlrrank/config':
         specifier: workspace:*
         version: link:../config
+      '@xlrrank/intelligence':
+        specifier: workspace:*
+        version: link:../intelligence
       '@xlrrank/queue':
         specifier: workspace:*
         version: link:../queue

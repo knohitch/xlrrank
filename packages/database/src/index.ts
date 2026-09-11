@@ -110,3 +110,17 @@ export type {
   CreateAiModelRegistryRefreshInput,
   DurableAiModelRegistryRefreshRequest,
 } from "./ai/model-registry-jobs.js";
+export {
+  linkIdentityCandidate,
+  persistIdentityResolutionPolicy,
+  recomputeSocialDnaForPerson,
+  rejectIdentityCandidate,
+  resolveIdentityCandidate,
+  splitIdentityCandidate,
+} from "./intelligence/social-intelligence.js";
+export type {
+  ManualIdentityDecisionInput,
+  PersistIdentityResolutionPolicyInput,
+  RecomputeSocialDnaInput,
+  ResolveIdentityCandidateInput,
+} from "./intelligence/social-intelligence.js";
