@@ -20,7 +20,12 @@ const {
   closeDatabase,
   createAiModelRegistryRefreshRequest,
 } = await import("@xlrrank/database");
-const { ModelRegistryService, assertSafeProviderRequestUrl, validateProviderBaseUrl } = await import("../dist/index.js");
+const {
+  ModelRegistryService,
+  assertSafeProviderRequestUrl,
+  fetchProviderUrl,
+  validateProviderBaseUrl,
+} = await import("../dist/index.js");
 
 function publicModel(model) {
   const { serverCapabilities, hangText, ...listed } = model;
@@ -663,5 +668,168 @@ test("Sprint 10 registry: probe timeout aborts hanging provider request", async 
   } finally {
     await fixture.close();
     await closeDatabase();
+  }
+});
+
+test("Sprint 10 registry: same canonical model remains usable for credential A when credential B probes fail", async () => {
+  await runMigrations();
+  const pool = getPool();
+  const suffix = randomUUID().slice(0, 8);
+  const sharedModelId = `shared-runtime-model-${suffix}`;
+  const state = {
+    accounts: new Map([
+      [
+        "runtime-a",
+        {
+          failList: false,
+          models: [{ id: sharedModelId, object: "model", version: "v1", serverCapabilities: ["text_generation"] }],
+        },
+      ],
+      [
+        "runtime-b",
+        {
+          failList: false,
+          models: [{ id: sharedModelId, object: "model", version: "v1", serverCapabilities: [] }],
+        },
+      ],
+      ["runtime-bad", { failList: false, models: [] }],
+    ]),
+  };
+  const fixture = await startOpenAiFixture(state);
+  try {
+    const registry = new ModelRegistryService();
+    const providerId = await insertProvider(pool, {
+      name: `Shared Runtime ${suffix}`,
+      slug: `shared-runtime-${suffix}`,
+      protocol: "openai-compatible",
+      baseUrl: fixture.baseUrl,
+      config: { allowPrivateNetwork: true, probeCapabilities: ["text_generation"] },
+    });
+    const credentialA = await registry.createCredential({ providerId, apiKey: "runtime-a", scopeKind: "USER", scopeId: randomUUID() });
+    const credentialB = await registry.createCredential({ providerId, apiKey: "runtime-b", scopeKind: "USER", scopeId: randomUUID() });
+    const credentialBad = await registry.createCredential({ providerId, apiKey: "wrong-runtime-key", scopeKind: "USER", scopeId: randomUUID() });
+
+    await registry.refresh({ providerId, credentialId: credentialA.id, maxProbeModels: 1 });
+    let availableForA = await registry.listAvailableModels({
+      credentialId: credentialA.id,
+      capability: "text_generation",
+      lifecycleStage: "VALIDATED",
+    });
+    assert.ok(availableForA.some((model) => model.modelId === sharedModelId), "credential A validates the shared model");
+
+    await registry.refresh({ providerId, credentialId: credentialB.id, maxProbeModels: 1 });
+    const canonical = await registry.get(providerId, sharedModelId);
+    assert.equal(canonical?.lifecycleStage, "VALIDATED", "credential B failed probes do not globally quarantine a model validated elsewhere");
+    availableForA = await registry.listAvailableModels({
+      credentialId: credentialA.id,
+      capability: "text_generation",
+      lifecycleStage: "VALIDATED",
+    });
+    assert.ok(availableForA.some((model) => model.modelId === sharedModelId), "runtime A validation remains usable after runtime B failure");
+    const availableForB = await registry.listAvailableModels({
+      credentialId: credentialB.id,
+      capability: "text_generation",
+    });
+    assert.equal(availableForB.some((model) => model.modelId === sharedModelId), false, "runtime B failed capability is not advertised");
+
+    await registry.refresh({ providerId, credentialId: credentialBad.id });
+    const providerHealth = await pool.query("SELECT status, health FROM ai_providers WHERE id = $1", [providerId]);
+    assert.equal(providerHealth.rows[0]?.status, "DEGRADED", "one bad credential degrades provider health without overwriting healthy runtime state");
+    assert.equal(providerHealth.rows[0]?.health?.runtimes?.healthy >= 1, true);
+    const credentialHealth = await pool.query("SELECT status FROM ai_provider_credentials WHERE id = $1", [credentialBad.id]);
+    assert.equal(credentialHealth.rows[0]?.status, "AUTHENTICATION_FAILED", "credential-specific health remains authoritative");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("Sprint 10 registry: concurrent refresh request idempotency is serialized", async () => {
+  await runMigrations();
+  const pool = getPool();
+  const providerId = randomUUID();
+  const credentialA = randomUUID();
+  const credentialB = randomUUID();
+  const calls = await Promise.all(
+    Array.from({ length: 12 }, () =>
+      createAiModelRegistryRefreshRequest({
+        providerId,
+        credentialId: credentialA,
+        reason: "MANUAL",
+      }),
+    ),
+  );
+  const jobIds = new Set(calls.map((call) => call.jobId));
+  assert.equal(jobIds.size, 1, "concurrent identical refresh requests resolve to one durable job");
+  assert.equal(calls.filter((call) => !call.duplicate).length, 1, "exactly one caller creates the job");
+  const idempotencyKeyA = `ai-model-registry:${providerId}:${credentialA}:MANUAL`;
+  const active = await pool.query(
+    "SELECT id FROM jobs WHERE type = 'ai.model_registry.refresh' AND idempotency_key = $1 AND status IN ('PENDING_DISPATCH', 'QUEUED', 'RUNNING', 'RETRY_SCHEDULED')",
+    [idempotencyKeyA],
+  );
+  assert.equal(active.rowCount, 1, "exactly one active durable job exists");
+  const outbox = await pool.query("SELECT id FROM job_outbox WHERE job_id = $1", [calls[0].jobId]);
+  assert.equal(outbox.rowCount, 1, "exactly one outbox row exists for the active job");
+
+  const distinct = await createAiModelRegistryRefreshRequest({
+    providerId,
+    credentialId: credentialB,
+    reason: "MANUAL",
+  });
+  assert.notEqual(distinct.jobId, calls[0].jobId, "different credential identity gets a distinct refresh job");
+});
+
+test("Sprint 10 registry: provider transport pins validated DNS results and blocks rebinding", async () => {
+  const requests = [];
+  const privateServer = createServer((req, res) => {
+    requests.push(req.url);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+  });
+  privateServer.listen(0, "127.0.0.1");
+  await once(privateServer, "listening");
+  const { port } = privateServer.address();
+  try {
+    await assert.rejects(
+      fetchProviderUrl(`http://provider.example:${port}/private`, {
+        lookup: async () => [{ address: "127.0.0.1", family: 4 }],
+      }),
+      /HTTPS|private|local|reserved/,
+    );
+    assert.equal(requests.length, 0, "rejected private resolution never reaches transport target");
+
+    const trusted = await fetchProviderUrl(`http://provider.example:${port}/trusted`, {
+      allowPrivateNetwork: true,
+      lookup: async () => [{ address: "127.0.0.1", family: 4 }],
+    });
+    assert.equal(trusted.ok, true, "trusted private provider can be configured explicitly");
+    assert.deepEqual(requests, ["/trusted"]);
+
+    let lookupCalls = 0;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 150);
+    await assert.rejects(
+      fetchProviderUrl(`https://provider.example:${port}/rebind`, {
+        signal: controller.signal,
+        lookup: async () => {
+          lookupCalls += 1;
+          return [{ address: "93.184.216.34", family: 4 }];
+        },
+      }),
+    );
+    clearTimeout(timer);
+    assert.equal(lookupCalls, 1, "transport uses one validated resolution rather than resolving again");
+    assert.deepEqual(requests, ["/trusted"], "simulated public-to-private rebinding never reaches private target");
+
+    await assertSafeProviderRequestUrl("https://provider.example/v1/models", {
+      lookup: async () => [{ address: "93.184.216.34", family: 4 }],
+    });
+    await assert.rejects(
+      assertSafeProviderRequestUrl("https://provider.example/v1/models", {
+        lookup: async () => [{ address: "::ffff:127.0.0.1", family: 6 }],
+      }),
+      /private\/reserved network/,
+    );
+  } finally {
+    privateServer.close();
   }
 });

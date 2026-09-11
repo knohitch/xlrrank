@@ -482,6 +482,22 @@ export class ModelRegistryService {
   }
 
   private async recordDiscoveryFailure(ctx: RuntimeContext, failure: DiscoveryFailure): Promise<void> {
+    if (ctx.credential) {
+      await this.db.query(
+        `
+        UPDATE ai_provider_credentials
+        SET status = $2, health = $3::jsonb, updated_at = now()
+        WHERE id = $1
+        `,
+        [
+          ctx.credential.id,
+          failure.health,
+          JSON.stringify({ status: failure.health, checkedAt: new Date().toISOString() }),
+        ],
+      );
+      await this.recomputeProviderHealth(ctx.provider.id, failure.safeError);
+      return;
+    }
     await this.db.query(
       `
       UPDATE ai_providers
@@ -498,35 +514,9 @@ export class ModelRegistryService {
         JSON.stringify(failure.safeError),
       ],
     );
-    if (ctx.credential) {
-      await this.db.query(
-        `
-        UPDATE ai_provider_credentials
-        SET status = $2, health = $3::jsonb, updated_at = now()
-        WHERE id = $1
-        `,
-        [
-          ctx.credential.id,
-          failure.health,
-          JSON.stringify({ status: failure.health, checkedAt: new Date().toISOString() }),
-        ],
-      );
-    }
   }
 
   private async recordDiscoverySuccess(ctx: RuntimeContext): Promise<void> {
-    await this.db.query(
-      `
-      UPDATE ai_providers
-      SET status = 'HEALTHY',
-          health = $2::jsonb,
-          last_successful_discovery_at = now(),
-          last_discovery_error = NULL,
-          updated_at = now()
-      WHERE id = $1
-      `,
-      [ctx.provider.id, JSON.stringify({ status: "HEALTHY", checkedAt: new Date().toISOString() })],
-    );
     if (ctx.credential) {
       await this.db.query(
         `
@@ -540,7 +530,21 @@ export class ModelRegistryService {
         `,
         [ctx.credential.id, JSON.stringify({ status: "HEALTHY", checkedAt: new Date().toISOString() })],
       );
+      await this.recomputeProviderHealth(ctx.provider.id);
+      return;
     }
+    await this.db.query(
+      `
+      UPDATE ai_providers
+      SET status = 'HEALTHY',
+          health = $2::jsonb,
+          last_successful_discovery_at = now(),
+          last_discovery_error = NULL,
+          updated_at = now()
+      WHERE id = $1
+      `,
+      [ctx.provider.id, JSON.stringify({ status: "HEALTHY", checkedAt: new Date().toISOString() })],
+    );
   }
 
   private async persistDiscovery(
@@ -695,23 +699,19 @@ export class ModelRegistryService {
       const anySucceeded = results.some((result) => result.success);
       await client.query(
         `
-        UPDATE ai_models
-        SET lifecycle_stage = $2,
-            health = $3::jsonb,
+        UPDATE ai_model_availability
+        SET health = $3::jsonb,
             last_probed_at = now(),
             updated_at = now()
-        WHERE id = $1
+        WHERE model_id = $1 AND runtime_key = $2
         `,
         [
           modelUuid,
-          anySucceeded ? "VALIDATED" : "QUARANTINED",
+          ctx.runtimeKey,
           JSON.stringify({ healthy: anySucceeded, lastChecked: new Date().toISOString() }),
         ],
       );
-      await client.query(
-        "UPDATE ai_model_availability SET last_probed_at = now(), updated_at = now() WHERE model_id = $1 AND runtime_key = $2",
-        [modelUuid, ctx.runtimeKey],
-      );
+      await this.recomputeModelLifecycleTx(client, modelUuid);
       await client.query("COMMIT");
     } catch (err) {
       await client.query("ROLLBACK").catch(() => {});
@@ -811,6 +811,97 @@ export class ModelRegistryService {
         ],
       );
     }
+  }
+
+  private async recomputeModelLifecycleTx(client: DbExecutor, modelUuid: string): Promise<void> {
+    const current = await client.query<{ lifecycle_stage: ModelLifecycleStage }>(
+      "SELECT lifecycle_stage FROM ai_models WHERE id = $1",
+      [modelUuid],
+    );
+    const currentStage = current.rows[0]?.lifecycle_stage ?? "DISCOVERED";
+    const aggregate = await client.query<{ validated_count: number; validation_count: number }>(
+      `
+      SELECT
+        count(*) FILTER (WHERE status = 'VALIDATED')::int AS validated_count,
+        count(*)::int AS validation_count
+      FROM ai_model_capability_validations
+      WHERE model_id = $1
+      `,
+      [modelUuid],
+    );
+    const validatedCount = aggregate.rows[0]?.validated_count ?? 0;
+    const validationCount = aggregate.rows[0]?.validation_count ?? 0;
+    const nextStage: ModelLifecycleStage =
+      validatedCount > 0
+        ? currentStage === "ACTIVE"
+          ? "ACTIVE"
+          : "VALIDATED"
+        : validationCount > 0
+          ? "QUARANTINED"
+          : currentStage;
+    await client.query(
+      `
+      UPDATE ai_models
+      SET lifecycle_stage = $2,
+          health = $3::jsonb,
+          last_probed_at = now(),
+          updated_at = now()
+      WHERE id = $1
+      `,
+      [
+        modelUuid,
+        nextStage,
+        JSON.stringify({
+          healthy: validatedCount > 0,
+          validatedRuntimeCapabilities: validatedCount,
+          validationCount,
+          lastChecked: new Date().toISOString(),
+        }),
+      ],
+    );
+  }
+
+  private async recomputeProviderHealth(
+    providerId: string,
+    latestError?: DiscoveryFailure["safeError"],
+  ): Promise<void> {
+    const aggregate = await this.db.query<{ total: number; healthy: number; unhealthy: number }>(
+      `
+      SELECT
+        count(*)::int AS total,
+        count(*) FILTER (WHERE status = 'HEALTHY')::int AS healthy,
+        count(*) FILTER (WHERE status <> 'HEALTHY')::int AS unhealthy
+      FROM ai_provider_credentials
+      WHERE provider_id = $1
+      `,
+      [providerId],
+    );
+    const total = aggregate.rows[0]?.total ?? 0;
+    if (total === 0) return;
+    const healthy = aggregate.rows[0]?.healthy ?? 0;
+    const unhealthy = aggregate.rows[0]?.unhealthy ?? 0;
+    const status = healthy > 0 && unhealthy > 0 ? "DEGRADED" : healthy > 0 ? "HEALTHY" : "TEMPORARILY_UNAVAILABLE";
+    await this.db.query(
+      `
+      UPDATE ai_providers
+      SET status = $2,
+          health = $3::jsonb,
+          last_successful_discovery_at = CASE WHEN $2 IN ('HEALTHY', 'DEGRADED') THEN now() ELSE last_successful_discovery_at END,
+          last_discovery_error = CASE WHEN $4::jsonb IS NULL OR $2 = 'HEALTHY' THEN NULL ELSE $4::jsonb END,
+          updated_at = now()
+      WHERE id = $1
+      `,
+      [
+        providerId,
+        status,
+        JSON.stringify({
+          status,
+          runtimes: { total, healthy, unhealthy },
+          checkedAt: new Date().toISOString(),
+        }),
+        latestError ? JSON.stringify(latestError) : null,
+      ],
+    );
   }
 
   private async transactionClient(): Promise<TransactionClient> {

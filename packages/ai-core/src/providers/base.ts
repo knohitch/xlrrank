@@ -14,7 +14,7 @@ import type {
   UsageInfo,
 } from "./types.js";
 import type { AiModelDescriptor, AiProviderManifest } from "../manifest.js";
-import { assertSafeProviderRequestUrl, type DnsLookup } from "../registry/endpoint-policy.js";
+import { fetchProviderUrl, type DnsLookup } from "../registry/endpoint-policy.js";
 import { AiProviderError, AuthenticationError, RateLimitError, ProviderUnavailableError } from "./errors.js";
 
 export abstract class BaseAiProvider {
@@ -57,22 +57,19 @@ export abstract class BaseAiProvider {
       headers["Authorization"] = `Bearer ${this.config.apiKey}`;
     }
 
-    await assertSafeProviderRequestUrl(url, {
-      allowPrivateNetwork: this.config.metadata?.allowPrivateNetwork === true,
-      lookup: this.config.metadata?.dnsLookup as DnsLookup | undefined,
-    });
-
     const controller = new AbortController();
     const timeout = this.config.timeout ?? 60_000;
     const timer = setTimeout(() => controller.abort(), timeout);
     const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
 
     try {
-      const response = await fetch(url, {
+      const response = await fetchProviderUrl(url, {
         ...options,
         headers: { ...headers, ...options.headers as Record<string, string> },
         redirect: "error",
         signal,
+        allowPrivateNetwork: this.config.metadata?.allowPrivateNetwork === true,
+        lookup: this.config.metadata?.dnsLookup as DnsLookup | undefined,
       });
 
       if (!response.ok) {

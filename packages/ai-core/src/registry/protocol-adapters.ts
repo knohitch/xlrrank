@@ -1,5 +1,5 @@
 import type { AiCapability } from "../capabilities.js";
-import { assertSafeProviderRequestUrl, type DnsLookup } from "./endpoint-policy.js";
+import { fetchProviderUrl, type DnsLookup } from "./endpoint-policy.js";
 import { AiProviderError, AuthenticationError, ProviderUnavailableError, RateLimitError } from "../providers/errors.js";
 
 export type ProviderHealthStatus =
@@ -154,11 +154,7 @@ async function fetchJson<T>(
   const timer = setTimeout(() => controller.abort(), runtime.timeoutMs);
   try {
     const url = `${runtime.baseUrl}${path}`;
-    await assertSafeProviderRequestUrl(url, {
-      allowPrivateNetwork: runtime.allowPrivateNetwork === true,
-      lookup: runtime.dnsLookup,
-    });
-    const response = await fetch(url, {
+    const response = await fetchProviderUrl(url, {
       method: "GET",
       headers: {
         Accept: "application/json",
@@ -168,6 +164,8 @@ async function fetchJson<T>(
       },
       redirect: "error",
       signal: controller.signal,
+      allowPrivateNetwork: runtime.allowPrivateNetwork === true,
+      lookup: runtime.dnsLookup,
     });
     if (response.status === 401 || response.status === 403) {
       throw new AuthenticationError(runtime.providerId);

@@ -48,7 +48,11 @@ export type {
   RefreshModelRegistryInput,
   RuntimeRefreshResult,
 } from "./registry/model-registry.js";
-export { assertSafeProviderRequestUrl, validateProviderBaseUrl } from "./registry/endpoint-policy.js";
+export {
+  assertSafeProviderRequestUrl,
+  fetchProviderUrl,
+  validateProviderBaseUrl,
+} from "./registry/endpoint-policy.js";
 export type { DnsLookup } from "./registry/endpoint-policy.js";
 export { ModelProber } from "./registry/model-probe.js";
 export type {

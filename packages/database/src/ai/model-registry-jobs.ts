@@ -48,33 +48,40 @@ export async function createAiModelRegistryRefreshRequest(
   const idempotencyKey =
     input.idempotencyKey ??
     `ai-model-registry:${input.providerId ?? "all"}:${input.credentialId ?? "all"}:${reason}`;
-  const active = await db.query<{ id: string }>(
-    `
-    SELECT id
-    FROM jobs
-    WHERE type = $1
-      AND idempotency_key = $2
-      AND status IN ('PENDING_DISPATCH', 'QUEUED', 'RUNNING', 'RETRY_SCHEDULED')
-    ORDER BY created_at ASC
-    LIMIT 1
-    `,
-    [JOB_TYPES.aiModelRegistryRefresh, idempotencyKey],
-  );
-  const existing = active.rows[0];
-  if (existing) return { jobId: existing.id, duplicate: true };
-
-  const jobId = randomUUID();
-  const body = payload({
-    jobId,
-    ...(input.providerId ? { providerId: input.providerId } : {}),
-    ...(input.credentialId ? { credentialId: input.credentialId } : {}),
-    reason,
-  });
-  assertNoCredentialsInPayload(body);
 
   const client = await transactionClient(db);
   await client.query("BEGIN");
   try {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+      `${JOB_TYPES.aiModelRegistryRefresh}:${idempotencyKey}`,
+    ]);
+    const active = await client.query<{ id: string }>(
+      `
+      SELECT id
+      FROM jobs
+      WHERE type = $1
+        AND idempotency_key = $2
+        AND status IN ('PENDING_DISPATCH', 'QUEUED', 'RUNNING', 'RETRY_SCHEDULED')
+      ORDER BY created_at ASC
+      LIMIT 1
+      `,
+      [JOB_TYPES.aiModelRegistryRefresh, idempotencyKey],
+    );
+    const existing = active.rows[0];
+    if (existing) {
+      await client.query("COMMIT");
+      return { jobId: existing.id, duplicate: true };
+    }
+
+    const jobId = randomUUID();
+    const body = payload({
+      jobId,
+      ...(input.providerId ? { providerId: input.providerId } : {}),
+      ...(input.credentialId ? { credentialId: input.credentialId } : {}),
+      reason,
+    });
+    assertNoCredentialsInPayload(body);
+
     await client.query(
       `
       INSERT INTO jobs (
@@ -99,13 +106,13 @@ export async function createAiModelRegistryRefreshRequest(
       [jobId, QUEUE_NAMES.modelManagement, JOB_TYPES.aiModelRegistryRefresh, JSON.stringify(body)],
     );
     await client.query("COMMIT");
+    return { jobId, duplicate: false };
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
     throw err;
   } finally {
     client.release();
   }
-  return { jobId, duplicate: false };
 }
 
 async function transactionClient(db: Queryable): Promise<TransactionClient> {
