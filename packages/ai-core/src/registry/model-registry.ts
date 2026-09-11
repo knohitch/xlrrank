@@ -149,6 +149,11 @@ export interface RoutingModelCandidate extends ModelRegistryEntry {
   validationLatencyMs: number | null;
 }
 
+export interface RuntimeProviderRequest {
+  providerId: string;
+  credentialId?: string | null;
+}
+
 interface RuntimeContext {
   provider: ProviderRow;
   credential?: CredentialRow;
@@ -373,27 +378,20 @@ export class ModelRegistryService {
       )`);
     }
 
-    let validationJoin = "";
-    let validationHaving = "";
+    let validationRequirement = "";
     if (capabilities.length > 0) {
       params.push(capabilities);
       const capabilityParam = params.length;
-      validationJoin = `
-        JOIN ai_model_capability_validations acv
-          ON acv.model_id = am.id
-         AND acv.runtime_key = ama.runtime_key
-         AND acv.status = 'VALIDATED'
-         AND acv.capability = ANY($${capabilityParam}::text[])
-      `;
       params.push(capabilities.length);
-      validationHaving = `HAVING COUNT(DISTINCT acv.capability) = $${params.length}`;
-    } else {
-      validationJoin = `
-        LEFT JOIN ai_model_capability_validations acv
-          ON acv.model_id = am.id
-         AND acv.runtime_key = ama.runtime_key
-         AND acv.status = 'VALIDATED'
-      `;
+      const capabilityCountParam = params.length;
+      validationRequirement = `AND (
+        SELECT COUNT(DISTINCT acv_required.capability)
+        FROM ai_model_capability_validations acv_required
+        WHERE acv_required.model_id = am.id
+          AND acv_required.runtime_key = ama.runtime_key
+          AND acv_required.status = 'VALIDATED'
+          AND acv_required.capability = ANY($${capabilityParam}::text[])
+      ) = $${capabilityCountParam}`;
     }
 
     const result = await this.db.query<
@@ -443,10 +441,13 @@ export class ModelRegistryService {
       JOIN ai_model_availability ama ON ama.model_id = am.id
       JOIN ai_providers ap ON ap.id = am.provider_id
       LEFT JOIN ai_provider_credentials apc ON apc.id = ama.credential_id
-      ${validationJoin}
+      LEFT JOIN ai_model_capability_validations acv
+        ON acv.model_id = am.id
+       AND acv.runtime_key = ama.runtime_key
+       AND acv.status = 'VALIDATED'
       WHERE ${clauses.join(" AND ")}
+      ${validationRequirement}
       GROUP BY am.id, ama.id, ap.id, apc.id
-      ${validationHaving}
       ORDER BY am.provider_id, am.model_id, ama.runtime_key
       `,
       params,
@@ -507,6 +508,16 @@ export class ModelRegistryService {
 
   async quarantine(providerId: string, modelId: string): Promise<void> {
     await this.setLifecycle(providerId, modelId, "QUARANTINED");
+  }
+
+  async createRuntimeProvider(input: RuntimeProviderRequest): Promise<BaseAiProvider> {
+    const provider = (await this.loadProviders(input.providerId, 1))[0];
+    if (!provider) throw new Error("AI provider runtime is unavailable");
+    const credential = input.credentialId
+      ? await this.loadCredential(input.credentialId, provider.id)
+      : undefined;
+    const ctx = this.resolveRuntime(provider, credential);
+    return this.createProbeProvider(ctx);
   }
 
   private async loadProviders(providerId: string | undefined, limit: number): Promise<ProviderRow[]> {

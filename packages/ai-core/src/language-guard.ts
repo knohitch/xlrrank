@@ -64,7 +64,6 @@ function stripProtectedContent(text: string): string {
     .replace(/https?:\/\/\S+/gi, " ")
     .replace(/[\w.-]+@[\w.-]+\.\w+/g, " ")
     .replace(/@[A-Za-z0-9_]+/g, " ")
-    .replace(/\b[A-Z][A-Za-z0-9_.-]{1,}\b/g, " ")
     .replace(/\b[A-Z_]{2,}\b/g, " ");
 }
 
@@ -80,6 +79,60 @@ function scriptCounts(text: string): Map<string, number> {
     }
   }
   return counts;
+}
+
+const LATIN_LANGUAGE_MARKERS: Record<Extract<SupportedLanguage, "en" | "es" | "fr" | "de" | "pt">, {
+  words: Set<string>;
+  fragments: RegExp[];
+}> = {
+  en: {
+    words: new Set(["the", "and", "this", "that", "with", "for", "from", "will", "should", "answer", "clearly", "written", "english", "result", "ready", "because", "language"]),
+    fragments: [/\b(?:tion|ing|ed|ly)\b/i],
+  },
+  es: {
+    words: new Set(["el", "la", "los", "las", "un", "una", "este", "esta", "que", "con", "para", "por", "respuesta", "claramente", "espanol", "español", "debe", "idioma", "porque", "gracias"]),
+    fragments: [/[áéíóúñ¿¡]/i, /\b(?:ción|mente|dad|ado|ada|idos|idas)\b/i],
+  },
+  fr: {
+    words: new Set(["le", "la", "les", "un", "une", "des", "ce", "cette", "que", "avec", "pour", "par", "reponse", "réponse", "clairement", "francais", "français", "doit", "langue", "parce", "merci"]),
+    fragments: [/[àâçéèêëîïôûùüÿœ]/i, /\b(?:tion|ment|ique|eurs|euse)\b/i],
+  },
+  de: {
+    words: new Set(["der", "die", "das", "ein", "eine", "und", "ist", "mit", "fur", "für", "antwort", "klar", "deutsch", "sollte", "sprache", "weil", "danke", "nicht"]),
+    fragments: [/[äöüß]/i, /\b(?:ung|keit|lich|isch|chen)\b/i],
+  },
+  pt: {
+    words: new Set(["o", "a", "os", "as", "um", "uma", "este", "esta", "que", "com", "para", "por", "resposta", "claramente", "portugues", "português", "deve", "idioma", "porque", "obrigado"]),
+    fragments: [/[áâãàçéêíóôõú]/i, /\b(?:ção|ções|mente|dade|ado|ada)\b/i],
+  },
+};
+
+function detectLatinLanguage(text: string, latinRatio: number): Pick<LanguageDetectionResult, "detected" | "confidence"> {
+  const tokens = text
+    .toLocaleLowerCase("und")
+    .normalize("NFC")
+    .match(/[\p{L}']+/gu) ?? [];
+  if (tokens.length < 3 || latinRatio < 0.4) {
+    return { detected: "en", confidence: Math.max(0.1, latinRatio * 0.5) };
+  }
+
+  const scores = new Map<SupportedLanguage, number>();
+  for (const [language, markers] of Object.entries(LATIN_LANGUAGE_MARKERS) as Array<[SupportedLanguage, typeof LATIN_LANGUAGE_MARKERS["en"]]>) {
+    let score = 0;
+    for (const token of tokens) {
+      if (markers.words.has(token)) score += 2;
+    }
+    for (const fragment of markers.fragments) {
+      if (fragment.test(text)) score += 1.5;
+    }
+    scores.set(language, score);
+  }
+  const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]);
+  const [bestLanguage, bestScore] = ranked[0] ?? ["en", 0];
+  const secondScore = ranked[1]?.[1] ?? 0;
+  if (bestScore <= 0) return { detected: "en", confidence: 0.35 };
+  const confidence = Math.min(0.98, Math.max(0.45, (bestScore - secondScore + bestScore / Math.max(tokens.length, 1)) / 4));
+  return { detected: bestLanguage, confidence };
 }
 
 export function detectLanguage(text: string): LanguageDetectionResult {
@@ -108,7 +161,8 @@ export function detectLanguage(text: string): LanguageDetectionResult {
   if (ratio("Cyrillic") >= 0.25) {
     return { detected: "ru", confidence: ratio("Cyrillic"), scripts, meaningfulCharacters };
   }
-  return { detected: "en", confidence: Math.max(0.6, ratio("Latin")), scripts, meaningfulCharacters };
+  const latin = detectLatinLanguage(normalized, ratio("Latin"));
+  return { ...latin, scripts, meaningfulCharacters };
 }
 
 export function languageGuard(

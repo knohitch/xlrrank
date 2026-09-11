@@ -1,5 +1,6 @@
 import type { ReasoningTier } from "@xlrrank/shared";
 import type { AiCapability } from "../capabilities.js";
+import type { BaseAiProvider } from "../providers/base.js";
 import type { AiMessage, EmbeddingResponse, StructuredResponse, TextGenerationResponse } from "../providers/types.js";
 import type { ModelLifecycleStage } from "../registry/types.js";
 import type { ModelRegistryService, RoutingModelCandidate } from "../registry/model-registry.js";
@@ -12,7 +13,6 @@ import {
   type LanguagePolicy,
   type SupportedLanguage,
 } from "../language-guard.js";
-import { TIER_RANK } from "./reasoning-tiers.js";
 
 export type RoutingMode = "AUTOMATIC" | "QUALITY_OPTIMIZED" | "COST_OPTIMIZED" | "CUSTOM";
 export type RoutingExecutionKind = "text" | "structured" | "embeddings" | "streaming";
@@ -53,7 +53,33 @@ export interface RoutingRequest {
   maxLatencyMs?: number;
   maxCostPer1kTokens?: number;
   lifecycleStages?: ModelLifecycleStage[];
+  routingPolicy?: Partial<RoutingPolicy>;
 }
+
+export interface RoutingModeWeights {
+  quality: number;
+  latency: number;
+  health: number;
+  capabilityPreference: number;
+}
+
+export interface RoutingPolicyTierRule {
+  requiredCapabilities?: AiCapability[];
+  preferredCapabilities?: Partial<Record<AiCapability, number>>;
+  modeWeights?: Partial<Record<RoutingMode, Partial<RoutingModeWeights>>>;
+}
+
+export interface RoutingPolicy {
+  maxFallbackAttempts: number;
+  unknownQualityScore: number;
+  unknownLatencyScore: number;
+  latencyReferenceMs: number;
+  healthScores: Record<"HEALTHY" | "DEGRADED" | "UNKNOWN", number>;
+  defaultModeWeights: Record<RoutingMode, RoutingModeWeights>;
+  tiers: Partial<Record<ReasoningTier, RoutingPolicyTierRule>>;
+}
+
+export type RuntimeProviderResolver = (candidate: RoutingModelCandidate) => Promise<BaseAiProvider>;
 
 export interface RoutingDecision {
   providerId: string;
@@ -113,11 +139,66 @@ interface RankedCandidate {
   score: number;
 }
 
+const DEFAULT_ROUTING_MODE_WEIGHTS: Record<RoutingMode, RoutingModeWeights> = {
+  AUTOMATIC: { quality: 1, latency: 1, health: 1, capabilityPreference: 1 },
+  QUALITY_OPTIMIZED: { quality: 1.6, latency: 0.4, health: 1, capabilityPreference: 1.2 },
+  COST_OPTIMIZED: { quality: 0.6, latency: 1.6, health: 1, capabilityPreference: 0.7 },
+  CUSTOM: { quality: 1, latency: 1, health: 1, capabilityPreference: 1 },
+};
+
+export const DEFAULT_ROUTING_POLICY: RoutingPolicy = {
+  maxFallbackAttempts: 2,
+  unknownQualityScore: 50,
+  unknownLatencyScore: 50,
+  latencyReferenceMs: 2_000,
+  healthScores: {
+    HEALTHY: 100,
+    DEGRADED: 50,
+    UNKNOWN: 30,
+  },
+  defaultModeWeights: DEFAULT_ROUTING_MODE_WEIGHTS,
+  tiers: {
+    TIER_0_UTILITY: {
+      preferredCapabilities: {},
+      modeWeights: {
+        AUTOMATIC: { quality: 0.7, latency: 1.5, health: 1, capabilityPreference: 0.5 },
+      },
+    },
+    TIER_3_DEEP_INTELLIGENCE: {
+      preferredCapabilities: { reasoning: 35 },
+      modeWeights: {
+        AUTOMATIC: { quality: 1.2, latency: 0.4, health: 1, capabilityPreference: 1.5 },
+      },
+    },
+    TIER_4_CRITICAL: {
+      preferredCapabilities: { reasoning: 45 },
+      modeWeights: {
+        AUTOMATIC: { quality: 1.4, latency: 0.25, health: 1.2, capabilityPreference: 1.8 },
+      },
+    },
+  },
+};
+
 export class AiRouter {
+  private readonly runtimeProviderResolver: RuntimeProviderResolver;
+  private readonly routingPolicy: RoutingPolicy;
+
   constructor(
     private readonly registry: ModelRegistryService,
     private readonly gateway: AiGateway,
-  ) {}
+    options: {
+      routingPolicy?: Partial<RoutingPolicy>;
+      runtimeProviderResolver?: RuntimeProviderResolver;
+    } = {},
+  ) {
+    this.routingPolicy = mergeRoutingPolicy(DEFAULT_ROUTING_POLICY, options.routingPolicy);
+    this.runtimeProviderResolver =
+      options.runtimeProviderResolver ??
+      ((candidate) => this.registry.createRuntimeProvider({
+        providerId: candidate.providerId,
+        credentialId: candidate.credentialId,
+      }));
+  }
 
   async route(request: RoutingRequest): Promise<RoutingDecision> {
     const ranked = await this.rankEligibleCandidates(request);
@@ -138,10 +219,11 @@ export class AiRouter {
 
   async execute(request: RoutingRequest): Promise<RoutingExecutionResult> {
     const ranked = await this.rankEligibleCandidates(request);
-    const capabilities = this.requiredCapabilities(request);
+    const policy = this.policyFor(request);
+    const capabilities = this.requiredCapabilities(request, policy);
     const tier = request.reasoningTier ?? request.tier ?? "TIER_1_EVERYDAY";
     const executionKind = this.executionKind(request);
-    const maxAttempts = Math.max(1, 1 + (request.maxFallbackAttempts ?? 2));
+    const maxAttempts = Math.max(1, 1 + (request.maxFallbackAttempts ?? policy.maxFallbackAttempts));
     const evidence: RoutingExecutionEvidence = {
       requirements: {
         capabilities,
@@ -199,6 +281,15 @@ export class AiRouter {
               message: "Model output did not satisfy the configured target language policy",
             };
             languageRetries += 1;
+            if (languageRetries > (request.languagePolicy?.maxRetryAttempts ?? 1) && request.languagePolicy?.allowFallback === false) {
+              return {
+                ok: false,
+                status: "LANGUAGE_GUARD_FAILED",
+                decision,
+                error: lastError,
+                evidence,
+              };
+            }
             continue;
           }
 
@@ -236,6 +327,18 @@ export class AiRouter {
             code: classified.code,
             message: classified.message,
           };
+          if (!classified.retryable) {
+            return {
+              ok: false,
+              status: classified.status,
+              decision,
+              error: {
+                code: classified.code,
+                message: classified.message,
+              },
+              evidence,
+            };
+          }
           break;
         }
       } while (languageRetries <= (request.languagePolicy?.maxRetryAttempts ?? 1));
@@ -255,7 +358,8 @@ export class AiRouter {
 
   private async rankEligibleCandidates(request: RoutingRequest): Promise<RankedCandidate[]> {
     const mode = request.mode ?? "AUTOMATIC";
-    const capabilities = this.requiredCapabilities(request);
+    const policy = this.policyFor(request);
+    const capabilities = this.requiredCapabilities(request, policy);
     const query = {
       capabilities,
       lifecycleStages: request.lifecycleStages ?? ["VALIDATED", "ACTIVE"],
@@ -270,14 +374,16 @@ export class AiRouter {
         ? eligible.filter((candidate) => candidate.modelId === request.preferredModelId)
         : eligible;
     return customFiltered
-      .map((candidate) => ({ candidate, score: this.scoreCandidate(candidate, request, mode) }))
+      .map((candidate) => ({ candidate, score: this.scoreCandidate(candidate, request, mode, policy) }))
       .sort((a, b) => b.score - a.score);
   }
 
-  private requiredCapabilities(request: RoutingRequest): AiCapability[] {
+  private requiredCapabilities(request: RoutingRequest, policy = this.policyFor(request)): AiCapability[] {
     const capabilities = new Set<AiCapability>();
+    const tier = request.reasoningTier ?? request.tier ?? "TIER_1_EVERYDAY";
     for (const capability of request.requiredCapabilities ?? []) capabilities.add(capability);
     if (request.requiredCapability) capabilities.add(request.requiredCapability);
+    for (const capability of policy.tiers[tier]?.requiredCapabilities ?? []) capabilities.add(capability);
     if (request.structuredOutput?.required || request.structuredOutput?.schema) capabilities.add("structured_output");
     if (request.streaming) capabilities.add("streaming");
     if (request.vision) capabilities.add("vision");
@@ -296,7 +402,8 @@ export class AiRouter {
   private isRuntimeHealthy(candidate: RoutingModelCandidate): boolean {
     const provider = this.gateway.getProvider(candidate.providerId);
     const gatewayStatus = provider?.getStatus();
-    if (!provider || !["connected", "degraded"].includes(gatewayStatus ?? "")) return false;
+    if (this.gateway.listProviders().length > 0 && !provider) return false;
+    if (provider && !["connected", "degraded"].includes(gatewayStatus ?? "")) return false;
     if (candidate.availabilityStatus !== "AVAILABLE") return false;
     if (!["VALIDATED", "ACTIVE"].includes(candidate.lifecycleStage)) return false;
     const providerStatus = candidate.providerStatus.toUpperCase();
@@ -314,26 +421,32 @@ export class AiRouter {
     candidate: RoutingModelCandidate,
     request: RoutingRequest,
     mode: RoutingMode,
+    policy: RoutingPolicy,
   ): number {
     const tier = request.reasoningTier ?? request.tier ?? "TIER_1_EVERYDAY";
-    const tierRank = TIER_RANK[tier] ?? 1;
-    const quality = candidate.validationQuality ?? 50;
+    const quality = candidate.validationQuality ?? policy.unknownQualityScore;
     const latency = candidate.validationLatencyMs;
-    const latencyScore = latency === null ? 20 : Math.max(0, 35 - latency / 100);
-    const hasReasoning = candidate.validations.some((item) => item.capability === "reasoning");
-    const reasoningFit = tierRank >= 3 ? (hasReasoning ? 30 : -15) : (hasReasoning ? 5 : 10);
-    const healthFit = candidate.providerStatus.toUpperCase() === "DEGRADED" ? 5 : 15;
+    const latencyScore = latency === null
+      ? policy.unknownLatencyScore
+      : Math.max(0, ((policy.latencyReferenceMs - latency) / policy.latencyReferenceMs) * 100);
+    const healthKey = candidate.providerStatus.toUpperCase() === "DEGRADED" ? "DEGRADED" : "HEALTHY";
+    const healthScore = policy.healthScores[healthKey] ?? policy.healthScores.UNKNOWN;
+    const tierRule = policy.tiers[tier] ?? {};
+    const weights = {
+      ...policy.defaultModeWeights[mode],
+      ...tierRule.modeWeights?.[mode],
+    };
+    const validatedCapabilities = new Set(candidate.validations.map((item) => item.capability));
+    const capabilityPreference = Object.entries(tierRule.preferredCapabilities ?? {}).reduce((score, [capability, value]) => {
+      return validatedCapabilities.has(capability as AiCapability) ? score + (value ?? 0) : score;
+    }, 0);
 
-    if (mode === "QUALITY_OPTIMIZED") {
-      return quality * 1.5 + reasoningFit + healthFit + latencyScore * 0.3;
-    }
-    if (mode === "COST_OPTIMIZED") {
-      return latencyScore * 1.5 + quality * 0.5 + healthFit + (tierRank <= 1 ? 10 : 0);
-    }
-    if (tierRank >= 3) {
-      return quality * 1.25 + reasoningFit + healthFit + latencyScore * 0.4;
-    }
-    return latencyScore + quality * 0.75 + healthFit + reasoningFit;
+    return (
+      quality * weights.quality +
+      latencyScore * weights.latency +
+      healthScore * weights.health +
+      capabilityPreference * weights.capabilityPreference
+    );
   }
 
   private toDecision(ranked: RankedCandidate[], request: RoutingRequest): RoutingDecision {
@@ -382,10 +495,11 @@ export class AiRouter {
   }> {
     const kind = this.executionKind(request);
     const messages = this.buildMessages(request, forceLanguageInstruction);
+    const provider = await this.runtimeProviderResolver(candidate);
     if (kind === "structured") {
       const schema = request.structuredOutput?.schema;
       if (!schema) throw new Error("Structured output schema is required");
-      const response = await this.gateway.generateStructured(candidate.providerId, {
+      const response = await provider.generateStructured({
         model: candidate.modelId,
         messages,
         schema,
@@ -398,7 +512,7 @@ export class AiRouter {
       return { structuredData: response.data, rawContent: response.rawContent, usage: response.usage };
     }
     if (kind === "embeddings") {
-      const response = await this.gateway.generateEmbeddings(candidate.providerId, {
+      const response = await provider.generateEmbeddings({
         model: candidate.modelId,
         input: request.embeddingInput ?? request.prompt ?? messages.map((message) => message.content).join("\n"),
       });
@@ -407,7 +521,7 @@ export class AiRouter {
     if (kind === "streaming") {
       let content = "";
       let usage: TextGenerationResponse["usage"] | undefined;
-      for await (const chunk of this.gateway.streamText(candidate.providerId, { model: candidate.modelId, messages })) {
+      for await (const chunk of provider.streamText({ model: candidate.modelId, messages })) {
         content += chunk.delta;
         if (chunk.usage) {
           usage = {
@@ -419,7 +533,7 @@ export class AiRouter {
       }
       return { content, ...(usage ? { usage } : {}) };
     }
-    const response = await this.gateway.generateText(candidate.providerId, {
+    const response = await provider.generateText({
       model: candidate.modelId,
       messages,
     });
@@ -461,30 +575,140 @@ export class AiRouter {
       retryable: true,
     };
   }
+
+  private policyFor(request: RoutingRequest): RoutingPolicy {
+    return request.routingPolicy ? mergeRoutingPolicy(this.routingPolicy, request.routingPolicy) : this.routingPolicy;
+  }
+}
+
+function mergeRoutingPolicy(base: RoutingPolicy, override: Partial<RoutingPolicy> = {}): RoutingPolicy {
+  const defaultModeWeights = { ...base.defaultModeWeights };
+  for (const mode of Object.keys(override.defaultModeWeights ?? {}) as RoutingMode[]) {
+    defaultModeWeights[mode] = {
+      ...defaultModeWeights[mode],
+      ...override.defaultModeWeights?.[mode],
+    };
+  }
+  const tiers: RoutingPolicy["tiers"] = { ...base.tiers };
+  for (const [tier, rule] of Object.entries(override.tiers ?? {}) as Array<[ReasoningTier, RoutingPolicyTierRule]>) {
+    const existing = tiers[tier] ?? {};
+    const modeWeights = { ...(existing.modeWeights ?? {}) };
+    for (const mode of Object.keys(rule.modeWeights ?? {}) as RoutingMode[]) {
+      modeWeights[mode] = {
+        ...(modeWeights[mode] ?? {}),
+        ...rule.modeWeights?.[mode],
+      };
+    }
+    tiers[tier] = {
+      ...existing,
+      ...rule,
+      preferredCapabilities: {
+        ...(existing.preferredCapabilities ?? {}),
+        ...(rule.preferredCapabilities ?? {}),
+      },
+      modeWeights,
+    };
+  }
+  return {
+    ...base,
+    ...override,
+    healthScores: {
+      ...base.healthScores,
+      ...(override.healthScores ?? {}),
+    },
+    defaultModeWeights,
+    tiers,
+  };
 }
 
 function validateStructuredResponse(value: unknown, schema: Record<string, unknown>): string | undefined {
-  if (schema.type === "object") {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return "expected object";
+  return validateJsonSchemaValue(value, schema, "$");
+}
+
+function validateJsonSchemaValue(value: unknown, schema: Record<string, unknown>, path: string): string | undefined {
+  if (Array.isArray(schema.enum) && !schema.enum.some((item) => deepEqualJson(item, value))) {
+    return `${path} must match an allowed enum value`;
+  }
+  if ("const" in schema && !deepEqualJson(schema.const, value)) {
+    return `${path} must match const value`;
+  }
+  const expectedTypes = Array.isArray(schema.type)
+    ? schema.type.filter((item): item is string => typeof item === "string")
+    : typeof schema.type === "string"
+      ? [schema.type]
+      : [];
+  if (expectedTypes.length > 0 && !expectedTypes.some((type) => jsonTypeMatches(value, type))) {
+    return `${path} expected ${expectedTypes.join(" or ")}`;
+  }
+  if (value === null || value === undefined) return undefined;
+
+  if (typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
     const required = Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === "string") : [];
     for (const key of required) {
-      if (!(key in record)) return `missing required property '${key}'`;
+      if (!(key in record)) return `${path}.${key} is required`;
     }
-    const properties = schema.properties && typeof schema.properties === "object"
+    const properties = schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)
       ? schema.properties as Record<string, Record<string, unknown>>
       : {};
     for (const [key, propertySchema] of Object.entries(properties)) {
-      if (record[key] === undefined) continue;
-      const expected = propertySchema.type;
-      if (expected === "array" && !Array.isArray(record[key])) return `property '${key}' expected array`;
-      if (expected === "object" && (!record[key] || typeof record[key] !== "object" || Array.isArray(record[key]))) {
-        return `property '${key}' expected object`;
-      }
-      if (typeof expected === "string" && !["array", "object"].includes(expected) && typeof record[key] !== expected) {
-        return `property '${key}' expected ${expected}`;
+      if (!(key in record)) continue;
+      const error = validateJsonSchemaValue(record[key], propertySchema, `${path}.${key}`);
+      if (error) return error;
+    }
+    if (schema.additionalProperties === false) {
+      const allowed = new Set(Object.keys(properties));
+      const unexpected = Object.keys(record).find((key) => !allowed.has(key));
+      if (unexpected) return `${path}.${unexpected} is not allowed`;
+    }
+  }
+
+  if (Array.isArray(value)) {
+    if (typeof schema.minItems === "number" && value.length < schema.minItems) return `${path} must contain at least ${schema.minItems} items`;
+    if (typeof schema.maxItems === "number" && value.length > schema.maxItems) return `${path} must contain at most ${schema.maxItems} items`;
+    if (schema.items && typeof schema.items === "object" && !Array.isArray(schema.items)) {
+      for (let index = 0; index < value.length; index += 1) {
+        const error = validateJsonSchemaValue(value[index], schema.items as Record<string, unknown>, `${path}[${index}]`);
+        if (error) return error;
       }
     }
   }
+
+  if (typeof value === "string") {
+    if (typeof schema.minLength === "number" && value.length < schema.minLength) return `${path} is shorter than ${schema.minLength}`;
+    if (typeof schema.maxLength === "number" && value.length > schema.maxLength) return `${path} is longer than ${schema.maxLength}`;
+    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value)) return `${path} does not match pattern`;
+  }
+
+  if (typeof value === "number") {
+    if (typeof schema.minimum === "number" && value < schema.minimum) return `${path} is less than ${schema.minimum}`;
+    if (typeof schema.maximum === "number" && value > schema.maximum) return `${path} is greater than ${schema.maximum}`;
+    if (typeof schema.exclusiveMinimum === "number" && value <= schema.exclusiveMinimum) return `${path} must be greater than ${schema.exclusiveMinimum}`;
+    if (typeof schema.exclusiveMaximum === "number" && value >= schema.exclusiveMaximum) return `${path} must be less than ${schema.exclusiveMaximum}`;
+  }
   return undefined;
+}
+
+function jsonTypeMatches(value: unknown, type: string): boolean {
+  switch (type) {
+    case "array":
+      return Array.isArray(value);
+    case "integer":
+      return Number.isInteger(value);
+    case "number":
+      return typeof value === "number" && Number.isFinite(value);
+    case "object":
+      return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+    case "null":
+      return value === null;
+    case "string":
+    case "boolean":
+      return typeof value === type;
+    default:
+      return true;
+  }
+}
+
+function deepEqualJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }

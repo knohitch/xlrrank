@@ -49,6 +49,7 @@ export type {
   RoutingCandidateQuery,
   RoutingCapabilityValidation,
   RoutingModelCandidate,
+  RuntimeProviderRequest,
   RuntimeRefreshResult,
 } from "./registry/model-registry.js";
 export {
@@ -76,11 +77,16 @@ export type {
   RoutingExecutionEvidence,
   RoutingExecutionKind,
   RoutingExecutionResult,
+  RoutingModeWeights,
   RoutingMode,
   RoutingOutcomeStatus,
+  RoutingPolicy,
+  RoutingPolicyTierRule,
   RoutingRequest,
+  RuntimeProviderResolver,
   StructuredOutputRequirement,
 } from "./router/ai-router.js";
+export { DEFAULT_ROUTING_POLICY } from "./router/ai-router.js";
 
 export {
   languageGuard,

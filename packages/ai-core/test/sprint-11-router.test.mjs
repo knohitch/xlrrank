@@ -90,6 +90,13 @@ async function insertRuntimeModel(pool, input) {
     INSERT INTO ai_models
       (provider_id, model_id, display_name, version, fingerprint, lifecycle_stage, capabilities, health, last_seen_at, last_probed_at)
     VALUES ($1, $2, $2, $3, $4, $5, $6::jsonb, '{"healthy":true,"lastChecked":"2026-09-11T00:00:00.000Z"}'::jsonb, now(), now())
+    ON CONFLICT (provider_id, model_id) DO UPDATE
+    SET lifecycle_stage = EXCLUDED.lifecycle_stage,
+        capabilities = EXCLUDED.capabilities,
+        health = EXCLUDED.health,
+        last_seen_at = now(),
+        last_probed_at = now(),
+        updated_at = now()
     RETURNING id
     `,
     [
@@ -132,10 +139,13 @@ async function insertRuntimeModel(pool, input) {
   return modelUuid;
 }
 
-function routerFor(providerId, behavior = {}) {
+function routerFor(providerId, behavior = {}, options = {}) {
   const gateway = new AiGateway();
   gateway.registerProvider(new FixtureProvider(providerId, behavior));
-  return new AiRouter(new ModelRegistryService(), gateway);
+  return new AiRouter(new ModelRegistryService(), gateway, {
+    ...options,
+    runtimeProviderResolver: options.runtimeProviderResolver ?? (async () => new FixtureProvider(providerId, behavior)),
+  });
 }
 
 test("Sprint 11 router: capability evidence filters text, structured, and stale-revision candidates", async () => {
@@ -203,7 +213,7 @@ test("Sprint 11 router: capability evidence filters text, structured, and stale-
   assert.equal(structured.decision?.modelId, structuredModel);
 });
 
-test("Sprint 11 router: reasoning tiers rank neutral evidence without model-name heuristics", async () => {
+test("Sprint 11 router: routing policy changes ranking and deep policy can prefer reasoning evidence", async () => {
   await runMigrations();
   const pool = getPool();
   const providerId = await insertProvider(pool);
@@ -226,27 +236,60 @@ test("Sprint 11 router: reasoning tiers rank neutral evidence without model-name
       { capability: "reasoning", quality: 96, latencyMs: 2200 },
     ],
   });
-  const router = routerFor(providerId, {
+  const latencyPolicy = {
+    latencyReferenceMs: 3000,
+    defaultModeWeights: {
+      AUTOMATIC: { quality: 0.1, latency: 2, health: 0, capabilityPreference: 0 },
+    },
+    tiers: {
+      TIER_3_DEEP_INTELLIGENCE: {
+        preferredCapabilities: { reasoning: 100 },
+        modeWeights: {
+          AUTOMATIC: { quality: 0.2, latency: 0.1, health: 0, capabilityPreference: 3 },
+        },
+      },
+    },
+  };
+  const qualityPolicy = {
+    latencyReferenceMs: 3000,
+    defaultModeWeights: {
+      AUTOMATIC: { quality: 2, latency: 0.1, health: 0, capabilityPreference: 0 },
+    },
+  };
+  const latencyRouter = routerFor(providerId, {
     text: { [fastModel]: "fast response", [deepModel]: "deep response" },
-  });
+  }, { routingPolicy: latencyPolicy });
+  const qualityRouter = routerFor(providerId, {
+    text: { [fastModel]: "fast response", [deepModel]: "deep response" },
+  }, { routingPolicy: qualityPolicy });
 
-  const routine = await router.execute({
+  const routine = await latencyRouter.execute({
     taskType: "language_generation",
     requiredCapability: "text_generation",
-    tier: "TIER_0_UTILITY",
+    tier: "TIER_1_EVERYDAY",
     prompt: "routine",
   });
   assert.equal(routine.ok, true);
   assert.equal(routine.decision?.modelId, fastModel);
 
-  const deep = await router.execute({
+  const qualityBiased = await qualityRouter.execute({
+    taskType: "language_generation",
+    requiredCapability: "text_generation",
+    tier: "TIER_1_EVERYDAY",
+    prompt: "routine",
+  });
+  assert.equal(qualityBiased.ok, true);
+  assert.equal(qualityBiased.decision?.modelId, deepModel);
+
+  const deep = await latencyRouter.execute({
     taskType: "reasoning",
-    requiredCapabilities: ["text_generation", "reasoning"],
+    requiredCapability: "text_generation",
     tier: "TIER_3_DEEP_INTELLIGENCE",
     prompt: "analyze",
   });
   assert.equal(deep.ok, true);
   assert.equal(deep.decision?.modelId, deepModel);
+  assert.equal(deep.evidence.requirements.capabilities.includes("reasoning"), false);
 });
 
 test("Sprint 11 router: credential scoped availability and health remain isolated", async () => {
@@ -298,6 +341,64 @@ test("Sprint 11 router: credential scoped availability and health remain isolate
   });
   assert.equal(badCredential.ok, false);
   assert.equal(badCredential.status, "NO_ELIGIBLE_MODEL");
+});
+
+test("Sprint 11 router: selected credential runtime is the executed provider runtime", async () => {
+  await runMigrations();
+  const pool = getPool();
+  const providerId = await insertProvider(pool);
+  const scopeA = randomUUID();
+  const scopeB = randomUUID();
+  const credentialA = await insertCredential(pool, providerId, { scopeId: scopeA, status: "HEALTHY" });
+  const credentialB = await insertCredential(pool, providerId, { scopeId: scopeB, status: "HEALTHY" });
+  const sharedModel = `generated-shared-runtime-${randomUUID()}`;
+  const invocations = [];
+
+  for (const credential of [credentialA, credentialB]) {
+    await insertRuntimeModel(pool, {
+      providerId,
+      modelId: sharedModel,
+      credentialId: credential.id,
+      capabilities: ["text_generation"],
+      validations: [{ capability: "text_generation", quality: 80, latencyMs: 100 }],
+    });
+  }
+
+  const router = routerFor(providerId, {}, {
+    runtimeProviderResolver: async (candidate) => new FixtureProvider(providerId, {
+      text: {
+        [sharedModel]: () => {
+          invocations.push({ credentialId: candidate.credentialId, runtimeKey: candidate.runtimeKey });
+          return `executed:${candidate.credentialId}`;
+        },
+      },
+    }),
+  });
+
+  const resultA = await router.execute({
+    taskType: "classification",
+    requiredCapability: "text_generation",
+    tier: "TIER_1_EVERYDAY",
+    scopeId: scopeA,
+    prompt: "classify",
+  });
+  assert.equal(resultA.ok, true);
+  assert.equal(resultA.decision?.credentialId, credentialA.id);
+  assert.equal(resultA.content, `executed:${credentialA.id}`);
+
+  const resultB = await router.execute({
+    taskType: "classification",
+    requiredCapability: "text_generation",
+    tier: "TIER_1_EVERYDAY",
+    scopeId: scopeB,
+    prompt: "classify",
+  });
+  assert.equal(resultB.ok, true);
+  assert.equal(resultB.decision?.credentialId, credentialB.id);
+  assert.equal(resultB.content, `executed:${credentialB.id}`);
+  assert.deepEqual(invocations.map((item) => item.credentialId), [credentialA.id, credentialB.id]);
+  assert.equal(JSON.stringify(resultA.evidence).includes("encrypted-test-placeholder"), false);
+  assert.equal(JSON.stringify(resultB.evidence).includes("encrypted-test-placeholder"), false);
 });
 
 test("Sprint 11 router: bounded fallback handles transient, auth, language, and attempt limits", async () => {
@@ -408,9 +509,11 @@ test("Sprint 11 router: language guard supports target language and protected sh
   const providerId = await insertProvider(pool);
   const englishModel = `generated-english-${randomUUID()}`;
   const chineseModel = `generated-chinese-${randomUUID()}`;
+  const spanishModel = `generated-spanish-${randomUUID()}`;
+  const frenchModel = `generated-french-${randomUUID()}`;
   const shortModel = `generated-short-${randomUUID()}`;
 
-  for (const modelId of [englishModel, chineseModel, shortModel]) {
+  for (const modelId of [englishModel, chineseModel, spanishModel, frenchModel, shortModel]) {
     await insertRuntimeModel(pool, {
       providerId,
       modelId,
@@ -422,6 +525,12 @@ test("Sprint 11 router: language guard supports target language and protected sh
     text: {
       [englishModel]: "This answer is clearly written in English.",
       [chineseModel]: "这是完全中文的回答，应该满足中文目标。",
+      [spanishModel]: (request) => request.messages.some((message) => message.role === "system")
+        ? "This corrected answer is clearly written in English."
+        : "Esta respuesta esta claramente escrita en espanol para probar el idioma.",
+      [frenchModel]: (request) => request.messages.some((message) => message.role === "system")
+        ? "This corrected answer is clearly written in English."
+        : "Cette reponse est clairement ecrite en francais pour tester la langue.",
       [shortModel]: "Use `API_URL` at https://example.test.",
     },
   });
@@ -452,6 +561,76 @@ test("Sprint 11 router: language guard supports target language and protected sh
   });
   assert.equal(chinese.ok, true);
 
+  const spanishRejectedThenCorrected = await router.execute({
+    taskType: "language_generation",
+    preferredProviderId: providerId,
+    preferredModelId: spanishModel,
+    mode: "CUSTOM",
+    requiredCapability: "text_generation",
+    tier: "TIER_1_EVERYDAY",
+    targetLanguage: "en",
+    languagePolicy: { minimumTextCharacters: 4, minimumConfidence: 0.45, maxRetryAttempts: 1 },
+    prompt: "answer",
+  });
+  assert.equal(spanishRejectedThenCorrected.ok, true);
+  assert.equal(spanishRejectedThenCorrected.evidence.attempts[0].languageGuard?.outputLanguage, "es");
+
+  const frenchRejectedThenCorrected = await router.execute({
+    taskType: "language_generation",
+    preferredProviderId: providerId,
+    preferredModelId: frenchModel,
+    mode: "CUSTOM",
+    requiredCapability: "text_generation",
+    tier: "TIER_1_EVERYDAY",
+    targetLanguage: "en",
+    languagePolicy: { minimumTextCharacters: 4, minimumConfidence: 0.45, maxRetryAttempts: 1 },
+    prompt: "answer",
+  });
+  assert.equal(frenchRejectedThenCorrected.ok, true);
+  assert.equal(frenchRejectedThenCorrected.evidence.attempts[0].languageGuard?.outputLanguage, "fr");
+
+  const spanishTarget = await router.execute({
+    taskType: "language_generation",
+    preferredProviderId: providerId,
+    preferredModelId: spanishModel,
+    mode: "CUSTOM",
+    requiredCapability: "text_generation",
+    tier: "TIER_1_EVERYDAY",
+    targetLanguage: "es",
+    languagePolicy: { minimumTextCharacters: 4, minimumConfidence: 0.45 },
+    prompt: "answer",
+  });
+  assert.equal(spanishTarget.ok, true);
+
+  const frenchTarget = await router.execute({
+    taskType: "language_generation",
+    preferredProviderId: providerId,
+    preferredModelId: frenchModel,
+    mode: "CUSTOM",
+    requiredCapability: "text_generation",
+    tier: "TIER_1_EVERYDAY",
+    targetLanguage: "fr",
+    languagePolicy: { minimumTextCharacters: 4, minimumConfidence: 0.45 },
+    prompt: "answer",
+  });
+  assert.equal(frenchTarget.ok, true);
+
+  const noFallback = await router.execute({
+    taskType: "language_generation",
+    preferredProviderId: providerId,
+    preferredModelId: spanishModel,
+    mode: "CUSTOM",
+    requiredCapability: "text_generation",
+    tier: "TIER_1_EVERYDAY",
+    targetLanguage: "en",
+    languagePolicy: { minimumTextCharacters: 4, minimumConfidence: 0.45, maxRetryAttempts: 0, allowFallback: false },
+    prompt: "answer",
+    maxFallbackAttempts: 2,
+  });
+  assert.equal(noFallback.ok, false);
+  assert.equal(noFallback.status, "LANGUAGE_GUARD_FAILED");
+  assert.equal(noFallback.evidence.attempts.length, 1);
+
   const protectedShort = await router.execute({
     taskType: "language_generation",
     preferredProviderId: providerId,
@@ -469,15 +648,25 @@ test("Sprint 11 router: malformed structured output fails and eligible fallback 
   await runMigrations();
   const pool = getPool();
   const providerId = await insertProvider(pool);
-  const badModel = `generated-structured-bad-${randomUUID()}`;
+  const missingModel = `generated-structured-missing-${randomUUID()}`;
+  const primitiveModel = `generated-structured-primitive-${randomUUID()}`;
+  const arrayModel = `generated-structured-array-${randomUUID()}`;
+  const enumConstraintModel = `generated-structured-enum-${randomUUID()}`;
   const goodModel = `generated-structured-good-${randomUUID()}`;
 
-  await insertRuntimeModel(pool, {
-    providerId,
-    modelId: badModel,
-    capabilities: ["structured_output"],
-    validations: [{ capability: "structured_output", quality: 95, latencyMs: 50 }],
-  });
+  for (const [modelId, quality] of [
+    [missingModel, 99],
+    [primitiveModel, 98],
+    [arrayModel, 97],
+    [enumConstraintModel, 96],
+  ]) {
+    await insertRuntimeModel(pool, {
+      providerId,
+      modelId,
+      capabilities: ["structured_output"],
+      validations: [{ capability: "structured_output", quality, latencyMs: 50 }],
+    });
+  }
   await insertRuntimeModel(pool, {
     providerId,
     modelId: goodModel,
@@ -486,8 +675,11 @@ test("Sprint 11 router: malformed structured output fails and eligible fallback 
   });
   const router = routerFor(providerId, {
     structured: {
-      [badModel]: { wrong: "shape" },
-      [goodModel]: { status: "ok" },
+      [missingModel]: { status: "ok" },
+      [primitiveModel]: { status: "ok", profile: { name: 42, role: "member", tags: ["alpha"], score: 2 } },
+      [arrayModel]: { status: "ok", profile: { name: "Ada", role: "member", tags: ["alpha", 7], score: 2 } },
+      [enumConstraintModel]: { status: "ok", profile: { name: "Ada", role: "owner", tags: ["alpha"], score: 0 } },
+      [goodModel]: { status: "ok", profile: { name: "Ada", role: "member", tags: ["alpha"], score: 2 } },
     },
   });
 
@@ -496,12 +688,29 @@ test("Sprint 11 router: malformed structured output fails and eligible fallback 
     tier: "TIER_1_EVERYDAY",
     structuredOutput: {
       required: true,
-      schema: { type: "object", required: ["status"], properties: { status: { type: "string" } } },
+      schema: {
+        type: "object",
+        required: ["status", "profile"],
+        properties: {
+          status: { type: "string", enum: ["ok"] },
+          profile: {
+            type: "object",
+            required: ["name", "role", "tags", "score"],
+            properties: {
+              name: { type: "string", minLength: 2 },
+              role: { type: "string", enum: ["admin", "member"] },
+              tags: { type: "array", minItems: 1, items: { type: "string" } },
+              score: { type: "number", minimum: 1 },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
     },
     prompt: "extract",
-    maxFallbackAttempts: 1,
+    maxFallbackAttempts: 4,
   });
   assert.equal(result.ok, true);
-  assert.deepEqual(result.structuredData, { status: "ok" });
-  assert.equal(result.evidence.attempts[0].errorCode, "STRUCTURED_OUTPUT_INVALID");
+  assert.deepEqual(result.structuredData, { status: "ok", profile: { name: "Ada", role: "member", tags: ["alpha"], score: 2 } });
+  assert.equal(result.evidence.attempts.filter((attempt) => attempt.errorCode === "STRUCTURED_OUTPUT_INVALID").length, 4);
 });
