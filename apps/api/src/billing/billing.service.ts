@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "@xlrrank/database";
 import { subscriptions, usageMetering } from "@xlrrank/database/schema";
 
@@ -154,10 +154,12 @@ export class BillingService {
     if (!BILLING_METRIC_PATTERN.test(metric)) return 0;
     const db = getDb();
     const rows = await db
-      .select()
+      .select({
+        total: sql<number>`coalesce(sum(case when ${usageMetering.amount} > 0 then ${usageMetering.amount} else 0 end), 0)::int`,
+      })
       .from(usageMetering)
       .where(and(eq(usageMetering.userId, userId), eq(usageMetering.metric, metric)));
-    return rows.reduce((sum, r) => sum + Math.max(0, r.amount), 0);
+    return rows[0]?.total ?? 0;
   }
 }
 

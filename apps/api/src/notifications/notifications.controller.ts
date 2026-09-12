@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Controller,
   Get,
   HttpCode,
@@ -30,7 +31,13 @@ export class NotificationsController {
   ) {
     const opts: { unreadOnly?: boolean; limit?: number } = {};
     if (unreadOnly === "true") opts.unreadOnly = true;
-    if (limit) opts.limit = Number(limit);
+    if (limit !== undefined) {
+      const parsed = Number(limit);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+        throw new BadRequestException("limit must be an integer between 1 and 100.");
+      }
+      opts.limit = parsed;
+    }
     return {
       notifications: await this.notificationsService.list(auth.userId, opts),
     };

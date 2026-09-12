@@ -1,14 +1,7 @@
-import {
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-} from "@nestjs/common";
+import { ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
 import { and, desc, eq } from "drizzle-orm";
 import { getDb } from "@xlrrank/database";
-import {
-  supportMessages,
-  supportTickets,
-} from "@xlrrank/database/schema";
+import { supportMessages, supportTickets } from "@xlrrank/database/schema";
 
 const TICKET_STATUSES = [
   "OPEN",
@@ -69,28 +62,33 @@ export class SupportService {
     return { ticket };
   }
 
-  async listOwnTickets(userId: string) {
+  async listOwnTickets(userId: string, limit = 50) {
     const db = getDb();
+    const boundedLimit = Math.min(Math.max(1, limit), 100);
     const rows = await db
       .select()
       .from(supportTickets)
       .where(eq(supportTickets.userId, userId))
-      .orderBy(desc(supportTickets.createdAt));
+      .orderBy(desc(supportTickets.createdAt))
+      .limit(boundedLimit);
     return rows;
   }
 
-  async listAllTickets(status?: string) {
+  async listAllTickets(status?: string, limit = 50) {
     const db = getDb();
+    const boundedLimit = Math.min(Math.max(1, limit), 100);
     const rows = status
       ? await db
           .select()
           .from(supportTickets)
           .where(eq(supportTickets.status, status as never))
           .orderBy(desc(supportTickets.createdAt))
+          .limit(boundedLimit)
       : await db
           .select()
           .from(supportTickets)
-          .orderBy(desc(supportTickets.createdAt));
+          .orderBy(desc(supportTickets.createdAt))
+          .limit(boundedLimit);
     return rows.map((t) => this.sanitizeTicket(t));
   }
 
@@ -109,10 +107,7 @@ export class SupportService {
 
     const messageFilter = viewer.isSupport
       ? eq(supportMessages.ticketId, ticketId)
-      : and(
-          eq(supportMessages.ticketId, ticketId),
-          eq(supportMessages.isInternal, false),
-        );
+      : and(eq(supportMessages.ticketId, ticketId), eq(supportMessages.isInternal, false));
     const messages = await db
       .select()
       .from(supportMessages)
@@ -183,7 +178,7 @@ export class SupportService {
     return this.getTicket(ticketId, { id: "", isSupport: true });
   }
 
-  private sanitizeTicket(t: (typeof supportTickets.$inferSelect)) {
+  private sanitizeTicket(t: typeof supportTickets.$inferSelect) {
     return {
       id: t.id,
       category: t.category,

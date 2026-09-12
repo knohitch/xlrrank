@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { eq } from "drizzle-orm";
+import { and, eq, gte, sql } from "drizzle-orm";
 import { getDb } from "@xlrrank/database";
 import { aiUsage } from "@xlrrank/database/schema";
 import { createChildLogger } from "@xlrrank/observability";
@@ -73,21 +73,33 @@ export class AiCostService {
   async getDailyCost(userId: string): Promise<number> {
     const db = getDb();
     const today = utcDayStart();
-    const rows = await db.select().from(aiUsage).where(eq(aiUsage.userId, userId));
-    return rows
-      .filter((r) => r.createdAt >= today)
-      .reduce((sum, r) => sum + (r.costEstimate ?? 0), 0);
+    const rows = await db
+      .select({
+        totalCost: sql<number>`coalesce(sum(${aiUsage.costEstimate}), 0)::float`,
+      })
+      .from(aiUsage)
+      .where(and(eq(aiUsage.userId, userId), gte(aiUsage.createdAt, today)));
+    return rows[0]?.totalCost ?? 0;
   }
 
   async getUsageSummary(userId: string) {
     const db = getDb();
-    const rows = await db.select().from(aiUsage).where(eq(aiUsage.userId, userId));
+    const rows = await db
+      .select({
+        totalTokens: sql<number>`coalesce(sum(${aiUsage.totalTokens}), 0)::int`,
+        totalCost: sql<number>`coalesce(sum(${aiUsage.costEstimate}), 0)::float`,
+        totalRequests: sql<number>`count(*)::int`,
+        failedRequests: sql<number>`count(*) filter (where not ${aiUsage.success})::int`,
+      })
+      .from(aiUsage)
+      .where(eq(aiUsage.userId, userId));
 
-    const totalTokens = rows.reduce((s, r) => s + r.totalTokens, 0);
-    const totalCost = rows.reduce((s, r) => s + (r.costEstimate ?? 0), 0);
-    const totalRequests = rows.length;
-    const failedRequests = rows.filter((r) => !r.success).length;
-
-    return { totalTokens, totalCost, totalRequests, failedRequests };
+    const row = rows[0];
+    return {
+      totalTokens: row?.totalTokens ?? 0,
+      totalCost: row?.totalCost ?? 0,
+      totalRequests: row?.totalRequests ?? 0,
+      failedRequests: row?.failedRequests ?? 0,
+    };
   }
 }

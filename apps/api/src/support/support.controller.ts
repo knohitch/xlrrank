@@ -110,14 +110,26 @@ export class SupportController {
   }
 
   @Get("tickets")
-  async listTickets(@CurrentUser() auth: AuthContext, @Query("status") status?: string) {
+  async listTickets(
+    @CurrentUser() auth: AuthContext,
+    @Query("status") status?: string,
+    @Query("limit") limit?: string,
+  ) {
     if (status !== undefined && !STATUSES.includes(status as never)) {
       throw new BadRequestException("Invalid support ticket status filter.");
     }
-    if (isSupportRole(auth)) {
-      return { tickets: await this.supportService.listAllTickets(status) };
+    let boundedLimit = 50;
+    if (limit !== undefined) {
+      const parsed = Number(limit);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+        throw new BadRequestException("limit must be an integer between 1 and 100.");
+      }
+      boundedLimit = parsed;
     }
-    return { tickets: await this.supportService.listOwnTickets(auth.userId) };
+    if (isSupportRole(auth)) {
+      return { tickets: await this.supportService.listAllTickets(status, boundedLimit) };
+    }
+    return { tickets: await this.supportService.listOwnTickets(auth.userId, boundedLimit) };
   }
 
   @Get("tickets/:id")

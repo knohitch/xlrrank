@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { desc, eq, sql } from "drizzle-orm";
 import { getDb, getPool } from "@xlrrank/database";
 import { auditLogs, users, userRoles, roles } from "@xlrrank/database/schema";
-import { getRolesForUser } from "@xlrrank/database";
+import { getRolesForUser, getRolesForUsers } from "@xlrrank/database";
 import { ROLES, isAdminRole, type Role } from "@xlrrank/auth";
 import { encryptSecret, providerAppSecretAssociatedData } from "../common/encryption.js";
 
@@ -77,20 +77,19 @@ export class AdminService {
       [...params, pageSize, offset],
     );
 
-    const items: AdminUserSummary[] = [];
-    for (const u of dataRes.rows) {
-      const roles = await getRolesForUser(u.id);
-      items.push({
-        id: u.id,
-        email: u.email,
-        displayName: u.displayName,
-        status: u.status as string,
-        emailVerified: !!u.emailVerifiedAt,
-        roles,
-        createdAt: u.createdAt,
-        lastLoginAt: u.lastLoginAt,
-      });
-    }
+    const userIds = dataRes.rows.map((u: { id: string }) => u.id);
+    const rolesByUser = await getRolesForUsers(userIds);
+
+    const items: AdminUserSummary[] = dataRes.rows.map((u) => ({
+      id: u.id,
+      email: u.email,
+      displayName: u.displayName,
+      status: u.status as string,
+      emailVerified: !!u.emailVerifiedAt,
+      roles: rolesByUser.get(u.id) ?? [],
+      createdAt: u.createdAt,
+      lastLoginAt: u.lastLoginAt,
+    }));
 
     return { items, total, page, pageSize };
   }

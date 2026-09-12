@@ -530,7 +530,9 @@ export async function processSocialConnectionSync(job: Job): Promise<void> {
     let cursor = lastDurableCursor;
     let hasMore = true;
     let includeProfile = true;
-    while (hasMore) {
+    let pagesProcessed = 0;
+    const maxPages = getEnv().SOCIAL_SYNC_MAX_PAGES_PER_RUN;
+    while (hasMore && pagesProcessed < maxPages) {
       const current = await cancelIfConnectionStopped({
         connectionId: connection.id,
         jobId: durableJob.id,
@@ -595,6 +597,7 @@ export async function processSocialConnectionSync(job: Job): Promise<void> {
       cursor = nextCursor;
       hasMore = contentPage.cursor.hasMore;
       includeProfile = false;
+      pagesProcessed++;
 
       if (
         process.env.NODE_ENV === "test" &&
@@ -609,6 +612,19 @@ export async function processSocialConnectionSync(job: Job): Promise<void> {
       ) {
         process.exit(76);
       }
+    }
+
+    if (hasMore) {
+      logger.info(
+        {
+          jobId: durableJob.id,
+          ingestionRunId: runId,
+          connectionId: connection.id,
+          pagesProcessed,
+          cursor: lastDurableCursor,
+        },
+        "Social sync reached maximum pages per run; yielding batch at durable cursor",
+      );
     }
 
     await completeSocialIngestionRun({ runId, cursorAfter: lastDurableCursor });

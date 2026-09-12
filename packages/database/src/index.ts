@@ -4,6 +4,7 @@ export {
   seedRbac,
   assignRole,
   getRolesForUser,
+  getRolesForUsers,
   getPermissionsForUser,
   userHasPermission,
 } from "./seed-rbac.js";
