@@ -31,6 +31,12 @@ test("production env: valid with all required secrets", async () => {
     SESSION_SIGNING_SECRET: "a".repeat(32),
     ENCRYPTION_MASTER_KEY: "a".repeat(32),
     AI_ROUTING_POLICY_JSON: "{}",
+    NEXT_PUBLIC_APP_URL: "https://app.example.com",
+    API_PUBLIC_URL: "https://api.example.com",
+    DATABASE_URL: "postgres://xlrrank@example-db:5432/xlrrank",
+    REDIS_URL: "redis://example-redis:6379",
+    QUEUE_URL: "redis://example-redis:6379",
+    CORS_ORIGIN: "https://app.example.com",
   });
   assert.equal(result.success, true, "Should accept production with all required secrets");
 });

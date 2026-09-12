@@ -65,11 +65,26 @@ const baseEnvSchema = z.object({
   PROVIDER_RETENTION_SWEEP_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
   PROVIDER_RECONCILIATION_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
   PROVIDER_RECONCILIATION_SWEEP_TIMEOUT_MS: z.coerce.number().int().positive().default(600_000),
-  PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: z.coerce.number().int().positive().max(100).default(5),
+  PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(100)
+    .default(5),
   AI_MODEL_DISCOVERY_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
-  AI_MODEL_DISCOVERY_SWEEP_TIMEOUT_MS: z.coerce.number().int().positive().max(900_000).default(300_000),
+  AI_MODEL_DISCOVERY_SWEEP_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(900_000)
+    .default(300_000),
   AI_MODEL_DISCOVERY_MAX_PROVIDERS_PER_RUN: z.coerce.number().int().positive().max(50).default(10),
-  AI_MODEL_DISCOVERY_MAX_MODELS_PER_PROVIDER: z.coerce.number().int().positive().max(200).default(50),
+  AI_MODEL_DISCOVERY_MAX_MODELS_PER_PROVIDER: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(200)
+    .default(50),
   AI_MODEL_DISCOVERY_MISSED_THRESHOLD: z.coerce.number().int().positive().max(10).default(2),
   AI_MODEL_PROBE_MAX_MODELS_PER_RUN: z.coerce.number().int().nonnegative().max(50).default(10),
   AI_MODEL_PROBE_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(10_000),
@@ -84,8 +99,28 @@ const baseEnvSchema = z.object({
   CORS_ORIGIN: z.string().default("http://localhost:3000"),
 });
 
+const productionRequiredOverrides = new Map<string, string>([
+  ["NEXT_PUBLIC_APP_URL", "http://localhost:3000"],
+  ["API_PUBLIC_URL", "http://localhost:4000"],
+  ["DATABASE_URL", "postgres://xlrrank:xlrrank@localhost:5432/xlrrank"],
+  ["REDIS_URL", "redis://localhost:6379"],
+  ["QUEUE_URL", "redis://localhost:6379"],
+  ["CORS_ORIGIN", "http://localhost:3000"],
+]);
+
 export const envSchema = baseEnvSchema.superRefine((env, ctx) => {
   if (env.NODE_ENV === "production") {
+    for (const [key, developmentDefault] of productionRequiredOverrides) {
+      const value = env[key as keyof typeof env];
+      if (value === developmentDefault) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} must be explicitly configured for production`,
+        });
+      }
+    }
+
     if (!env.SESSION_SIGNING_SECRET || env.SESSION_SIGNING_SECRET.length < 32) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

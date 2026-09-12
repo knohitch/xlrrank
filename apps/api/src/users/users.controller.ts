@@ -1,5 +1,5 @@
 import { Body, Controller, Get, Inject, Patch, UseGuards } from "@nestjs/common";
-import { IsOptional, IsString, IsUrl, MaxLength, MinLength } from "class-validator";
+import { IsOptional, IsString, MaxLength, MinLength } from "class-validator";
 import { SessionAuthGuard } from "../common/guards/session-auth.guard.js";
 import { CurrentUser } from "../common/decorators/current-user.decorator.js";
 import { RequirePermissions } from "../common/decorators/permissions.decorator.js";
@@ -16,7 +16,6 @@ export class UpdateProfileDto {
 
   @IsOptional()
   @IsString()
-  @IsUrl({ require_tld: false })
   @MaxLength(500)
   avatarUrl?: string | null;
 }

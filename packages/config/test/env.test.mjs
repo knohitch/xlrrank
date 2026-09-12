@@ -34,8 +34,27 @@ test("production requires signing and encryption secrets", async () => {
     SESSION_SIGNING_SECRET: "s".repeat(32),
     ENCRYPTION_MASTER_KEY: "e".repeat(32),
     AI_ROUTING_POLICY_JSON: "{}",
+    NEXT_PUBLIC_APP_URL: "https://app.example.com",
+    API_PUBLIC_URL: "https://api.example.com",
+    DATABASE_URL: "postgres://xlrrank@example-db:5432/xlrrank",
+    REDIS_URL: "redis://example-redis:6379",
+    QUEUE_URL: "redis://example-redis:6379",
+    CORS_ORIGIN: "https://app.example.com",
   });
   assert.equal(valid.success, true);
+});
+
+test("production rejects implicit development endpoint defaults", async () => {
+  const { envSchema } = await import("../dist/env.js");
+  const result = envSchema.safeParse({
+    NODE_ENV: "production",
+    SESSION_SIGNING_SECRET: "s".repeat(32),
+    ENCRYPTION_MASTER_KEY: "e".repeat(32),
+    AI_ROUTING_POLICY_JSON: "{}",
+  });
+  assert.equal(result.success, false);
+  assert.ok(String(result.error.flatten().fieldErrors.NEXT_PUBLIC_APP_URL).includes("production"));
+  assert.ok(String(result.error.flatten().fieldErrors.DATABASE_URL).includes("production"));
 });
 
 test("production requires configured AI routing policy", async () => {
@@ -83,10 +102,14 @@ test("env schema validates PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN", async (
   const invalidZero = envSchema.safeParse({ PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: "0" });
   assert.equal(invalidZero.success, false);
 
-  const invalidNegative = envSchema.safeParse({ PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: "-3" });
+  const invalidNegative = envSchema.safeParse({
+    PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: "-3",
+  });
   assert.equal(invalidNegative.success, false);
 
-  const invalidTooLarge = envSchema.safeParse({ PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: "101" });
+  const invalidTooLarge = envSchema.safeParse({
+    PROVIDER_RECONCILIATION_MAX_BATCHES_PER_RUN: "101",
+  });
   assert.equal(invalidTooLarge.success, false);
 });
 
@@ -98,8 +121,14 @@ test("env schema validates bounded AI model discovery and probe limits", async (
   assert.equal(defaults.AI_MODEL_DISCOVERY_MISSED_THRESHOLD, 2);
   assert.equal(defaults.AI_MODEL_PROBE_MAX_MODELS_PER_RUN, 10);
 
-  assert.equal(envSchema.safeParse({ AI_MODEL_DISCOVERY_MAX_PROVIDERS_PER_RUN: "51" }).success, false);
-  assert.equal(envSchema.safeParse({ AI_MODEL_DISCOVERY_MAX_MODELS_PER_PROVIDER: "201" }).success, false);
+  assert.equal(
+    envSchema.safeParse({ AI_MODEL_DISCOVERY_MAX_PROVIDERS_PER_RUN: "51" }).success,
+    false,
+  );
+  assert.equal(
+    envSchema.safeParse({ AI_MODEL_DISCOVERY_MAX_MODELS_PER_PROVIDER: "201" }).success,
+    false,
+  );
   assert.equal(envSchema.safeParse({ AI_MODEL_DISCOVERY_MISSED_THRESHOLD: "11" }).success, false);
   assert.equal(envSchema.safeParse({ AI_MODEL_PROBE_MAX_MODELS_PER_RUN: "51" }).success, false);
   assert.equal(envSchema.safeParse({ AI_MODEL_PROBE_TIMEOUT_MS: "60001" }).success, false);

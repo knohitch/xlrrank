@@ -8,6 +8,7 @@ import { getEnv } from "@xlrrank/config";
 import { createChildLogger } from "@xlrrank/observability";
 import { AppModule } from "./app.module.js";
 import { CsrfGuard } from "./common/guards/csrf.guard.js";
+import { safeLoggableError } from "./common/error-redaction.js";
 
 async function bootstrap() {
   const envFile = fileURLToPath(new URL("../../../.env", import.meta.url));
@@ -50,16 +51,16 @@ async function bootstrap() {
 }
 
 bootstrap().catch((err) => {
-  console.error("Failed to start API:", err);
+  console.error("Failed to start API:", safeLoggableError(err));
   process.exit(1);
 });
 
 process.on("uncaughtException", (err) => {
-  console.error("Uncaught API exception:", err);
+  console.error("Uncaught API exception:", safeLoggableError(err));
   process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled API rejection:", reason);
+  console.error("Unhandled API rejection:", safeLoggableError(reason));
   process.exit(1);
 });
