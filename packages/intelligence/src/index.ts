@@ -23,7 +23,7 @@ export {
 export type { DiscoveryCandidate, DiscoveryResult } from "./discovery.js";
 export { scoreDiscoveryCandidate, rankCandidates } from "./discovery.js";
 
-export type { RelationshipEvent, RelationshipStage, RelationshipStrength } from "./relationships.js";
+export type { RelationshipEvent, RelationshipPolicy, RelationshipStage, RelationshipStrength } from "./relationships.js";
 export {
   DEFAULT_PIPELINE,
   calculateRelationshipStrength,

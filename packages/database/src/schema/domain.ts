@@ -792,6 +792,140 @@ export const socialDnaPolicies = pgTable(
   ],
 );
 
+export const discoveryPolicies = pgTable(
+  "discovery_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    policyKey: text("policy_key").notNull(),
+    version: text("version").notNull(),
+    config: jsonb("config").notNull(),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("discovery_policies_key_version_unique").on(t.policyKey, t.version),
+    index("discovery_policies_active_idx").on(t.policyKey, t.active),
+    uniqueIndex("discovery_policies_one_active_unique")
+      .on(t.policyKey)
+      .where(sql`${t.active} = true`),
+  ],
+);
+
+export const relationshipIntelligencePolicies = pgTable(
+  "relationship_intelligence_policies",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    policyKey: text("policy_key").notNull(),
+    version: text("version").notNull(),
+    config: jsonb("config").notNull(),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("relationship_intelligence_policies_key_version_unique").on(t.policyKey, t.version),
+    index("relationship_intelligence_policies_active_idx").on(t.policyKey, t.active),
+    uniqueIndex("relationship_intelligence_policies_one_active_unique")
+      .on(t.policyKey)
+      .where(sql`${t.active} = true`),
+  ],
+);
+
+export const relationshipIntelligenceSnapshots = pgTable(
+  "relationship_intelligence_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    fromPersonId: uuid("from_person_id")
+      .notNull()
+      .references(() => people.id, { onDelete: "cascade" }),
+    toPersonId: uuid("to_person_id")
+      .notNull()
+      .references(() => people.id, { onDelete: "cascade" }),
+    score: doublePrecision("score").notNull().default(0),
+    strengthLabel: text("strength_label").notNull(),
+    directionalEvidence: jsonb("directional_evidence").notNull().default([]),
+    evidence: jsonb("evidence").notNull().default([]),
+    policyKey: text("policy_key").notNull(),
+    policyVersion: text("policy_version").notNull(),
+    algorithmVersion: text("algorithm_version").notNull(),
+    evaluationAt: timestamp("evaluation_at", { withTimezone: true }).notNull(),
+    sourceFingerprint: text("source_fingerprint").notNull(),
+    isCurrent: boolean("is_current").notNull().default(true),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("relationship_intelligence_fingerprint_unique").on(
+      t.scopeId,
+      t.fromPersonId,
+      t.toPersonId,
+      t.policyKey,
+      t.policyVersion,
+      t.algorithmVersion,
+      t.sourceFingerprint,
+    ),
+    index("relationship_intelligence_current_idx").on(t.scopeId, t.fromPersonId, t.toPersonId, t.isCurrent),
+  ],
+);
+
+export const discoverySnapshots = pgTable(
+  "discovery_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => dataScopes.id, { onDelete: "cascade" }),
+    subjectPersonId: uuid("subject_person_id").references(() => people.id, { onDelete: "cascade" }),
+    policyKey: text("policy_key").notNull(),
+    policyVersion: text("policy_version").notNull(),
+    relationshipPolicyKey: text("relationship_policy_key"),
+    relationshipPolicyVersion: text("relationship_policy_version"),
+    algorithmVersion: text("algorithm_version").notNull(),
+    query: jsonb("query").notNull().default({}),
+    evaluationAt: timestamp("evaluation_at", { withTimezone: true }).notNull(),
+    sourceFingerprint: text("source_fingerprint").notNull(),
+    isCurrent: boolean("is_current").notNull().default(true),
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("discovery_snapshots_fingerprint_unique").on(
+      t.scopeId,
+      t.policyKey,
+      t.policyVersion,
+      t.algorithmVersion,
+      t.sourceFingerprint,
+    ),
+    index("discovery_snapshots_current_idx").on(t.scopeId, t.subjectPersonId, t.isCurrent),
+  ],
+);
+
+export const discoveryResults = pgTable(
+  "discovery_results",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    snapshotId: uuid("snapshot_id")
+      .notNull()
+      .references(() => discoverySnapshots.id, { onDelete: "cascade" }),
+    targetPersonId: uuid("target_person_id")
+      .notNull()
+      .references(() => people.id, { onDelete: "cascade" }),
+    rank: integer("rank").notNull(),
+    score: doublePrecision("score").notNull().default(0),
+    components: jsonb("components").notNull().default([]),
+    evidence: jsonb("evidence").notNull().default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("discovery_results_snapshot_target_unique").on(t.snapshotId, t.targetPersonId),
+    index("discovery_results_snapshot_rank_idx").on(t.snapshotId, t.rank),
+  ],
+);
+
 export const identityResolutionCandidates = pgTable(
   "identity_resolution_candidates",
   {

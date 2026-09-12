@@ -12,6 +12,7 @@ import {
   type SocialDnaProfile,
 } from "@xlrrank/intelligence";
 import { getPool } from "../client.js";
+import { invalidateIntelligenceForPeople } from "./discovery-relationship.js";
 
 type Executor = Pick<Pool | PoolClient, "query">;
 
@@ -598,6 +599,7 @@ async function invalidateCurrentSocialDnaForPeople(executor: Executor, scopeId: 
     `,
     [scopeId, uniquePersonIds],
   );
+  await invalidateIntelligenceForPeople(executor, scopeId, uniquePersonIds);
 }
 
 async function assertCandidateAccountsSharePerson(

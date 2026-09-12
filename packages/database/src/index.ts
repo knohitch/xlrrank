@@ -111,6 +111,23 @@ export type {
   DurableAiModelRegistryRefreshRequest,
 } from "./ai/model-registry-jobs.js";
 export {
+  invalidateIntelligenceForPeople,
+  persistDiscoveryPolicy,
+  persistRelationshipIntelligencePolicy,
+  recomputeDiscoverySnapshot,
+  recomputeRelationshipIntelligence,
+} from "./intelligence/discovery-relationship.js";
+export type {
+  DiscoveryPolicy,
+  DiscoverySnapshot,
+  PersistDiscoveryPolicyInput,
+  PersistRelationshipIntelligencePolicyInput,
+  RecomputeDiscoveryInput,
+  RecomputeRelationshipInput,
+  RelationshipIntelligencePolicy,
+  RelationshipSnapshot,
+} from "./intelligence/discovery-relationship.js";
+export {
   linkIdentityCandidate,
   persistIdentityResolutionPolicy,
   persistSocialDnaPolicy,
