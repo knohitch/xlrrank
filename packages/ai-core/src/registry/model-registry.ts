@@ -1,11 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getEnv } from "@xlrrank/config";
 import { getPool } from "@xlrrank/database";
-import {
-  aiProviderCredentialAssociatedData,
-  decryptSecret,
-  encryptSecret,
-} from "@xlrrank/shared";
+import { aiProviderCredentialAssociatedData, decryptSecret, encryptSecret } from "@xlrrank/shared";
 import type { AiCapability } from "../capabilities.js";
 import { AnthropicProvider } from "../providers/anthropic-provider.js";
 import { BaseAiProvider } from "../providers/base.js";
@@ -152,6 +148,7 @@ export interface RoutingModelCandidate extends ModelRegistryEntry {
 export interface RuntimeProviderRequest {
   providerId: string;
   credentialId?: string | null;
+  scopeId?: string | null;
 }
 
 interface RuntimeContext {
@@ -184,11 +181,14 @@ function configCapabilities(config: Record<string, unknown> | null): AiCapabilit
     "embeddings",
     "streaming",
   ]);
-  return raw.filter((item): item is AiCapability => typeof item === "string" && allowed.has(item as AiCapability));
+  return raw.filter(
+    (item): item is AiCapability => typeof item === "string" && allowed.has(item as AiCapability),
+  );
 }
 
 function defaultProbeCapabilities(protocol: string): AiCapability[] {
-  if (protocol === "anthropic") return ["text_generation", "structured_output", "reasoning", "vision"];
+  if (protocol === "anthropic")
+    return ["text_generation", "structured_output", "reasoning", "vision"];
   if (protocol === "ollama") return ["text_generation", "embeddings"];
   return ["text_generation", "structured_output", "embeddings"];
 }
@@ -214,13 +214,51 @@ function parseRoutingValidations(value: unknown): RoutingCapabilityValidation[] 
     if (!item || typeof item !== "object") return [];
     const record = item as Record<string, unknown>;
     if (typeof record.capability !== "string") return [];
-    return [{
-      capability: record.capability as AiCapability,
-      quality: numberOrNull(record.quality as string | number | null | undefined),
-      latencyMs: numberOrNull(record.latencyMs as string | number | null | undefined),
-      checkedAt: dateIso(record.checkedAt as string | Date | null | undefined),
-    }];
+    return [
+      {
+        capability: record.capability as AiCapability,
+        quality: numberOrNull(record.quality as string | number | null | undefined),
+        latencyMs: numberOrNull(record.latencyMs as string | number | null | undefined),
+        checkedAt: dateIso(record.checkedAt as string | Date | null | undefined),
+      },
+    ];
   });
+}
+
+export function validateCredentialScope(input: CreateAiProviderCredentialInput): {
+  scopeKind: "SYSTEM" | "USER" | "ORGANIZATION";
+  scopeId: string | null;
+  label: string;
+  apiKey: string;
+} {
+  const scopeKind = input.scopeKind ?? "SYSTEM";
+  if (scopeKind !== "SYSTEM" && scopeKind !== "USER" && scopeKind !== "ORGANIZATION") {
+    throw new Error("Unsupported AI provider credential scope");
+  }
+  const scopeId = input.scopeId?.trim() || null;
+  if (scopeKind === "SYSTEM" && scopeId) {
+    throw new Error("System AI provider credentials must not have a tenant scope");
+  }
+  if (scopeKind !== "SYSTEM" && !scopeId) {
+    throw new Error("Tenant-scoped AI provider credentials require a scope id");
+  }
+  const apiKey = input.apiKey.trim();
+  if (apiKey.length < 1 || apiKey.length > 8_192) {
+    throw new Error("AI provider credential secret is outside allowed bounds");
+  }
+  const label = (input.label ?? "default").trim();
+  if (label.length < 1 || label.length > 120) {
+    throw new Error("AI provider credential label is outside allowed bounds");
+  }
+  return { scopeKind, scopeId, label, apiKey };
+}
+
+export function credentialMayBeUsedForScope(
+  credential: Pick<CredentialRow, "scope_kind" | "scope_id">,
+  scopeId: string | null | undefined,
+): boolean {
+  if (credential.scope_kind === "SYSTEM") return true;
+  return Boolean(scopeId && credential.scope_id === scopeId);
 }
 
 export class ModelRegistryService {
@@ -241,10 +279,9 @@ export class ModelRegistryService {
 
   async createCredential(input: CreateAiProviderCredentialInput): Promise<AiProviderCredentialDto> {
     const id = randomUUID();
-    const scopeKind = input.scopeKind ?? "SYSTEM";
-    const scopeId = input.scopeId ?? null;
+    const { apiKey, label, scopeKind, scopeId } = validateCredentialScope(input);
     const encrypted = encryptSecret(
-      input.apiKey,
+      apiKey,
       undefined,
       aiProviderCredentialAssociatedData({
         credentialId: id,
@@ -260,7 +297,7 @@ export class ModelRegistryService {
       VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING id, provider_id, scope_kind, scope_id, label, credentials_encrypted
       `,
-      [id, input.providerId, scopeKind, scopeId, input.label ?? "default", encrypted],
+      [id, input.providerId, scopeKind, scopeId, label, encrypted],
     );
     const row = result.rows[0];
     if (!row) throw new Error("AI provider credential was not created");
@@ -289,7 +326,8 @@ export class ModelRegistryService {
         const ctx = this.resolveRuntime(provider, credential);
         runtimes.push(
           await this.refreshRuntime(ctx, {
-            maxModelsPerProvider: input.maxModelsPerProvider ?? env.AI_MODEL_DISCOVERY_MAX_MODELS_PER_PROVIDER,
+            maxModelsPerProvider:
+              input.maxModelsPerProvider ?? env.AI_MODEL_DISCOVERY_MAX_MODELS_PER_PROVIDER,
             maxProbeModels: input.maxProbeModels ?? env.AI_MODEL_PROBE_MAX_MODELS_PER_RUN,
             probeTimeoutMs: env.AI_MODEL_PROBE_TIMEOUT_MS,
           }),
@@ -480,7 +518,10 @@ export class ModelRegistryService {
     return row ? this.rowToEntry(row) : undefined;
   }
 
-  async list(options?: { lifecycleStage?: ModelLifecycleStage; providerId?: string }): Promise<ModelRegistryEntry[]> {
+  async list(options?: {
+    lifecycleStage?: ModelLifecycleStage;
+    providerId?: string;
+  }): Promise<ModelRegistryEntry[]> {
     const params: unknown[] = [];
     const clauses: string[] = [];
     if (options?.providerId) {
@@ -516,11 +557,17 @@ export class ModelRegistryService {
     const credential = input.credentialId
       ? await this.loadCredential(input.credentialId, provider.id)
       : undefined;
+    if (credential && !credentialMayBeUsedForScope(credential, input.scopeId)) {
+      throw new Error("AI provider credential is unavailable for this scope");
+    }
     const ctx = this.resolveRuntime(provider, credential);
     return this.createProbeProvider(ctx);
   }
 
-  private async loadProviders(providerId: string | undefined, limit: number): Promise<ProviderRow[]> {
+  private async loadProviders(
+    providerId: string | undefined,
+    limit: number,
+  ): Promise<ProviderRow[]> {
     if (providerId) {
       return (
         await this.db.query<ProviderRow>(
@@ -605,7 +652,10 @@ export class ModelRegistryService {
         ok: false,
         health: "CONFIGURATION_MISSING",
         retryable: false,
-        safeError: { code: "ADAPTER_UNCONFIGURED", message: "Provider protocol adapter is not configured" },
+        safeError: {
+          code: "ADAPTER_UNCONFIGURED",
+          message: "Provider protocol adapter is not configured",
+        },
       };
       await this.recordDiscoveryFailure(ctx, failure);
       return this.runtimeResult(ctx, failure, 0, 0);
@@ -634,7 +684,10 @@ export class ModelRegistryService {
       return this.runtimeResult(ctx, discovery, 0, 0);
     }
 
-    const persisted = await this.persistDiscovery(ctx, discovery.models.slice(0, options.maxModelsPerProvider));
+    const persisted = await this.persistDiscovery(
+      ctx,
+      discovery.models.slice(0, options.maxModelsPerProvider),
+    );
     const provider = this.createProbeProvider(ctx);
     const probeCandidates = persisted
       .filter((candidate) => candidate.probeCapabilities.length > 0 && candidate.needsProbe)
@@ -671,7 +724,10 @@ export class ModelRegistryService {
     };
   }
 
-  private async recordDiscoveryFailure(ctx: RuntimeContext, failure: DiscoveryFailure): Promise<void> {
+  private async recordDiscoveryFailure(
+    ctx: RuntimeContext,
+    failure: DiscoveryFailure,
+  ): Promise<void> {
     if (ctx.credential) {
       await this.db.query(
         `
@@ -718,7 +774,10 @@ export class ModelRegistryService {
             updated_at = now()
         WHERE id = $1
         `,
-        [ctx.credential.id, JSON.stringify({ status: "HEALTHY", checkedAt: new Date().toISOString() })],
+        [
+          ctx.credential.id,
+          JSON.stringify({ status: "HEALTHY", checkedAt: new Date().toISOString() }),
+        ],
       );
       await this.recomputeProviderHealth(ctx.provider.id);
       return;
@@ -740,21 +799,35 @@ export class ModelRegistryService {
   private async persistDiscovery(
     ctx: RuntimeContext,
     models: DiscoveredModel[],
-  ): Promise<Array<{ modelUuid: string; providerModelId: string; probeCapabilities: AiCapability[]; needsProbe: boolean }>> {
+  ): Promise<
+    Array<{
+      modelUuid: string;
+      providerModelId: string;
+      probeCapabilities: AiCapability[];
+      needsProbe: boolean;
+    }>
+  > {
     const client = await this.transactionClient();
     await client.query("BEGIN");
     try {
-      const persisted: Array<{ modelUuid: string; providerModelId: string; probeCapabilities: AiCapability[]; needsProbe: boolean }> = [];
+      const persisted: Array<{
+        modelUuid: string;
+        providerModelId: string;
+        probeCapabilities: AiCapability[];
+        needsProbe: boolean;
+      }> = [];
       for (const model of models) {
-        const existing = await client.query<Pick<ModelRow, "id" | "version" | "fingerprint" | "lifecycle_stage">>(
+        const existing = await client.query<
+          Pick<ModelRow, "id" | "version" | "fingerprint" | "lifecycle_stage">
+        >(
           "SELECT id, version, fingerprint, lifecycle_stage FROM ai_models WHERE provider_id = $1 AND model_id = $2",
           [ctx.provider.id, model.providerModelId],
         );
         const prior = existing.rows[0];
         const materialChange = Boolean(
           prior &&
-            ((model.version !== undefined && model.version !== prior.version) ||
-              (model.fingerprint !== undefined && model.fingerprint !== prior.fingerprint)),
+          ((model.version !== undefined && model.version !== prior.version) ||
+            (model.fingerprint !== undefined && model.fingerprint !== prior.fingerprint)),
         );
         const lifecycleStage: ModelLifecycleStage = prior
           ? materialChange
@@ -804,7 +877,9 @@ export class ModelRegistryService {
         const modelUuid = upsert.rows[0]?.id;
         if (!modelUuid) throw new Error("AI model upsert failed");
         if (materialChange) {
-          await client.query("DELETE FROM ai_model_capability_validations WHERE model_id = $1", [modelUuid]);
+          await client.query("DELETE FROM ai_model_capability_validations WHERE model_id = $1", [
+            modelUuid,
+          ]);
         }
         await client.query(
           `
@@ -844,7 +919,11 @@ export class ModelRegistryService {
             prior.lifecycle_stage === "QUARANTINED",
         });
       }
-      await this.markMissingModelsTx(client, ctx, persisted.map((item) => item.modelUuid));
+      await this.markMissingModelsTx(
+        client,
+        ctx,
+        persisted.map((item) => item.modelUuid),
+      );
       await client.query("COMMIT");
       return persisted;
     } catch (err) {
@@ -955,10 +1034,7 @@ export class ModelRegistryService {
   ): Promise<void> {
     const threshold = getEnv().AI_MODEL_DISCOVERY_MISSED_THRESHOLD;
     const params: unknown[] = [ctx.provider.id, ctx.runtimeKey];
-    const seenClause =
-      seenModelUuids.length > 0
-        ? `AND ama.model_id <> ALL($3::uuid[])`
-        : "";
+    const seenClause = seenModelUuids.length > 0 ? `AND ama.model_id <> ALL($3::uuid[])` : "";
     if (seenModelUuids.length > 0) params.push(seenModelUuids);
     const missing = await client.query<{ model_id: string; metadata: unknown }>(
       `
@@ -972,14 +1048,15 @@ export class ModelRegistryService {
       params,
     );
     for (const row of missing.rows) {
-      const metadata = row.metadata && typeof row.metadata === "object"
-        ? (row.metadata as Record<string, unknown>)
-        : {};
-      const discovery = metadata.discovery && typeof metadata.discovery === "object"
-        ? (metadata.discovery as Record<string, unknown>)
-        : {};
-      const missedCount =
-        typeof discovery.missedCount === "number" ? discovery.missedCount + 1 : 1;
+      const metadata =
+        row.metadata && typeof row.metadata === "object"
+          ? (row.metadata as Record<string, unknown>)
+          : {};
+      const discovery =
+        metadata.discovery && typeof metadata.discovery === "object"
+          ? (metadata.discovery as Record<string, unknown>)
+          : {};
+      const missedCount = typeof discovery.missedCount === "number" ? discovery.missedCount + 1 : 1;
       const updatedMetadata = {
         ...metadata,
         discovery: {
@@ -1074,7 +1151,12 @@ export class ModelRegistryService {
     if (total === 0) return;
     const healthy = aggregate.rows[0]?.healthy ?? 0;
     const unhealthy = aggregate.rows[0]?.unhealthy ?? 0;
-    const status = healthy > 0 && unhealthy > 0 ? "DEGRADED" : healthy > 0 ? "HEALTHY" : "TEMPORARILY_UNAVAILABLE";
+    const status =
+      healthy > 0 && unhealthy > 0
+        ? "DEGRADED"
+        : healthy > 0
+          ? "HEALTHY"
+          : "TEMPORARILY_UNAVAILABLE";
     await this.db.query(
       `
       UPDATE ai_providers
@@ -1105,7 +1187,11 @@ export class ModelRegistryService {
     return this.db.connect();
   }
 
-  private async setLifecycle(providerId: string, modelId: string, stage: ModelLifecycleStage): Promise<void> {
+  private async setLifecycle(
+    providerId: string,
+    modelId: string,
+    stage: ModelLifecycleStage,
+  ): Promise<void> {
     await this.db.query(
       "UPDATE ai_models SET lifecycle_stage = $3, updated_at = now() WHERE provider_id = $1 AND model_id = $2",
       [providerId, modelId, stage],

@@ -39,7 +39,12 @@ export type {
   ProviderHealthCheck,
 } from "./providers/types.js";
 
-export { ModelRegistryService, modelRegistry } from "./registry/model-registry.js";
+export {
+  ModelRegistryService,
+  credentialMayBeUsedForScope,
+  modelRegistry,
+  validateCredentialScope,
+} from "./registry/model-registry.js";
 export type {
   AiProviderCredentialDto,
   AvailableModelQuery,
@@ -103,10 +108,7 @@ export {
   resolveAiExecutionLimits,
   validateAiExecutionLimits,
 } from "./execution-governance.js";
-export type {
-  AiExecutionLimits,
-  AiUsageAccounting,
-} from "./execution-governance.js";
+export type { AiExecutionLimits, AiUsageAccounting } from "./execution-governance.js";
 
 export {
   languageGuard,

@@ -85,6 +85,17 @@ export function maskSecret(value: string): string {
   return value.slice(0, 4) + "****" + value.slice(-4);
 }
 
+export function redactSensitiveText(value: string): string {
+  return value
+    .replace(/\bauthorization=Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Authorization=[REDACTED]")
+    .replace(
+      /\b(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization)=([^&\s]+)/gi,
+      "$1=[REDACTED]",
+    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
+    .replace(/\b(sk-[A-Za-z0-9_-]{12,})\b/g, "[REDACTED]");
+}
+
 export function redactSensitive(obj: Record<string, unknown>): Record<string, unknown> {
   const sensitiveKeys = new Set([
     "password",
@@ -107,6 +118,8 @@ export function redactSensitive(obj: Record<string, unknown>): Record<string, un
       result[key] = "[REDACTED]";
     } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
       result[key] = redactSensitive(value as Record<string, unknown>);
+    } else if (typeof value === "string") {
+      result[key] = redactSensitiveText(value);
     } else {
       result[key] = value;
     }

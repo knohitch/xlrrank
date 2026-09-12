@@ -7,5 +7,6 @@ export {
   providerAuthorizationCleanupAssociatedData,
   providerAppSecretAssociatedData,
   redactSensitive,
+  redactSensitiveText,
   socialCredentialAssociatedData,
 } from "@xlrrank/shared";
