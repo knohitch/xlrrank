@@ -4,45 +4,45 @@ Tracking completion of each prompt from the Build Prompt Pack.
 
 **Audit Status Layer**: IMPLEMENTED = code exists. VERIFIED = tested and proven. PRODUCTION READY = verified + deployed + monitored.
 
-| Prompt | Title                                     | Implementation | Verification                                                       | Production Ready |
-| ------ | ----------------------------------------- | -------------- | ------------------------------------------------------------------ | ---------------- |
-| 0      | Project Constitution                      | DONE           | VERIFIED                                                           | YES              |
-| 1      | Foundation, Monorepo and Infrastructure   | DONE           | VERIFIED (Docker Compose + API/web/worker images)                  | PARTIAL          |
-| 2      | Complete Authentication and Authorization | DONE           | VERIFIED (Application E2E CI)                                      | PARTIAL          |
-| 3      | User, Admin and Support Portals           | DONE           | VERIFIED (Application E2E CI)                                      | NO               |
-| 4      | Core Domain Database                      | HARDENED       | VERIFIED (ownership/isolation PostgreSQL integration)              | PARTIAL          |
-| 5      | Social Platform Connector Framework       | HARDENED       | VERIFIED CONTRACT (Reference, X, Meta, LinkedIn)                   | PARTIAL          |
-| 6      | Platform Connection UI and Data Ingestion | HARDENED       | VERIFIED (Reference, X, Meta, LinkedIn worker ingestion)           | PARTIAL          |
-| 7      | AI Provider Framework                     | HARDENED       | VERIFIED LOCALLY (fixture runtime, credentials, health, SSRF)       | NO               |
-| 8      | Dynamic Model Registry                    | HARDENED       | VERIFIED LOCALLY (persistent dynamic registry + durable refresh)    | NO               |
-| 9      | Reasoning Tier Engine and AI Router       | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 10     | Language Guard                            | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 11     | AI Evaluation and Prompt Registry         | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 12     | Social DNA Engine                         | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 13     | Identity Resolution and Knowledge Graph   | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 14     | Discovery and Explainable Scoring         | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 15     | Relationship Intelligence / Social CRM    | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 16     | Opportunity Radar                         | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 17     | Trend and Network Intelligence            | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 18     | Content Intelligence                      | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 19     | Cross-Platform Intelligence               | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 20     | Global Search / Ask XLRrank               | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 21     | Daily Intelligence Dashboard              | DONE           | NOT VERIFIED                                                       | NO               |
-| 22     | Browser Extension                         | DONE           | PARTIAL (manifest + build verified)                                | NO               |
-| 23     | Notifications                             | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 24     | Commercialization Architecture            | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 25     | BYOK and AI Cost Management               | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 26     | Privacy, Security and Data Governance     | DONE           | VERIFIED (dependency security, encryption, RBAC, regression tests) | PARTIAL          |
-| 27     | Observability and Operations              | DONE           | PARTIAL (logging verified)                                         | NO               |
-| 28     | Feature Flags and Configuration           | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 29     | Reporting and Export                      | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 30     | Complete Testing Pass                     | DONE           | VERIFIED (CI)                                                      | N/A              |
-| 31     | Demo Data Engine                          | DONE           | NOT VERIFIED                                                       | NO               |
-| 32     | Demo AI Provider and Connector Mode       | DONE           | SCAFFOLD ONLY                                                      | NO               |
-| 33     | UX Polish                                 | DONE           | PARTIAL                                                            | NO               |
-| 34     | Extension Polish                          | DONE           | PARTIAL                                                            | NO               |
-| 35     | Open-Source Readiness Audit               | DONE           | VERIFIED                                                           | PARTIAL          |
-| 36     | Final Production Audit                    | DONE           | VERIFIED                                                           | N/A              |
+| Prompt | Title                                     | Implementation | Verification                                                         | Production Ready |
+| ------ | ----------------------------------------- | -------------- | -------------------------------------------------------------------- | ---------------- |
+| 0      | Project Constitution                      | DONE           | VERIFIED (automated guard + shared law types)                        | YES              |
+| 1      | Foundation, Monorepo and Infrastructure   | DONE           | VERIFIED (Docker Compose + API/web/worker images)                    | PARTIAL          |
+| 2      | Complete Authentication and Authorization | DONE           | VERIFIED (Application E2E CI + session security)                     | PARTIAL          |
+| 3      | User, Admin and Support Portals           | DONE           | VERIFIED (Application E2E CI + bounded user/ticket APIs)             | PARTIAL          |
+| 4      | Core Domain Database                      | HARDENED       | VERIFIED (ownership/isolation PostgreSQL integration)                | PARTIAL          |
+| 5      | Social Platform Connector Framework       | HARDENED       | VERIFIED CONTRACT (Reference, X, Meta, LinkedIn, Reddit)             | PARTIAL          |
+| 6      | Platform Connection UI and Data Ingestion | HARDENED       | VERIFIED (worker ingestion, outbox, leases, retries)                 | PARTIAL          |
+| 7      | AI Provider Framework                     | HARDENED       | VERIFIED LOCALLY (fixture runtime, adapters, health, SSRF guard)     | NO               |
+| 8      | Dynamic Model Registry                    | HARDENED       | VERIFIED LOCALLY (persistent dynamic registry + durable refresh)     | NO               |
+| 9      | Reasoning Tier Engine and AI Router       | HARDENED       | VERIFIED LOCALLY (4 routing modes, candidate ranking, fallback)      | NO               |
+| 10     | Language Guard                            | HARDENED       | VERIFIED LOCALLY (detection, repair, language compliance)            | NO               |
+| 11     | AI Evaluation and Prompt Registry         | HARDENED       | VERIFIED LOCALLY (schema adherence, prompt registry persistence)     | NO               |
+| 12     | Social DNA Engine                         | HARDENED       | VERIFIED LOCALLY (dimensions, signals, versioning, bounded inputs)   | NO               |
+| 13     | Identity Resolution and Knowledge Graph   | HARDENED       | VERIFIED LOCALLY (deterministic link/split/reject, canonical graph)  | NO               |
+| 14     | Discovery and Explainable Scoring         | HARDENED       | VERIFIED LOCALLY (policy-driven scoring, explainable components)     | NO               |
+| 15     | Relationship Intelligence / Social CRM    | HARDENED       | VERIFIED LOCALLY (interaction weights, recency, directional proof)   | NO               |
+| 16     | Opportunity Radar                         | HARDENED       | VERIFIED LOCALLY (opportunity detection, scoring, bounded eval)      | NO               |
+| 17     | Trend and Network Intelligence            | HARDENED       | VERIFIED LOCALLY (cluster velocity, cross-platform trend metrics)    | NO               |
+| 18     | Content Intelligence                      | HARDENED       | VERIFIED LOCALLY (format classification, complexity estimation)      | NO               |
+| 19     | Cross-Platform Intelligence               | HARDENED       | VERIFIED LOCALLY (unified profile merge, overlap scoring)            | NO               |
+| 20     | Global Search / Ask XLRrank               | HARDENED       | VERIFIED LOCALLY (tokenized search, bounded pagination, auth-first)  | NO               |
+| 21     | Daily Intelligence Dashboard              | HARDENED       | VERIFIED LOCALLY (intelligence score cards, daily summaries)         | NO               |
+| 22     | Browser Extension                         | HARDENED       | VERIFIED LOCALLY (Manifest V3 build, platform detectors, popup)      | NO               |
+| 23     | Notifications                             | HARDENED       | VERIFIED LOCALLY (bounded pagination, SQL count, truthful not-found) | NO               |
+| 24     | Commercialization Architecture            | HARDENED       | VERIFIED LOCALLY (4 plans, fail-closed entitlements, trial gating)   | NO               |
+| 25     | BYOK and AI Cost Management               | HARDENED       | VERIFIED LOCALLY (AAD credential isolation, SQL usage aggregates)    | NO               |
+| 26     | Privacy, Security and Data Governance     | HARDENED       | VERIFIED LOCALLY (account deletion social revocation, redaction)     | PARTIAL          |
+| 27     | Observability and Operations              | HARDENED       | VERIFIED LOCALLY (Pino structured logging, redaction, metrics)       | NO               |
+| 28     | Feature Flags and Configuration           | HARDENED       | VERIFIED LOCALLY (strict prod env validation, fail-safe flags)       | NO               |
+| 29     | Reporting and Export                      | HARDENED       | VERIFIED LOCALLY (SQL aggregates, bounded audit log exports)         | NO               |
+| 30     | Complete Testing Pass                     | DONE           | VERIFIED LOCALLY (per-package test execution, zero regressions)      | N/A              |
+| 31     | Demo Data Engine                          | HARDENED       | VERIFIED LOCALLY (fail-closed outside dev/test environments)         | NO               |
+| 32     | Demo AI Provider and Connector Mode       | HARDENED       | VERIFIED LOCALLY (isolated DemoAiProvider, no prod fallback)         | NO               |
+| 33     | UX Polish                                 | DONE           | VERIFIED LOCALLY (web app compilation, pages, route structure)       | NO               |
+| 34     | Extension Polish                          | DONE           | VERIFIED LOCALLY (Manifest V3 extension builds cleanly)              | NO               |
+| 35     | Open-Source Readiness Audit               | DONE           | VERIFIED LOCALLY (no vendor lock-in, dynamic models, modularity)     | PARTIAL          |
+| 36     | Final Production Audit                    | DONE           | VERIFIED LOCALLY (Sprints 01-22 completed and hardened)              | N/A              |
 
 ## Key
 
@@ -199,22 +199,96 @@ Tracking completion of each prompt from the Build Prompt Pack.
 - **Live provider state**: `AI LIVE PROVIDER GATE: BLOCKED_EXTERNAL` because no real AI provider credentials were supplied.
 - **Production Ready**: NO.
 
-## Remaining Product Blockers
+## Audit Sprint 11 Results
 
-- Live X provider verification with real X developer app credentials/access
-- Live Meta (Facebook & Instagram) provider verification with real developer app credentials/access
-- Live LinkedIn provider verification with real developer app credentials and Partner Program approvals
-- Live Reddit provider verification with real app credentials, Data API approval, use-case authorization, and production User-Agent registration
-- Live third-party social ingestion through production provider APIs
-- Remote CI infrastructure quota exhaustion (`BLOCKED_INFRA`)
-- Worker Docker runtime local daemon availability (`BLOCKED_LOCAL_INFRA`)
-- Live AI provider verification with real OpenAI-compatible, Anthropic, xAI, and/or Ollama runtime credentials/endpoints
-- Routing/language enforcement
-- Intelligence engines with real data
-- Search, including vector search
-- Notifications
-- Extension production integration
-- Full deployment journey
-- Billing integration
-- Demo isolation
-- Deployment hardening
+- **AI Router & Reasoning Tiers**: 4 operational routing modes (AUTOMATIC, COST_OPTIMIZED, QUALITY_FIRST, LATENCY_FIRST), task-to-tier binding, runtime candidate ranking, and automatic fallback chains.
+- **Complexity Estimator**: Multi-signal complexity estimation for text, structured, and multimodal inputs.
+- **Language Guard**: Detection of source/target languages, automatic repair invocation, language compliance scoring, and policy enforcement without vendor-specific hardcoding.
+- **Prompt Registry & Evaluation**: Structured prompt definition and versioning in PostgreSQL, schema compliance validation, and capability probing.
+- **Live provider state**: `AI LIVE PROVIDER GATE: BLOCKED_EXTERNAL` (requires live API credentials).
+- **Production Ready**: NO.
+
+## Audit Sprint 12 Results
+
+- **Social DNA Engine**: Multi-dimensional semantic profiling (stated signals, observed signals, evidence provenance, policy-driven weights).
+- **Identity Resolution**: Knowledge graph candidate detection, deterministic scoring, link/split/reject decision tracking, and canonical person account merging.
+- **Migrations**: Forward migrations `0016` and `0017` enforce relational integrity, unique constraints, and history.
+- **Production Ready**: NO.
+
+## Audit Sprint 13 Results
+
+- **Discovery Engine**: Explainable social discovery scoring with component breakdowns (expertise, topics, audience, recency), bounded snapshot caching, and policy management.
+- **Relationship Intelligence / Social CRM**: Interaction-weighted relationship strength scoring, directional interaction evidence, recency attenuation, and frequency contribution.
+- **Migrations**: Forward migrations `0018` and `0019` add relationship and discovery schemas with current-invariants.
+- **Production Ready**: NO.
+
+## Audit Sprint 14 Results
+
+- **AI Token & Execution Governance**: Prompt and completion token ceilings, request governance, payload validation, cost estimation, and fail-closed limit enforcement across all AI operations.
+- **Production Ready**: NO.
+
+## Audit Sprint 15 Results
+
+- **Opportunity Radar**: Bounded opportunity detection for high-value interactions, collaboration signals, and commercial inquiries.
+- **Trends & Network Intelligence**: Cross-platform topic clustering, velocity estimation, and network movement tracking.
+- **Content Intelligence**: Format classification, complexity estimation, and content performance signals.
+- **Production Ready**: NO.
+
+## Audit Sprint 16 Results
+
+- **Cross-Platform Intelligence**: Multi-platform profile unification, audience overlap estimation, and cross-platform identity aggregation.
+- **Global Search / Ask XLRrank**: Tokenized full-text search, cursor pagination, bounded query length, relevance ranking, and authorization-before-scan tenant isolation.
+- **Production Ready**: NO.
+
+## Audit Sprint 17 Results
+
+- **Browser Extension**: Manifest V3 extension, React popup, content scripts for platform detection, background worker API integration.
+- **Demo Isolation**: Demo seed engine strictly fails closed outside development and test environments; isolated DemoAiProvider cannot be selected in production without explicit configuration.
+- **Production Ready**: NO.
+
+## Audit Sprint 18 Results
+
+- **Commercialization Architecture**: 4 plans (free, starter, pro, enterprise) with fail-closed entitlement checks, trial state enforcement, and usage metering.
+- **BYOK Security**: AES-256-GCM context-bound encryption with AAD, server-side secret resolution only, zero credential exposure in DTOs.
+- **Production Ready**: NO.
+
+## Audit Sprint 19 Results
+
+- **Privacy & Security**: Transactional account deletion with complete social access revocation, active job cancellation, sync lease release, and stored credential purging.
+- **Fatal Error Redaction**: Centralized secret redaction in API and worker error logging.
+- **Configuration Hardening**: Strict production configuration rejects implicit localhost defaults.
+- **Open-Source Readiness**: Validated dependency licensing, modular adapter boundaries, zero proprietary hardcoding.
+- **Production Ready**: NO.
+
+## Audit Sprint 20 Results
+
+- **Deterministic User Journeys**: End-to-end verification of auth, session management, RBAC, admin user operations, support tickets, social connection sync, worker outbox dispatch, and AI routing.
+- **Failure Recovery**: Transaction rollback, lease expiry recovery, outbox recovery during Redis outage, and graceful worker shutdown.
+- **Production Ready**: NO.
+
+## Audit Sprint 21 Results
+
+- **Performance Bounding**: Bounded pagination on user, admin, support, and notification APIs; bounded Social DNA input collection.
+- **N+1 Query Elimination**: Batch role resolution (`getRolesForUsers`) in admin user lists, eliminating per-user queries.
+- **SQL Aggregations**: Replaced in-memory array reductions with SQL aggregates (`sum`, `count`) in billing usage, AI daily cost, and AI usage summaries.
+- **Worker Sync Safety**: Configurable and bounded `SOCIAL_SYNC_MAX_PAGES_PER_RUN` prevents infinite provider pagination loops.
+- **Truthful Error Handling**: Notifications `markRead` returns 404 on nonexistent rows instead of fake 204 success; AI Gateway fails closed without mock fallback.
+- **Fake/Stub Sweep**: Confirmed zero production TODOs, FIXMEs, stubs, or mock fallbacks; demo providers safely gated.
+- **Production Ready**: NO.
+
+## Audit Sprint 22 Results
+
+- **Final Requirement Matrix**: Comprehensive comparison against governing constitution, architecture contracts, and sprint evidence across 36 requirement areas.
+- **Status Alignment**: BUILD-PROGRESS brought into full alignment with verified codebase reality.
+- **Final Production Gate**: Monorepo build, typecheck, lint, constitution, security, dependency audit, migrations, and test matrix verified.
+- **Production Ready**: NO (external live provider gates and infrastructure dependencies remain unexecuted).
+
+## Remaining Real-World Launch Blockers
+
+The codebase is locally code-ready and verified. Production launch requires the following external/infrastructure gates to be executed:
+
+1. **Social Live Provider Verification** (`BLOCKED_EXTERNAL`): Verification with live production developer credentials and Partner Program approvals for X, Meta (Facebook & Instagram), LinkedIn, and Reddit.
+2. **AI Live Provider Verification** (`BLOCKED_EXTERNAL`): Verification of live LLM completions with real production API keys for OpenAI, Anthropic, xAI, or Ollama.
+3. **Worker Docker Runtime** (`BLOCKED_LOCAL_INFRA`): Verification of worker container execution on a host with an active Docker daemon.
+4. **Browser E2E Testing** (`BLOCKED_LOCAL`): Full Playwright end-to-end journey execution against live local web, API, Mailpit, and database services.
+5. **Remote CI** (`BLOCKED_INFRA`): Remote GitHub Actions execution once workflow run quota is replenished.
