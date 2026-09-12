@@ -316,7 +316,7 @@ export async function recomputeSocialDnaForPerson(input: RecomputeSocialDnaInput
         input.scopeId,
         input.personId,
         nextVersion.rows[0]?.version ?? 1,
-        JSON.stringify(profile.dimensions),
+        JSON.stringify(semanticSocialDnaDimensions(profile)),
         JSON.stringify({ sourceCount: profile.sourceWindow.sourceCount }),
         JSON.stringify(profile.statedSignals),
         JSON.stringify(profile.observedSignals),
@@ -366,6 +366,25 @@ async function loadActiveSocialDnaPolicy(executor: Executor, policyKey: string):
   );
   if (!result.rowCount || !result.rows[0]) throw new Error(`Social DNA policy '${policyKey}' is not configured`);
   return validateSocialDnaPolicy(result.rows[0].config);
+}
+
+function semanticSocialDnaDimensions(profile: SocialDnaProfile): SocialDnaProfile["dimensions"] {
+  const dimensions = [...profile.dimensions];
+  const addDimension = (key: string, label: string, values: string[]) => {
+    if (values.length === 0 || dimensions.some((dimension) => dimension.key === key)) return;
+    dimensions.push({
+      key,
+      label,
+      values,
+      confidence: 1,
+      sourceKind: "OBSERVED",
+      evidence: profile.evidence,
+    });
+  };
+  addDimension("topics", "Topics", profile.topics);
+  addDimension("expertise", "Expertise", profile.expertise);
+  addDimension("interests", "Interests", profile.interests);
+  return dimensions;
 }
 
 async function loadAccountForIdentity(executor: Executor, scopeId: string, accountId: string): Promise<IdentityAccountInput> {

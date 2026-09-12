@@ -113,6 +113,11 @@ export interface DiscoveryComponentEvidence {
   evidence: unknown[];
 }
 
+interface RelationshipPolicyIdentity {
+  policyKey: string;
+  version: string;
+}
+
 const DISCOVERY_COMPONENTS = new Set([
   "social_dna_similarity",
   "shared_expertise",
@@ -155,19 +160,23 @@ export async function recomputeRelationshipIntelligence(input: RecomputeRelation
   policyVersion: string;
   snapshots: RelationshipSnapshot[];
 }> {
+  const evaluationTime = parseEvaluationTimestamp(input.evaluationTimestamp);
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`relationship-intelligence:${input.scopeId}:${input.policyKey}`]);
     const policy = await loadActivePolicy<RelationshipIntelligencePolicy>(client, "relationship_intelligence_policies", input.policyKey);
     validateRelationshipPolicy(policy);
-    const pairs = await relationshipPairs(client, input);
+    const pairs = await relationshipPairs(client, input, evaluationTime);
     const snapshots: RelationshipSnapshot[] = [];
+    const validPairs = new Set<string>();
     for (const pair of pairs) {
       const computed = computeRelationship(pair, policy, input.evaluationTimestamp);
       if (computed.evidence.length < policy.minimumEvidence || computed.score <= 0) continue;
+      validPairs.add(`${pair.fromPersonId}:${pair.toPersonId}`);
       snapshots.push(await persistRelationshipSnapshot(client, input, policy, computed));
     }
+    await reconcileMissingRelationshipSnapshots(client, input, policy, validPairs);
     await client.query("COMMIT");
     return { policyVersion: policy.version, snapshots };
   } catch (error) {
@@ -179,6 +188,7 @@ export async function recomputeRelationshipIntelligence(input: RecomputeRelation
 }
 
 export async function recomputeDiscoverySnapshot(input: RecomputeDiscoveryInput): Promise<DiscoverySnapshot> {
+  parseEvaluationTimestamp(input.evaluationTimestamp);
   const client = await getPool().connect();
   try {
     await client.query("BEGIN");
@@ -191,7 +201,12 @@ export async function recomputeDiscoverySnapshot(input: RecomputeDiscoveryInput)
       ? await loadActivePolicy<RelationshipIntelligencePolicy>(client, "relationship_intelligence_policies", input.relationshipPolicyKey)
       : undefined;
     if (relationshipPolicy) validateRelationshipPolicy(relationshipPolicy);
-    const results = scoreDiscovery(await discoveryPeople(client, input.scopeId), await currentRelationships(client, input.scopeId), input, policy);
+    const results = scoreDiscovery(
+      await discoveryPeople(client, input.scopeId),
+      await currentRelationships(client, input.scopeId, relationshipPolicy, input.evaluationTimestamp),
+      input,
+      policy,
+    );
     const filtered = applyDiscoveryFilters(results, input.filters, policy);
     const snapshot = await persistDiscoverySnapshot(client, input, policy, relationshipPolicy, filtered);
     await client.query("COMMIT");
@@ -345,7 +360,7 @@ interface RawRelationshipPair {
   }>;
 }
 
-async function relationshipPairs(executor: Executor, input: RecomputeRelationshipInput): Promise<RawRelationshipPair[]> {
+async function relationshipPairs(executor: Executor, input: RecomputeRelationshipInput, evaluationTime: number): Promise<RawRelationshipPair[]> {
   const result = await executor.query<{
     id: string;
     type: string;
@@ -378,9 +393,10 @@ async function relationshipPairs(executor: Executor, input: RecomputeRelationshi
         AND from_cpa.person_id <> COALESCE(to_cpa.person_id, content_author_cpa.person_id)
         AND ($2::uuid IS NULL OR from_cpa.person_id = $2)
         AND ($3::uuid IS NULL OR COALESCE(to_cpa.person_id, content_author_cpa.person_id) = $3)
+        AND si.occurred_at <= $4
       ORDER BY from_cpa.person_id, COALESCE(to_cpa.person_id, content_author_cpa.person_id), si.occurred_at, si.id
     `,
-    [input.scopeId, input.fromPersonId ?? null, input.toPersonId ?? null],
+    [input.scopeId, input.fromPersonId ?? null, input.toPersonId ?? null, new Date(evaluationTime).toISOString()],
   );
   const pairs = new Map<string, RawRelationshipPair>();
   for (const row of result.rows) {
@@ -404,11 +420,13 @@ function computeRelationship(
   evaluationTimestamp: string,
 ): Omit<RelationshipSnapshot, "snapshotId" | "policyVersion" | "createdNewVersion"> & { sourceFingerprint: string } {
   const evaluationTime = new Date(evaluationTimestamp).getTime();
-  const evidence = pair.events.map((event) => {
+  const evidence = pair.events.flatMap((event) => {
     const baseWeight = policy.interactionWeights[event.type] ?? 0;
+    if (baseWeight <= 0) return [];
     const days = Math.max(0, (evaluationTime - new Date(event.occurredAt).getTime()) / (1000 * 60 * 60 * 24));
     const recencyMultiplier = policy.recency ? Math.max(policy.recency.minimumMultiplier, 1 - days / policy.recency.windowDays) : 1;
     const contribution = Number((baseWeight * recencyMultiplier).toFixed(4));
+    if (contribution <= 0) return [];
     return {
       interactionId: event.id,
       interactionType: event.type,
@@ -477,16 +495,17 @@ async function persistRelationshipSnapshot(
   );
   const existingId = existing.rows[0]?.id;
   if (existingId) {
-    await markRelationshipCurrent(executor, input.scopeId, computed.fromPersonId, computed.toPersonId, existingId);
+    await markRelationshipCurrent(executor, input.scopeId, computed.fromPersonId, computed.toPersonId, policy.policyKey, existingId);
     return { ...computed, snapshotId: existingId, policyVersion: policy.version, createdNewVersion: false };
   }
   await executor.query(
     `
       UPDATE relationship_intelligence_snapshots
       SET is_current = false, superseded_at = COALESCE(superseded_at, now())
-      WHERE scope_id = $1 AND from_person_id = $2 AND to_person_id = $3 AND is_current = true
+      WHERE scope_id = $1 AND from_person_id = $2 AND to_person_id = $3
+        AND policy_key = $4 AND is_current = true
     `,
-    [input.scopeId, computed.fromPersonId, computed.toPersonId],
+    [input.scopeId, computed.fromPersonId, computed.toPersonId, policy.policyKey],
   );
   const inserted = await executor.query<{ id: string }>(
     `
@@ -516,14 +535,53 @@ async function persistRelationshipSnapshot(
   return { ...computed, snapshotId: inserted.rows[0]!.id, policyVersion: policy.version, createdNewVersion: true };
 }
 
-async function markRelationshipCurrent(executor: Executor, scopeId: string, fromPersonId: string, toPersonId: string, snapshotId: string): Promise<void> {
+async function markRelationshipCurrent(
+  executor: Executor,
+  scopeId: string,
+  fromPersonId: string,
+  toPersonId: string,
+  policyKey: string,
+  snapshotId: string,
+): Promise<void> {
   await executor.query(
     `
       UPDATE relationship_intelligence_snapshots
       SET is_current = (id = $4), superseded_at = CASE WHEN id = $4 THEN NULL ELSE COALESCE(superseded_at, now()) END
-      WHERE scope_id = $1 AND from_person_id = $2 AND to_person_id = $3
+      WHERE scope_id = $1 AND from_person_id = $2 AND to_person_id = $3 AND policy_key = $5
     `,
-    [scopeId, fromPersonId, toPersonId, snapshotId],
+    [scopeId, fromPersonId, toPersonId, snapshotId, policyKey],
+  );
+}
+
+async function reconcileMissingRelationshipSnapshots(
+  executor: Executor,
+  input: RecomputeRelationshipInput,
+  policy: RelationshipIntelligencePolicy,
+  validPairs: Set<string>,
+): Promise<void> {
+  const current = await executor.query<{ id: string; from_person_id: string; to_person_id: string }>(
+    `
+      SELECT id, from_person_id, to_person_id
+      FROM relationship_intelligence_snapshots
+      WHERE scope_id = $1
+        AND policy_key = $2
+        AND is_current = true
+        AND ($3::uuid IS NULL OR from_person_id = $3)
+        AND ($4::uuid IS NULL OR to_person_id = $4)
+    `,
+    [input.scopeId, policy.policyKey, input.fromPersonId ?? null, input.toPersonId ?? null],
+  );
+  const staleIds = current.rows
+    .filter((row) => !validPairs.has(`${row.from_person_id}:${row.to_person_id}`))
+    .map((row) => row.id);
+  if (staleIds.length === 0) return;
+  await executor.query(
+    `
+      UPDATE relationship_intelligence_snapshots
+      SET is_current = false, superseded_at = COALESCE(superseded_at, now())
+      WHERE id = ANY($1::uuid[])
+    `,
+    [staleIds],
   );
 }
 
@@ -565,16 +623,17 @@ async function discoveryPeople(executor: Executor, scopeId: string): Promise<Per
     [scopeId],
   );
   return result.rows.map((row) => {
-    const recurring = row.dimensions.find((item) => item.key === "recurring_topics")?.values ?? [];
-    const geography = row.dimensions.find((item) => item.key === "geography")?.values ?? [];
-    const stated = row.stated_signals.map((item) => item.value).filter(Boolean);
+    const topics = dimensionValues(row.dimensions, "topics", "recurring_topics");
+    const expertise = dimensionValues(row.dimensions, "expertise");
+    const interests = dimensionValues(row.dimensions, "interests");
+    const geography = dimensionValues(row.dimensions, "geography");
     return {
       personId: row.person_id,
       name: row.name,
-      topics: uniqueSorted(recurring),
-      expertise: uniqueSorted(recurring),
-      interests: uniqueSorted([...stated, ...row.observed_signals.map((item) => item.value).filter(Boolean)]),
-      geography: uniqueSorted(geography),
+      topics,
+      expertise,
+      interests,
+      geography,
       sourceWindowTo: row.source_window?.to ?? null,
       evidenceCount: row.evidence.length,
       sourceFingerprint: row.source_fingerprint,
@@ -582,14 +641,24 @@ async function discoveryPeople(executor: Executor, scopeId: string): Promise<Per
   });
 }
 
-async function currentRelationships(executor: Executor, scopeId: string): Promise<Map<string, number>> {
+async function currentRelationships(
+  executor: Executor,
+  scopeId: string,
+  relationshipPolicy: RelationshipPolicyIdentity | undefined,
+  evaluationTimestamp: string,
+): Promise<Map<string, number>> {
+  if (!relationshipPolicy) return new Map();
   const result = await executor.query<{ from_person_id: string; to_person_id: string; score: number }>(
     `
       SELECT from_person_id, to_person_id, score
       FROM relationship_intelligence_snapshots
-      WHERE scope_id = $1 AND is_current = true
+      WHERE scope_id = $1
+        AND policy_key = $2
+        AND policy_version = $3
+        AND evaluation_at = $4
+        AND is_current = true
     `,
-    [scopeId],
+    [scopeId, relationshipPolicy.policyKey, relationshipPolicy.version, evaluationTimestamp],
   );
   return new Map(result.rows.map((row) => [`${row.from_person_id}:${row.to_person_id}`, Number(row.score)]));
 }
@@ -604,6 +673,7 @@ function scoreDiscovery(
   const results: DiscoveryResult[] = [];
   for (const person of people) {
     if (person.personId === input.subjectPersonId) continue;
+    if (!matchesDiscoveryFilters(person, input.filters, input.evaluationTimestamp)) continue;
     const components = policy.components.map((component) => componentScore(component, person, subject, relationships, input, policy));
     if (components.filter((component) => component.rawScore > 0).length < policy.minimumEvidence) continue;
     const weightSum = components.reduce((sum, item) => sum + item.weight, 0);
@@ -712,7 +782,7 @@ async function persistDiscoverySnapshot(
   );
   const existingId = existing.rows[0]?.id;
   if (existingId) {
-    await markDiscoveryCurrent(executor, input.scopeId, input.subjectPersonId ?? null, existingId);
+    await markDiscoveryCurrent(executor, input.scopeId, input.subjectPersonId ?? null, policy.policyKey, relationshipPolicy?.policyKey ?? null, existingId);
     return { snapshotId: existingId, policyVersion: policy.version, relationshipPolicyVersion: relationshipPolicy?.version, results, createdNewVersion: false };
   }
   await executor.query(
@@ -721,9 +791,10 @@ async function persistDiscoverySnapshot(
       SET is_current = false, superseded_at = COALESCE(superseded_at, now())
       WHERE scope_id = $1 AND policy_key = $2
         AND subject_person_id IS NOT DISTINCT FROM $3::uuid
+        AND relationship_policy_key IS NOT DISTINCT FROM $4::text
         AND is_current = true
     `,
-    [input.scopeId, policy.policyKey, input.subjectPersonId ?? null],
+    [input.scopeId, policy.policyKey, input.subjectPersonId ?? null, relationshipPolicy?.policyKey ?? null],
   );
   const inserted = await executor.query<{ id: string }>(
     `
@@ -761,14 +832,53 @@ async function persistDiscoverySnapshot(
   return { snapshotId, policyVersion: policy.version, relationshipPolicyVersion: relationshipPolicy?.version, results, createdNewVersion: true };
 }
 
-async function markDiscoveryCurrent(executor: Executor, scopeId: string, subjectPersonId: string | null, snapshotId: string): Promise<void> {
+async function markDiscoveryCurrent(
+  executor: Executor,
+  scopeId: string,
+  subjectPersonId: string | null,
+  policyKey: string,
+  relationshipPolicyKey: string | null,
+  snapshotId: string,
+): Promise<void> {
   await executor.query(
     `
       UPDATE discovery_snapshots
       SET is_current = (id = $3), superseded_at = CASE WHEN id = $3 THEN NULL ELSE COALESCE(superseded_at, now()) END
-      WHERE scope_id = $1 AND subject_person_id IS NOT DISTINCT FROM $2::uuid
+      WHERE scope_id = $1
+        AND subject_person_id IS NOT DISTINCT FROM $2::uuid
+        AND policy_key = $4
+        AND relationship_policy_key IS NOT DISTINCT FROM $5::text
     `,
-    [scopeId, subjectPersonId, snapshotId],
+    [scopeId, subjectPersonId, snapshotId, policyKey, relationshipPolicyKey],
+  );
+}
+
+function parseEvaluationTimestamp(value: string): number {
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) throw new Error("evaluationTimestamp must be a valid timestamp");
+  return time;
+}
+
+function matchesDiscoveryFilters(person: PersonDna, filters: DiscoveryFilters | undefined, evaluationTimestamp: string): boolean {
+  if (!filters) return true;
+  if (filters.topics?.length && intersection(person.topics, filters.topics).length === 0) return false;
+  if (filters.expertise?.length && intersection(person.expertise, filters.expertise).length === 0) return false;
+  if (filters.geography?.length && intersection(person.geography, filters.geography).length === 0) return false;
+  if (filters.activeWithinDays !== undefined) {
+    if (!Number.isFinite(filters.activeWithinDays) || filters.activeWithinDays < 0) throw new Error("activeWithinDays must be nonnegative");
+    if (!person.sourceWindowTo) return false;
+    const days = (parseEvaluationTimestamp(evaluationTimestamp) - new Date(person.sourceWindowTo).getTime()) / (1000 * 60 * 60 * 24);
+    if (!Number.isFinite(days) || days < 0 || days > filters.activeWithinDays) return false;
+  }
+  return true;
+}
+
+function dimensionValues(dimensions: Array<{ key: string; values?: string[] }>, ...keys: string[]): string[] {
+  return uniqueSorted(
+    dimensions
+      .filter((item) => keys.includes(item.key))
+      .flatMap((item) => item.values ?? [])
+      .filter((item): item is string => typeof item === "string"),
   );
 }
 

@@ -158,6 +158,9 @@ async function dna(scopeId, personId, input) {
       scopeId,
       personId,
       JSON.stringify([
+        { key: "topics", values: input.topics },
+        { key: "expertise", values: input.expertise ?? [] },
+        { key: "interests", values: input.interests ?? [] },
         { key: "recurring_topics", values: input.topics },
         { key: "geography", values: input.geography ?? [] },
       ]),
@@ -189,7 +192,7 @@ async function interaction(scopeId, platformId, fromAccountId, toAccountId, type
 async function discoveryPolicy(version, components, extras = {}) {
   return api.persistDiscoveryPolicy({
     policy: {
-      policyKey: "sprint-13-discovery",
+      policyKey: extras.policyKey ?? "sprint-13-discovery",
       version,
       components,
       minimumEvidence: extras.minimumEvidence ?? 1,
@@ -203,7 +206,7 @@ async function discoveryPolicy(version, components, extras = {}) {
 async function relationshipPolicy(version, extras = {}) {
   return api.persistRelationshipIntelligencePolicy({
     policy: {
-      policyKey: "sprint-13-relationships",
+      policyKey: extras.policyKey ?? "sprint-13-relationships",
       version,
       interactionWeights: extras.interactionWeights ?? { REPLY: 30, MENTION: 10 },
       recency: extras.recency ?? { windowDays: 30, minimumMultiplier: 0.25 },
@@ -294,6 +297,220 @@ test("Sprint 13 discovery is persisted, policy-driven, explainable, deterministi
     filters: { geography: ["berlin"], resultLimit: 2 },
   });
   assert.deepEqual(snapshotB.results.map((result) => result.name), ["Alpha Tie", "Beta Tie"]);
+});
+
+test("Sprint 13 closure: discovery consumes the exact active relationship policy and current rows are unique", { skip }, async () => {
+  await reset();
+  const { scopeId } = await scope("sprint13-policy-isolation@example.test");
+  const platformId = await platform("sprint13-policy");
+  const subject = await person("Subject Policy");
+  const target = await person("Target Policy");
+  const subjectAccount = await account(platformId, "policy-subject");
+  const targetAccount = await account(platformId, "policy-target");
+  await link(scopeId, subject, subjectAccount);
+  await link(scopeId, target, targetAccount);
+  await dna(scopeId, subject, { topics: ["ai"], expertise: ["automation"], interests: ["developer-tools"], geography: ["london"], fingerprint: "subject" });
+  await dna(scopeId, target, { topics: ["ai"], expertise: ["automation"], interests: ["developer-tools"], geography: ["london"], fingerprint: "target" });
+  await interaction(scopeId, platformId, subjectAccount, targetAccount, "REPLY", "2032-01-10T00:00:00.000Z", "policy-reply");
+
+  await relationshipPolicy("high-v1", { policyKey: "rel-high", interactionWeights: { REPLY: 90 }, frequency: { maxCount: 1, weight: 0 } });
+  await relationshipPolicy("low-v1", { policyKey: "rel-low", interactionWeights: { REPLY: 10 }, frequency: { maxCount: 1, weight: 0 } });
+  await Promise.all([
+    api.recomputeRelationshipIntelligence({ scopeId, policyKey: "rel-high", evaluationTimestamp: "2032-01-15T00:00:00.000Z" }),
+    api.recomputeRelationshipIntelligence({ scopeId, policyKey: "rel-low", evaluationTimestamp: "2032-01-15T00:00:00.000Z" }),
+  ]);
+  await discoveryPolicy("relationship-only", [{ key: "relationship_strength", weight: 1 }], { policyKey: "policy-isolation-discovery" });
+  const high = await api.recomputeDiscoverySnapshot({
+    scopeId,
+    subjectPersonId: subject,
+    policyKey: "policy-isolation-discovery",
+    relationshipPolicyKey: "rel-high",
+    evaluationTimestamp: "2032-01-15T00:00:00.000Z",
+  });
+  const low = await api.recomputeDiscoverySnapshot({
+    scopeId,
+    subjectPersonId: subject,
+    policyKey: "policy-isolation-discovery",
+    relationshipPolicyKey: "rel-low",
+    evaluationTimestamp: "2032-01-15T00:00:00.000Z",
+  });
+  const highScore = high.results[0].components.find((component) => component.key === "relationship_strength").rawScore;
+  const lowScore = low.results[0].components.find((component) => component.key === "relationship_strength").rawScore;
+  assert(highScore > lowScore);
+  assert.equal(highScore, 75);
+  assert.equal(lowScore, 8);
+  const duplicateCurrent = await pool.query(
+    `
+      SELECT policy_key, count(*)
+      FROM relationship_intelligence_snapshots
+      WHERE scope_id = $1 AND is_current = true
+      GROUP BY scope_id, from_person_id, to_person_id, policy_key
+      HAVING count(*) > 1
+    `,
+    [scopeId],
+  );
+  assert.equal(duplicateCurrent.rowCount, 0);
+});
+
+test("Sprint 13 closure: recompute removes disappeared and non-qualifying relationships", { skip }, async () => {
+  await reset();
+  const { scopeId } = await scope("sprint13-disappeared@example.test");
+  const platformId = await platform("sprint13-disappeared");
+  const subject = await person("Subject Gone");
+  const target = await person("Target Gone");
+  const subjectAccount = await account(platformId, "gone-subject");
+  const targetAccount = await account(platformId, "gone-target");
+  await link(scopeId, subject, subjectAccount);
+  await link(scopeId, target, targetAccount);
+  await dna(scopeId, subject, { topics: ["ai"], expertise: [], interests: [], geography: [], fingerprint: "subject" });
+  await dna(scopeId, target, { topics: ["ai"], expertise: [], interests: [], geography: [], fingerprint: "target" });
+  const interactionId = await interaction(scopeId, platformId, subjectAccount, targetAccount, "REPLY", "2032-01-10T00:00:00.000Z", "gone-reply");
+  await relationshipPolicy("gone-v1", {
+    policyKey: "rel-gone",
+    interactionWeights: { REPLY: 60 },
+    frequency: { maxCount: 5, weight: 50 },
+  });
+  const before = await api.recomputeRelationshipIntelligence({ scopeId, policyKey: "rel-gone", evaluationTimestamp: "2032-01-15T00:00:00.000Z" });
+  assert.equal(before.snapshots.length, 1);
+  await pool.query("DELETE FROM social_interactions WHERE id = $1", [interactionId]);
+  const after = await api.recomputeRelationshipIntelligence({ scopeId, policyKey: "rel-gone", evaluationTimestamp: "2032-01-15T00:00:00.000Z" });
+  assert.equal(after.snapshots.length, 0);
+  const stale = await pool.query("SELECT is_current FROM relationship_intelligence_snapshots WHERE id = $1", [before.snapshots[0].snapshotId]);
+  assert.equal(stale.rows[0].is_current, false);
+
+  await interaction(scopeId, platformId, subjectAccount, targetAccount, "LIKE", "2032-01-11T00:00:00.000Z", "unknown-only");
+  const unknown = await api.recomputeRelationshipIntelligence({ scopeId, policyKey: "rel-gone", evaluationTimestamp: "2032-01-15T00:00:00.000Z" });
+  assert.equal(unknown.snapshots.length, 0);
+  await discoveryPolicy("gone-discovery", [{ key: "relationship_strength", weight: 1 }], { policyKey: "gone-discovery" });
+  const discovery = await api.recomputeDiscoverySnapshot({
+    scopeId,
+    subjectPersonId: subject,
+    policyKey: "gone-discovery",
+    relationshipPolicyKey: "rel-gone",
+    evaluationTimestamp: "2032-01-15T00:00:00.000Z",
+  });
+  assert.equal(discovery.results.length, 0);
+});
+
+test("Sprint 13 closure: discovery filters and Social DNA semantics are eligibility constraints", { skip }, async () => {
+  await reset();
+  const { scopeId } = await scope("sprint13-filters@example.test");
+  const platformId = await platform("sprint13-filters");
+  const subject = await person("Subject Filters");
+  const highScoreWrongTopic = await person("Wrong Topic");
+  const rightCandidate = await person("Right Candidate");
+  const staleCandidate = await person("Stale Candidate");
+  for (const [personId, suffix] of [
+    [subject, "filters-subject"],
+    [highScoreWrongTopic, "filters-wrong"],
+    [rightCandidate, "filters-right"],
+    [staleCandidate, "filters-stale"],
+  ]) {
+    await link(scopeId, personId, await account(platformId, suffix));
+  }
+  await dna(scopeId, subject, {
+    topics: ["ai"],
+    expertise: ["automation"],
+    interests: ["developer-tools"],
+    geography: ["london"],
+    fingerprint: "subject",
+    stated: ["https://subject.example.test", "london"],
+  });
+  await dna(scopeId, highScoreWrongTopic, {
+    topics: ["fashion"],
+    expertise: ["styling"],
+    interests: ["beauty"],
+    geography: ["paris"],
+    fingerprint: "wrong",
+  });
+  await dna(scopeId, rightCandidate, {
+    topics: ["ai"],
+    expertise: ["automation"],
+    interests: ["developer-tools"],
+    geography: ["london"],
+    fingerprint: "right",
+    to: "2032-01-14T00:00:00.000Z",
+  });
+  await dna(scopeId, staleCandidate, {
+    topics: ["ai"],
+    expertise: ["automation"],
+    interests: ["developer-tools"],
+    geography: ["london"],
+    fingerprint: "stale",
+    to: "2031-01-01T00:00:00.000Z",
+  });
+  await discoveryPolicy(
+    "semantic-filters",
+    [
+      { key: "social_dna_similarity", weight: 10 },
+      { key: "shared_expertise", weight: 10 },
+      { key: "shared_interests", weight: 10 },
+      { key: "activity_freshness", weight: 1 },
+    ],
+    { policyKey: "semantic-discovery", freshness: { windowDays: 30 } },
+  );
+  const result = await api.recomputeDiscoverySnapshot({
+    scopeId,
+    subjectPersonId: subject,
+    policyKey: "semantic-discovery",
+    evaluationTimestamp: "2032-01-15T00:00:00.000Z",
+    filters: {
+      topics: ["ai"],
+      expertise: ["automation"],
+      geography: ["london"],
+      activeWithinDays: 7,
+    },
+  });
+  assert.deepEqual(result.results.map((item) => item.personId), [rightCandidate]);
+  assert.equal(
+    result.results[0].components.find((component) => component.key === "shared_interests").rawScore,
+    100,
+  );
+  const websiteInterestLeak = await api.recomputeDiscoverySnapshot({
+    scopeId,
+    subjectPersonId: subject,
+    policyKey: "semantic-discovery",
+    evaluationTimestamp: "2032-01-15T00:00:00.000Z",
+    filters: { expertise: ["ai"] },
+  });
+  assert.equal(websiteInterestLeak.results.length, 0);
+});
+
+test("Sprint 13 closure: evaluation timestamp is validated and future interactions are excluded", { skip }, async () => {
+  await reset();
+  const { scopeId } = await scope("sprint13-evaluation@example.test");
+  const platformId = await platform("sprint13-evaluation");
+  const subject = await person("Subject Time");
+  const target = await person("Target Time");
+  const subjectAccount = await account(platformId, "time-subject");
+  const targetAccount = await account(platformId, "time-target");
+  await link(scopeId, subject, subjectAccount);
+  await link(scopeId, target, targetAccount);
+  await interaction(scopeId, platformId, subjectAccount, targetAccount, "REPLY", "2032-01-10T00:00:00.000Z", "time-before");
+  await interaction(scopeId, platformId, subjectAccount, targetAccount, "REPLY", "2032-02-10T00:00:00.000Z", "time-after");
+  await relationshipPolicy("time-v1", { policyKey: "rel-time", interactionWeights: { REPLY: 20 }, frequency: { maxCount: 10, weight: 10 } });
+  const historical = await api.recomputeRelationshipIntelligence({
+    scopeId,
+    policyKey: "rel-time",
+    evaluationTimestamp: "2032-01-15T00:00:00.000Z",
+  });
+  assert.equal(historical.snapshots[0].evidence.length, 1);
+  await assert.rejects(
+    () => api.recomputeRelationshipIntelligence({ scopeId, policyKey: "rel-time", evaluationTimestamp: "not-a-date" }),
+    /evaluationTimestamp/,
+  );
+  await discoveryPolicy("time-discovery", [{ key: "activity_freshness", weight: 1 }], {
+    policyKey: "time-discovery",
+    freshness: { windowDays: 30 },
+  });
+  await dna(scopeId, target, { topics: ["ai"], expertise: [], interests: [], geography: [], fingerprint: "future", to: "2032-02-10T00:00:00.000Z" });
+  const futureDna = await api.recomputeDiscoverySnapshot({
+    scopeId,
+    policyKey: "time-discovery",
+    evaluationTimestamp: "2032-01-15T00:00:00.000Z",
+    filters: { activeWithinDays: 30 },
+  });
+  assert.equal(futureDna.results.length, 0);
 });
 
 test("Sprint 13 relationships are policy-driven, directional, recency-aware, explainable, and idempotent under concurrency", { skip }, async () => {
@@ -394,7 +611,6 @@ test("Sprint 13 discovery consumes relationship scores separately and identity s
     policyKey: "sprint-13-discovery",
     relationshipPolicyKey: "sprint-13-relationships",
     evaluationTimestamp: "2032-01-15T00:00:00.000Z",
-    filters: { topics: ["ai"] },
   });
   assert.equal(relationshipFirst.results[0].personId, near);
 
@@ -408,7 +624,6 @@ test("Sprint 13 discovery consumes relationship scores separately and identity s
     policyKey: "sprint-13-discovery",
     relationshipPolicyKey: "sprint-13-relationships",
     evaluationTimestamp: "2032-01-15T00:00:00.000Z",
-    filters: { topics: ["ai"] },
   });
   assert.equal(topicFirst.results[0].personId, far);
 
@@ -424,7 +639,6 @@ test("Sprint 13 discovery consumes relationship scores separately and identity s
     policyKey: "sprint-13-discovery",
     relationshipPolicyKey: "sprint-13-relationships",
     evaluationTimestamp: "2032-01-15T00:00:00.000Z",
-    filters: { topics: ["ai"] },
   });
   const nearContribution = reducedRelationship.results
     .find((result) => result.personId === near)

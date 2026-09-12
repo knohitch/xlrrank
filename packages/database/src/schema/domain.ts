@@ -869,6 +869,9 @@ export const relationshipIntelligenceSnapshots = pgTable(
       t.sourceFingerprint,
     ),
     index("relationship_intelligence_current_idx").on(t.scopeId, t.fromPersonId, t.toPersonId, t.isCurrent),
+    uniqueIndex("relationship_intelligence_one_current_per_policy_unique")
+      .on(t.scopeId, t.fromPersonId, t.toPersonId, t.policyKey)
+      .where(sql`${t.isCurrent} = true`),
   ],
 );
 
@@ -901,6 +904,14 @@ export const discoverySnapshots = pgTable(
       t.sourceFingerprint,
     ),
     index("discovery_snapshots_current_idx").on(t.scopeId, t.subjectPersonId, t.isCurrent),
+    uniqueIndex("discovery_snapshots_one_current_per_policy_unique")
+      .on(
+        t.scopeId,
+        sql`COALESCE(${t.subjectPersonId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+        t.policyKey,
+        sql`COALESCE(${t.relationshipPolicyKey}, '')`,
+      )
+      .where(sql`${t.isCurrent} = true`),
   ],
 );
 
