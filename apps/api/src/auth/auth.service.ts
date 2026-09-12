@@ -1,5 +1,6 @@
 import { BadRequestException, Inject, Injectable, UnauthorizedException } from "@nestjs/common";
 import { getEnv } from "@xlrrank/config";
+import { deactivatePersonalSocialAccessForAccountDeletion } from "@xlrrank/database";
 import { createChildLogger } from "@xlrrank/observability";
 import { UsersService } from "../users/users.service.js";
 import { SessionService } from "./session.service.js";
@@ -205,6 +206,7 @@ export class AuthService {
     if (!ok) {
       throw new UnauthorizedException("Password is incorrect.");
     }
+    const socialCleanup = await deactivatePersonalSocialAccessForAccountDeletion(userId);
     await this.usersService.setStatus(userId, "DELETION_PENDING");
     await this.sessions.revokeAllForUser(userId);
     await this.audit.record({
@@ -212,6 +214,12 @@ export class AuthService {
       action: "account.delete_request",
       entityType: "user",
       entityId: userId,
+      metadata: {
+        connectionsDisconnected: socialCleanup.connectionsDisconnected,
+        schedulesDisabled: socialCleanup.schedulesDisabled,
+        leasesReleased: socialCleanup.leasesReleased,
+        jobsCancelled: socialCleanup.jobsCancelled,
+      },
     });
   }
 

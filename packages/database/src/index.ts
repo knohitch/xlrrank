@@ -14,6 +14,8 @@ export {
   ensurePersonalScope,
 } from "./social/scope.js";
 export type { DataScopeType, OrganizationCapability, ScopeContext } from "./social/scope.js";
+export { deactivatePersonalSocialAccessForAccountDeletion } from "./social/account-deletion.js";
+export type { AccountDeletionSocialCleanupResult } from "./social/account-deletion.js";
 export {
   assertConnectionTransition,
   normalizeLegacyConnectionState,
