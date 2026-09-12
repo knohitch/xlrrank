@@ -24,16 +24,7 @@
       "run_at": "document_idle"
     }
   ],
-  "permissions": ["storage", "activeTab", "tabs"],
-  "host_permissions": [
-    "http://localhost:3000/*",
-    "http://localhost:4000/*",
-    "https://x.com/*",
-    "https://twitter.com/*",
-    "https://www.linkedin.com/*",
-    "https://www.instagram.com/*",
-    "https://www.reddit.com/*"
-  ],
+  "permissions": ["activeTab"],
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

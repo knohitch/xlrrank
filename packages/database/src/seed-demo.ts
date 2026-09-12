@@ -307,7 +307,17 @@ export async function seedDemoData(): Promise<void> {
 }
 
 export async function resetDemoData(): Promise<void> {
+  assertDemoSeedAllowed();
   const db = getDb();
-  await db.delete(notifications).where(eq(notifications.userId, "demo@xlrrank.local"));
+  const [demoUser] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.email, "demo@xlrrank.local"))
+    .limit(1);
+  if (!demoUser) {
+    console.log("Demo user not found, nothing to reset.");
+    return;
+  }
+  await db.delete(users).where(eq(users.id, demoUser.id));
   console.log("Demo data reset. Run seedDemoData() to re-seed.");
 }

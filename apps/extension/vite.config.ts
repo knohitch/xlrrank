@@ -6,10 +6,12 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    minify: false,
     rollupOptions: {
       input: {
         background: resolve(__dirname, "src/background.ts"),
         content: resolve(__dirname, "src/content.ts"),
+        security: resolve(__dirname, "src/security.ts"),
         popup: resolve(__dirname, "popup/index.html"),
       },
       output: {
