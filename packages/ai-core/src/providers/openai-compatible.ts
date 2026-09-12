@@ -13,7 +13,7 @@ import type {
 } from "./types.js";
 import { fetchProviderUrl, type DnsLookup } from "../registry/endpoint-policy.js";
 import { BaseAiProvider } from "./base.js";
-import { ModelNotFoundError, SchemaValidationError } from "./errors.js";
+import { AiProviderError, ModelNotFoundError, SchemaValidationError } from "./errors.js";
 
 interface OpenAIChatResponse {
   id: string;
@@ -76,6 +76,7 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
   }
 
   override async generateText(request: TextGenerationRequest): Promise<TextGenerationResponse> {
+    this.requireOutputLimit(request.maxTokens);
     const body: Record<string, unknown> = {
       model: request.model,
       messages: this.mapMessages(request.messages),
@@ -124,6 +125,7 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
   }
 
   override async generateStructured(request: StructuredRequest): Promise<StructuredResponse> {
+    this.requireOutputLimit(request.maxTokens);
     const body: Record<string, unknown> = {
       model: request.model,
       messages: this.mapMessages(request.messages),
@@ -198,6 +200,7 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
   }
 
   override async *streamText(request: TextGenerationRequest): AsyncGenerator<StreamChunk> {
+    this.requireOutputLimit(request.maxTokens);
     const body: Record<string, unknown> = {
       model: request.model,
       messages: this.mapMessages(request.messages),
@@ -284,5 +287,17 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
       if (m.context_length !== undefined) descriptor.contextLimit = m.context_length;
       return descriptor;
     });
+  }
+
+  private requireOutputLimit(maxTokens: number | undefined): void {
+    if (!Number.isInteger(maxTokens) || (maxTokens ?? 0) <= 0) {
+      throw new AiProviderError(
+        "AI output token limit is required for provider execution",
+        this.manifest.id,
+        "OUTPUT_LIMIT_REQUIRED",
+        false,
+        400,
+      );
+    }
   }
 }

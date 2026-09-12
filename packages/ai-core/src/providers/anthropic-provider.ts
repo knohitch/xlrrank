@@ -8,7 +8,7 @@ import type {
 } from "./types.js";
 import { fetchProviderUrl, type DnsLookup } from "../registry/endpoint-policy.js";
 import { BaseAiProvider } from "./base.js";
-import { ModelNotFoundError } from "./errors.js";
+import { AiProviderError, ModelNotFoundError } from "./errors.js";
 
 interface AnthropicResponse {
   id: string;
@@ -58,11 +58,12 @@ export class AnthropicProvider extends BaseAiProvider {
   }
 
   override async generateText(request: TextGenerationRequest): Promise<TextGenerationResponse> {
+    this.requireOutputLimit(request.maxTokens);
     const { system, mapped } = this.splitSystem(request.messages);
     const body: Record<string, unknown> = {
       model: request.model,
       messages: mapped,
-      max_tokens: request.maxTokens ?? 4096,
+      max_tokens: request.maxTokens,
     };
     if (system !== undefined) body.system = system;
     if (request.temperature !== undefined) body.temperature = request.temperature;
@@ -102,11 +103,12 @@ export class AnthropicProvider extends BaseAiProvider {
   }
 
   override async *streamText(request: TextGenerationRequest): AsyncGenerator<StreamChunk> {
+    this.requireOutputLimit(request.maxTokens);
     const { system, mapped } = this.splitSystem(request.messages);
     const body: Record<string, unknown> = {
       model: request.model,
       messages: mapped,
-      max_tokens: request.maxTokens ?? 4096,
+      max_tokens: request.maxTokens,
       stream: true,
     };
     if (system !== undefined) body.system = system;
@@ -210,5 +212,17 @@ export class AnthropicProvider extends BaseAiProvider {
       afterId = data.last_id;
     }
     return models;
+  }
+
+  private requireOutputLimit(maxTokens: number | undefined): void {
+    if (!Number.isInteger(maxTokens) || (maxTokens ?? 0) <= 0) {
+      throw new AiProviderError(
+        "AI output token limit is required for provider execution",
+        this.manifest.id,
+        "OUTPUT_LIMIT_REQUIRED",
+        false,
+        400,
+      );
+    }
   }
 }

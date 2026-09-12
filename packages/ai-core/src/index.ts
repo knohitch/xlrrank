@@ -93,6 +93,20 @@ export {
   resolveRoutingPolicy,
   validateRoutingPolicy,
 } from "./router/ai-router.js";
+export {
+  AiExecutionGovernanceError,
+  STRUCTURAL_AI_EXECUTION_LIMITS,
+  buildUsageAccounting,
+  governedEmbeddingRequest,
+  governedStructuredRequest,
+  governedTextRequest,
+  resolveAiExecutionLimits,
+  validateAiExecutionLimits,
+} from "./execution-governance.js";
+export type {
+  AiExecutionLimits,
+  AiUsageAccounting,
+} from "./execution-governance.js";
 
 export {
   languageGuard,

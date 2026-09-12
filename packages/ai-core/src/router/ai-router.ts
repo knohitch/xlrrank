@@ -14,6 +14,16 @@ import {
   type LanguagePolicy,
   type SupportedLanguage,
 } from "../language-guard.js";
+import {
+  AiExecutionGovernanceError,
+  buildUsageAccounting,
+  governedEmbeddingRequest,
+  governedStructuredRequest,
+  governedTextRequest,
+  resolveAiExecutionLimits,
+  type AiExecutionLimits,
+  type AiUsageAccounting,
+} from "../execution-governance.js";
 
 export type RoutingMode = "AUTOMATIC" | "QUALITY_OPTIMIZED" | "COST_OPTIMIZED" | "CUSTOM";
 export type RoutingExecutionKind = "text" | "structured" | "embeddings" | "streaming";
@@ -50,6 +60,8 @@ export interface RoutingRequest {
   embeddingInput?: string | string[];
   messages?: AiMessage[];
   prompt?: string;
+  idempotencyKey?: string;
+  maxOutputTokens?: number;
   maxFallbackAttempts?: number;
   maxLatencyMs?: number;
   maxCostPer1kTokens?: number;
@@ -78,6 +90,7 @@ export interface RoutingPolicy {
   healthScores: Record<"HEALTHY" | "DEGRADED" | "UNKNOWN", number>;
   defaultModeWeights: Record<RoutingMode, RoutingModeWeights>;
   tiers: Partial<Record<ReasoningTier, RoutingPolicyTierRule>>;
+  executionLimits: AiExecutionLimits;
 }
 
 export type RuntimeProviderResolver = (candidate: RoutingModelCandidate) => Promise<BaseAiProvider>;
@@ -103,6 +116,7 @@ export interface RoutingAttemptEvidence {
   errorCode?: string;
   retryable?: boolean;
   languageGuard?: LanguageGuardResult;
+  usage?: AiUsageAccounting;
 }
 
 export interface RoutingExecutionEvidence {
@@ -165,11 +179,13 @@ export const STRUCTURAL_ROUTING_POLICY: RoutingPolicy = {
   },
   defaultModeWeights: STRUCTURAL_ROUTING_MODE_WEIGHTS,
   tiers: {},
+  executionLimits: resolveAiExecutionLimits(),
 };
 
 export class AiRouter {
   private readonly runtimeProviderResolver: RuntimeProviderResolver;
   private readonly routingPolicy: RoutingPolicy;
+  private readonly inflight = new Map<string, Promise<RoutingExecutionResult>>();
 
   constructor(
     private readonly registry: ModelRegistryService,
@@ -209,12 +225,29 @@ export class AiRouter {
   }
 
   async execute(request: RoutingRequest): Promise<RoutingExecutionResult> {
-    const ranked = await this.rankEligibleCandidates(request);
     const policy = this.policyFor(request);
+    const inflightKey = request.idempotencyKey ? this.inflightKey(request, policy) : undefined;
+    if (inflightKey) {
+      const existing = this.inflight.get(inflightKey);
+      if (existing) return existing;
+    }
+    const execution = this.executeOnce(request, policy);
+    if (!inflightKey) return execution;
+    this.inflight.set(inflightKey, execution);
+    try {
+      return await execution;
+    } finally {
+      this.inflight.delete(inflightKey);
+    }
+  }
+
+  private async executeOnce(request: RoutingRequest, policy: RoutingPolicy): Promise<RoutingExecutionResult> {
+    const ranked = await this.rankEligibleCandidates(request);
     const capabilities = this.requiredCapabilities(request, policy);
     const tier = request.reasoningTier ?? request.tier ?? "TIER_1_EVERYDAY";
     const executionKind = this.executionKind(request);
-    const maxAttempts = Math.max(1, 1 + (request.maxFallbackAttempts ?? policy.maxFallbackAttempts));
+    const requestedAttempts = Math.max(1, 1 + (request.maxFallbackAttempts ?? policy.maxFallbackAttempts));
+    const maxAttempts = Math.min(requestedAttempts, policy.executionLimits.maxModelInvocations);
     const evidence: RoutingExecutionEvidence = {
       requirements: {
         capabilities,
@@ -291,6 +324,7 @@ export class AiRouter {
             runtimeKey: candidate.runtimeKey,
             outcome: "SUCCESS",
             ...(guardResult ? { languageGuard: guardResult } : {}),
+            ...(result.usageAccounting ? { usage: result.usageAccounting } : {}),
           });
           return {
             ok: true,
@@ -483,36 +517,53 @@ export class AiRouter {
     structuredData?: unknown;
     embeddings?: EmbeddingResponse["embeddings"];
     usage?: TextGenerationResponse["usage"] | StructuredResponse["usage"] | EmbeddingResponse["usage"];
+    usageAccounting?: AiUsageAccounting;
   }> {
     const kind = this.executionKind(request);
     const messages = this.buildMessages(request, forceLanguageInstruction);
     const provider = await this.runtimeProviderResolver(candidate);
+    const policy = this.policyFor(request);
+    const outputLimit = request.maxOutputTokens ?? policy.executionLimits.maxOutputTokens;
     if (kind === "structured") {
       const schema = request.structuredOutput?.schema;
       if (!schema) throw new Error("Structured output schema is required");
-      const response = await provider.generateStructured({
+      const governedRequest = governedStructuredRequest({
         model: candidate.modelId,
         messages,
         schema,
+        maxTokens: outputLimit,
         ...(request.structuredOutput?.schemaName ? { schemaName: request.structuredOutput.schemaName } : {}),
-      });
+      }, policy.executionLimits);
+      const response = await provider.generateStructured(governedRequest);
       const schemaError = validateStructuredResponse(response.data, schema);
       if (schemaError) {
         throw new Error(`STRUCTURED_OUTPUT_INVALID:${schemaError}`);
       }
-      return { structuredData: response.data, rawContent: response.rawContent, usage: response.usage };
+      return {
+        structuredData: response.data,
+        rawContent: response.rawContent,
+        usage: response.usage,
+        usageAccounting: buildUsageAccounting({ usage: response.usage, messages, outputTokenLimit: governedRequest.maxTokens }),
+      };
     }
     if (kind === "embeddings") {
-      const response = await provider.generateEmbeddings({
+      const input = request.embeddingInput ?? request.prompt ?? messages.map((message) => message.content).join("\n");
+      const governedRequest = governedEmbeddingRequest({
         model: candidate.modelId,
-        input: request.embeddingInput ?? request.prompt ?? messages.map((message) => message.content).join("\n"),
-      });
-      return { embeddings: response.embeddings, usage: response.usage };
+        input,
+      }, policy.executionLimits);
+      const response = await provider.generateEmbeddings(governedRequest);
+      return {
+        embeddings: response.embeddings,
+        usage: response.usage,
+        usageAccounting: buildUsageAccounting({ usage: response.usage, embeddingInput: input }),
+      };
     }
     if (kind === "streaming") {
       let content = "";
       let usage: TextGenerationResponse["usage"] | undefined;
-      for await (const chunk of provider.streamText({ model: candidate.modelId, messages })) {
+      const governedRequest = governedTextRequest({ model: candidate.modelId, messages, maxTokens: outputLimit }, policy.executionLimits);
+      for await (const chunk of provider.streamText(governedRequest)) {
         content += chunk.delta;
         if (chunk.usage) {
           usage = {
@@ -522,13 +573,23 @@ export class AiRouter {
           };
         }
       }
-      return { content, ...(usage ? { usage } : {}) };
+      return {
+        content,
+        ...(usage ? { usage } : {}),
+        usageAccounting: buildUsageAccounting({ usage, messages, outputTokenLimit: governedRequest.maxTokens }),
+      };
     }
-    const response = await provider.generateText({
+    const governedRequest = governedTextRequest({
       model: candidate.modelId,
       messages,
-    });
-    return { content: response.content, usage: response.usage };
+      maxTokens: outputLimit,
+    }, policy.executionLimits);
+    const response = await provider.generateText(governedRequest);
+    return {
+      content: response.content,
+      usage: response.usage,
+      usageAccounting: buildUsageAccounting({ usage: response.usage, messages, outputTokenLimit: governedRequest.maxTokens }),
+    };
   }
 
   private checkLanguage(content: string, request: RoutingRequest): LanguageGuardResult | undefined {
@@ -542,6 +603,14 @@ export class AiRouter {
   }
 
   private classifyError(err: unknown): { status: RoutingOutcomeStatus; code: string; message: string; retryable: boolean } {
+    if (err instanceof AiExecutionGovernanceError) {
+      return {
+        status: "PROVIDER_EXECUTION_FAILED",
+        code: err.code,
+        message: err.message,
+        retryable: false,
+      };
+    }
     if (err instanceof AiProviderError) {
       return {
         status: "PROVIDER_EXECUTION_FAILED",
@@ -569,6 +638,10 @@ export class AiRouter {
 
   private policyFor(request: RoutingRequest): RoutingPolicy {
     return request.routingPolicy ? resolveRoutingPolicy(request.routingPolicy, this.routingPolicy) : this.routingPolicy;
+  }
+
+  private inflightKey(request: RoutingRequest, policy: RoutingPolicy): string {
+    return `${request.idempotencyKey}:${stableStringify({ request: { ...request, idempotencyKey: undefined }, policy })}`;
   }
 }
 
@@ -624,6 +697,7 @@ export function validateRoutingPolicy(policy: RoutingPolicy): RoutingPolicy {
       validatePartialWeights(weights, `tiers.${tier}.modeWeights.${mode}`);
     }
   }
+  validateAiExecutionLimitsForRouting(policy.executionLimits);
   return policy;
 }
 
@@ -664,6 +738,7 @@ function mergeRoutingPolicy(base: RoutingPolicy, override: Partial<RoutingPolicy
     },
     defaultModeWeights,
     tiers,
+    executionLimits: resolveAiExecutionLimits(override.executionLimits, base.executionLimits),
   };
 }
 
@@ -697,6 +772,24 @@ function assertNonnegativeInteger(value: unknown, path: string): asserts value i
   if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
     throw new Error(`Routing policy value '${path}' must be a nonnegative integer`);
   }
+}
+
+function validateAiExecutionLimitsForRouting(limits: AiExecutionLimits): void {
+  try {
+    resolveAiExecutionLimits(limits);
+  } catch (err) {
+    throw new Error(`Routing policy executionLimits invalid: ${(err as Error).message}`);
+  }
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  return `{${Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
+    .join(",")}}`;
 }
 
 function validateStructuredResponse(value: unknown, schema: Record<string, unknown>): string | undefined {

@@ -100,6 +100,7 @@ export class ModelProber {
           properties: { status: { type: "string" } },
           required: ["status"],
         },
+        maxTokens: 25,
         signal,
       });
       const data = response.data as Record<string, unknown>;
