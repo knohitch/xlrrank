@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { getDb } from "@xlrrank/database";
 import { subscriptions, usageMetering } from "@xlrrank/database/schema";
 
@@ -49,6 +49,73 @@ const PLAN_ENTITLEMENTS: Record<PlanId, Entitlements> = {
   },
 };
 
+const ACCESS_GRANTING_STATUSES = new Set(["ACTIVE", "TRIALING", "TRIAL"]);
+const BILLING_METRIC_PATTERN = /^[a-z][a-z0-9_.:-]{0,79}$/;
+
+export interface BillingStateSnapshot {
+  planId?: string | null;
+  status?: string | null;
+  trialEndsAt?: Date | string | null;
+  currentPeriodEnd?: Date | string | null;
+  cancelAtPeriodEnd?: boolean | null;
+}
+
+function cloneEntitlements(entitlements: Entitlements): Entitlements {
+  return {
+    intelligence: { ...entitlements.intelligence },
+    platforms: { ...entitlements.platforms },
+    ai: { ...entitlements.ai },
+    reports: { ...entitlements.reports },
+    team: { ...entitlements.team },
+    api: { ...entitlements.api },
+  };
+}
+
+function dateFrom(value: Date | string | null | undefined): Date | null {
+  if (!value) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function normalizePlanId(planId: string | null | undefined): PlanId {
+  return planId === "starter" || planId === "pro" || planId === "enterprise" ? planId : "free";
+}
+
+export function subscriptionGrantsAccess(
+  subscription: BillingStateSnapshot | null | undefined,
+  now = new Date(),
+): boolean {
+  if (!subscription?.status) return false;
+  const status = subscription.status.toUpperCase();
+  if (!ACCESS_GRANTING_STATUSES.has(status)) return false;
+  if (status === "TRIAL" || status === "TRIALING") {
+    const trialEndsAt = dateFrom(subscription.trialEndsAt);
+    return Boolean(trialEndsAt && trialEndsAt > now);
+  }
+  const currentPeriodEnd = dateFrom(subscription.currentPeriodEnd);
+  return !currentPeriodEnd || currentPeriodEnd > now;
+}
+
+export function resolveEntitlements(
+  subscription: BillingStateSnapshot | null | undefined,
+  now = new Date(),
+): Entitlements {
+  if (!subscriptionGrantsAccess(subscription, now))
+    return cloneEntitlements(PLAN_ENTITLEMENTS.free);
+  return cloneEntitlements(
+    PLAN_ENTITLEMENTS[normalizePlanId(subscription?.planId)] ?? PLAN_ENTITLEMENTS.free,
+  );
+}
+
+export function validateUsageCharge(metric: string, amount: number): void {
+  if (!BILLING_METRIC_PATTERN.test(metric)) {
+    throw new Error("Invalid billing usage metric");
+  }
+  if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 1_000_000) {
+    throw new Error("Invalid billing usage amount");
+  }
+}
+
 @Injectable()
 export class BillingService {
   async getEntitlements(userId: string): Promise<Entitlements> {
@@ -57,11 +124,9 @@ export class BillingService {
       .select()
       .from(subscriptions)
       .where(eq(subscriptions.userId, userId))
+      .orderBy(desc(subscriptions.createdAt))
       .limit(1);
-    const sub = rows[0];
-    if (!sub) return PLAN_ENTITLEMENTS.free;
-    const planId = (sub.planId ?? "free") as PlanId;
-    return PLAN_ENTITLEMENTS[planId] ?? PLAN_ENTITLEMENTS.free;
+    return resolveEntitlements(rows[0]);
   }
 
   async getSubscription(userId: string) {
@@ -70,11 +135,13 @@ export class BillingService {
       .select()
       .from(subscriptions)
       .where(eq(subscriptions.userId, userId))
+      .orderBy(desc(subscriptions.createdAt))
       .limit(1);
     return rows[0] ?? null;
   }
 
   async recordUsage(userId: string, metric: string, amount: number) {
+    validateUsageCharge(metric, amount);
     const db = getDb();
     await db.insert(usageMetering).values({
       userId,
@@ -84,14 +151,15 @@ export class BillingService {
   }
 
   async getUsage(userId: string, metric: string): Promise<number> {
+    if (!BILLING_METRIC_PATTERN.test(metric)) return 0;
     const db = getDb();
     const rows = await db
-      .select()
+      .select({
+        total: sql<number>`coalesce(sum(case when ${usageMetering.amount} > 0 then ${usageMetering.amount} else 0 end), 0)::int`,
+      })
       .from(usageMetering)
-      .where(eq(usageMetering.userId, userId));
-    return rows
-      .filter((r) => r.metric === metric)
-      .reduce((sum, r) => sum + r.amount, 0);
+      .where(and(eq(usageMetering.userId, userId), eq(usageMetering.metric, metric)));
+    return rows[0]?.total ?? 0;
   }
 }
 

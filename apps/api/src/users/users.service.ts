@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -45,15 +46,31 @@ function toPublicUser(
   };
 }
 
+export function normalizeUserAvatarUrl(
+  value: string | null | undefined,
+): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new BadRequestException("Avatar URL must be a valid HTTP(S) URL.");
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new BadRequestException("Avatar URL must use HTTP(S).");
+  }
+  parsed.hash = "";
+  return parsed.toString();
+}
+
 @Injectable()
 export class UsersService {
   async findByEmail(email: string) {
     const db = getDb();
-    const rows = await db
-      .select()
-      .from(users)
-      .where(eq(users.email, email.toLowerCase()))
-      .limit(1);
+    const rows = await db.select().from(users).where(eq(users.email, email.toLowerCase())).limit(1);
     return rows[0] ?? null;
   }
 
@@ -109,7 +126,8 @@ export class UsersService {
       .update(users)
       .set({
         displayName: data.displayName ?? user.displayName,
-        avatarUrl: data.avatarUrl === undefined ? user.avatarUrl : data.avatarUrl,
+        avatarUrl:
+          data.avatarUrl === undefined ? user.avatarUrl : normalizeUserAvatarUrl(data.avatarUrl),
         updatedAt: new Date(),
       })
       .where(eq(users.id, id))
@@ -123,16 +141,10 @@ export class UsersService {
   async changePassword(id: string, newPassword: string): Promise<void> {
     const db = getDb();
     const passwordHash = await hashPassword(newPassword);
-    await db
-      .update(users)
-      .set({ passwordHash, updatedAt: new Date() })
-      .where(eq(users.id, id));
+    await db.update(users).set({ passwordHash, updatedAt: new Date() }).where(eq(users.id, id));
   }
 
-  async verifyPasswordForUser(
-    id: string,
-    password: string,
-  ): Promise<boolean> {
+  async verifyPasswordForUser(id: string, password: string): Promise<boolean> {
     const user = await this.findById(id);
     if (!user) return false;
     return verifyPassword(password, user.passwordHash);
@@ -140,18 +152,10 @@ export class UsersService {
 
   async setStatus(
     id: string,
-    status:
-      | "ACTIVE"
-      | "PENDING_VERIFICATION"
-      | "SUSPENDED"
-      | "DISABLED"
-      | "DELETION_PENDING",
+    status: "ACTIVE" | "PENDING_VERIFICATION" | "SUSPENDED" | "DISABLED" | "DELETION_PENDING",
   ): Promise<void> {
     const db = getDb();
-    await db
-      .update(users)
-      .set({ status, updatedAt: new Date() })
-      .where(eq(users.id, id));
+    await db.update(users).set({ status, updatedAt: new Date() }).where(eq(users.id, id));
   }
 
   async markEmailVerified(id: string): Promise<void> {
@@ -164,10 +168,7 @@ export class UsersService {
 
   async recordLogin(id: string): Promise<void> {
     const db = getDb();
-    await db
-      .update(users)
-      .set({ lastLoginAt: new Date() })
-      .where(eq(users.id, id));
+    await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, id));
   }
 
   async deleteUser(id: string): Promise<void> {

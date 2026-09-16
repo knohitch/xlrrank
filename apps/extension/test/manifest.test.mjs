@@ -15,6 +15,27 @@ test("extension manifest is Manifest V3 and references built outputs", () => {
   assert.ok(Array.isArray(manifest.permissions));
 });
 
+test("extension manifest avoids broad host, storage, tab and localhost permissions", () => {
+  const manifest = JSON.parse(readFileSync(join(extRoot, "src", "manifest.json"), "utf8"));
+  assert.deepEqual(manifest.permissions, ["activeTab"]);
+  assert.equal(manifest.host_permissions, undefined);
+  const serialized = JSON.stringify(manifest);
+  assert.equal(serialized.includes("localhost"), false);
+  assert.equal(serialized.includes("<all_urls>"), false);
+});
+
+test("extension content script is limited to exact supported HTTPS social hosts", () => {
+  const manifest = JSON.parse(readFileSync(join(extRoot, "src", "manifest.json"), "utf8"));
+  const matches = manifest.content_scripts.flatMap((script) => script.matches);
+  assert.deepEqual(matches.sort(), [
+    "https://twitter.com/*",
+    "https://www.instagram.com/*",
+    "https://www.linkedin.com/*",
+    "https://www.reddit.com/*",
+    "https://x.com/*",
+  ]);
+});
+
 test("extension build output exists (vite)", () => {
   assert.equal(existsSync(join(extRoot, "dist", "background.js")), true);
   assert.equal(existsSync(join(extRoot, "dist", "popup.js")), true);

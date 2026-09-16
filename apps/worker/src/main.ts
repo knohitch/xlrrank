@@ -1,40 +1,16 @@
-import { getEnv } from "@xlrrank/config";
 import { createChildLogger } from "@xlrrank/observability";
-import { closeConnections, createWorker, QUEUE_NAMES } from "@xlrrank/queue";
+import { checkWorkerReadiness, startWorkerRuntime, type WorkerRuntime } from "./runtime.js";
 
 const logger = createChildLogger("worker");
 
+let runtime: WorkerRuntime | null = null;
+
 async function start() {
-  const env = getEnv();
-
-  createWorker(
-    QUEUE_NAMES.jobs,
-    async (job) => {
-      logger.info({ jobId: job.id, type: job.name, data: job.data }, "Processing job");
-      return { processed: true };
-    },
-    env.WORKER_CONCURRENCY,
-  );
-
-  createWorker(
-    QUEUE_NAMES.ingestion,
-    async (job) => {
-      logger.info({ jobId: job.id, type: job.name }, "Processing ingestion job");
-      return { ingested: true };
-    },
-    env.WORKER_CONCURRENCY,
-  );
-
-  createWorker(
-    QUEUE_NAMES.intelligence,
-    async (job) => {
-      logger.info({ jobId: job.id, type: job.name }, "Processing intelligence job");
-      return { analyzed: true };
-    },
-    env.WORKER_CONCURRENCY,
-  );
-
-  logger.info(`Worker started with concurrency ${env.WORKER_CONCURRENCY}`);
+  if (process.argv.includes("--readiness-check")) {
+    const ready = await checkWorkerReadiness();
+    process.exit(ready ? 0 : 1);
+  }
+  runtime = await startWorkerRuntime();
 }
 
 start().catch((err) => {
@@ -43,8 +19,8 @@ start().catch((err) => {
 });
 
 async function shutdown(signal: string) {
-  logger.info({ signal }, "Shutting down");
-  await closeConnections();
+  logger.info({ signal }, "Shutting down worker runtime");
+  if (runtime) await runtime.stop();
   process.exit(0);
 }
 

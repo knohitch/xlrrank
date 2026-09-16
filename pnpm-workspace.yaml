@@ -5,3 +5,7 @@ allowBuilds:
   "@nestjs/core": true
   esbuild: true
   msgpackr-extract: true
+overrides:
+  postcss: ">=8.5.23"
+  qs: ">=6.16.0"
+  multer: ">=2.3.0"

@@ -11,24 +11,18 @@ COPY scripts ./scripts
 COPY turbo.json ./
 
 FROM base AS deps
-RUN pnpm install --frozen-lockfile=false --ignore-scripts
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
+# Build the real workspace graph instead of naming packages manually. This
+# prevents Docker from drifting away from the monorepo as packages are added,
+# removed, or renamed and fails the image build if any production workspace
+# cannot compile.
 FROM deps AS build
-RUN pnpm --filter @xlrrank/database build \
-    && pnpm --filter @xlrrank/config build \
-    && pnpm --filter @xlrrank/observability build \
-    && pnpm --filter @xlrrank/queue build \
-    && pnpm --filter @xlrrank/storage build \
-    && pnpm --filter @xlrrank/shared build
+RUN pnpm build
 
 FROM build AS api-build
-RUN pnpm --filter @xlrrank/api build
-
 FROM build AS web-build
-RUN pnpm --filter @xlrrank/web build
-
 FROM build AS worker-build
-RUN pnpm --filter @xlrrank/worker build
 
 FROM node:22-alpine AS api
 WORKDIR /app

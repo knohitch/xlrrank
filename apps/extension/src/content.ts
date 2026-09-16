@@ -1,3 +1,12 @@
+import {
+  boundedText,
+  detectPlatformFromUrl,
+  MAX_BIO_TEXT_LENGTH,
+  MAX_CONTENT_TEXT_LENGTH,
+  MAX_PROFILE_TEXT_LENGTH,
+  parseExtensionMessage,
+} from "./security.js";
+
 interface ProfileData {
   platform: string;
   handle: string;
@@ -26,39 +35,35 @@ const SELECTORS: Record<string, { profile: string[]; content: string[] }> = {
     content: ['[data-testid="tweetText"]'],
   },
   "www.linkedin.com": {
-    profile: ['.text-heading-xlarge', '.pv-about-section'],
-    content: ['.feed-shared-update-v2__description'],
+    profile: [".text-heading-xlarge", ".pv-about-section"],
+    content: [".feed-shared-update-v2__description"],
   },
   "www.instagram.com": {
-    profile: ['header section', '._aa_c'],
-    content: ['._aa_c'],
+    profile: ["header section", "._aa_c"],
+    content: ["._aa_c"],
   },
   "www.reddit.com": {
-    profile: ['shreddit-profile-banner', '[data-testid="profile-sidebar"]'],
-    content: ['[data-testid="comment"]', '.md'],
+    profile: ["shreddit-profile-banner", '[data-testid="profile-sidebar"]'],
+    content: ['[data-testid="comment"]', ".md"],
   },
 };
 
 function detectPlatform(): string | null {
-  const host = window.location.hostname;
-  for (const [platform] of Object.entries(SELECTORS)) {
-    if (host.includes(platform) || host === platform) return platform;
-  }
-  return null;
+  return detectPlatformFromUrl(window.location.href);
 }
 
 function extractProfile(platform: string): ProfileData | null {
   const url = window.location.href;
   const pathParts = window.location.pathname.split("/").filter(Boolean);
-  const handle = pathParts[0] ?? "";
+  const handle = boundedText(pathParts[0], MAX_PROFILE_TEXT_LENGTH);
 
   if (!handle) return null;
 
   const nameEl = document.querySelector(SELECTORS[platform]?.profile[0] ?? "");
-  const displayName = nameEl?.textContent?.trim() ?? handle;
+  const displayName = boundedText(nameEl?.textContent, MAX_PROFILE_TEXT_LENGTH) || handle;
 
   const bioEl = document.querySelector(SELECTORS[platform]?.profile[1] ?? "");
-  const bio = bioEl?.textContent?.trim();
+  const bio = boundedText(bioEl?.textContent, MAX_BIO_TEXT_LENGTH);
 
   return {
     platform,
@@ -74,19 +79,25 @@ function extractContent(platform: string): ContentData | null {
   if (contentEls.length === 0) return null;
 
   const firstContent = contentEls[0];
-  const body = firstContent?.textContent?.trim() ?? "";
+  const body = boundedText(firstContent?.textContent, MAX_CONTENT_TEXT_LENGTH);
   if (!body) return null;
 
   return {
     platform,
-    body: body.slice(0, 2000),
+    body,
     url: window.location.href,
     contentType: "post",
   };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "xlrrank:extract-profile") {
+  const parsed = parseExtensionMessage(message);
+  if (!parsed) {
+    sendResponse({ ok: false, error: "Unsupported extension message" });
+    return;
+  }
+
+  if (parsed.type === "xlrrank:extract-profile") {
     const platform = detectPlatform();
     if (!platform) {
       sendResponse({ ok: false, error: "Not a supported social platform" });
@@ -96,7 +107,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ ok: true, profile });
   }
 
-  if (message?.type === "xlrrank:extract-content") {
+  if (parsed.type === "xlrrank:extract-content") {
     const platform = detectPlatform();
     if (!platform) {
       sendResponse({ ok: false, error: "Not a supported social platform" });

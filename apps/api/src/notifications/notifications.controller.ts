@@ -1,13 +1,27 @@
-import { Controller, Get, HttpCode, HttpStatus, Param, Post, Query, UseGuards } from "@nestjs/common";
+import {
+  BadRequestException,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Inject,
+  Param,
+  Post,
+  Query,
+  UseGuards,
+} from "@nestjs/common";
 import { SessionAuthGuard } from "../common/guards/session-auth.guard.js";
 import { CurrentUser } from "../common/decorators/current-user.decorator.js";
 import type { AuthContext } from "../common/types/auth-context.js";
-import type { NotificationsService } from "./notifications.service.js";
+import { NotificationsService } from "./notifications.service.js";
 
 @Controller("notifications")
 @UseGuards(SessionAuthGuard)
 export class NotificationsController {
-  constructor(private readonly notificationsService: NotificationsService) {}
+  constructor(
+    @Inject(NotificationsService)
+    private readonly notificationsService: NotificationsService,
+  ) {}
 
   @Get()
   async list(
@@ -17,7 +31,13 @@ export class NotificationsController {
   ) {
     const opts: { unreadOnly?: boolean; limit?: number } = {};
     if (unreadOnly === "true") opts.unreadOnly = true;
-    if (limit) opts.limit = Number(limit);
+    if (limit !== undefined) {
+      const parsed = Number(limit);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+        throw new BadRequestException("limit must be an integer between 1 and 100.");
+      }
+      opts.limit = parsed;
+    }
     return {
       notifications: await this.notificationsService.list(auth.userId, opts),
     };

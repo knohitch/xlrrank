@@ -6,8 +6,9 @@ import type {
   AiMessage,
   UsageInfo,
 } from "./types.js";
+import { fetchProviderUrl, type DnsLookup } from "../registry/endpoint-policy.js";
 import { BaseAiProvider } from "./base.js";
-import { ModelNotFoundError } from "./errors.js";
+import { AiProviderError, ModelNotFoundError } from "./errors.js";
 
 interface AnthropicResponse {
   id: string;
@@ -15,6 +16,18 @@ interface AnthropicResponse {
   model: string;
   stop_reason: string;
   usage: { input_tokens: number; output_tokens: number };
+}
+
+interface AnthropicModelsResponse {
+  data: Array<{
+    id: string;
+    display_name?: string;
+    max_input_tokens?: number;
+    max_tokens?: number;
+    capabilities?: Record<string, { supported?: boolean }>;
+  }>;
+  has_more?: boolean;
+  last_id?: string;
 }
 
 export class AnthropicProvider extends BaseAiProvider {
@@ -45,11 +58,12 @@ export class AnthropicProvider extends BaseAiProvider {
   }
 
   override async generateText(request: TextGenerationRequest): Promise<TextGenerationResponse> {
+    this.requireOutputLimit(request.maxTokens);
     const { system, mapped } = this.splitSystem(request.messages);
     const body: Record<string, unknown> = {
       model: request.model,
       messages: mapped,
-      max_tokens: request.maxTokens ?? 4096,
+      max_tokens: request.maxTokens,
     };
     if (system !== undefined) body.system = system;
     if (request.temperature !== undefined) body.temperature = request.temperature;
@@ -65,7 +79,12 @@ export class AnthropicProvider extends BaseAiProvider {
 
     const data = await this.fetchJson<AnthropicResponse>(
       `${this.getBaseUrl()}/v1/messages`,
-      { method: "POST", body: JSON.stringify(body), headers },
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+        headers,
+        ...(request.signal ? { signal: request.signal } : {}),
+      },
     );
 
     const textContent = data.content.find((c) => c.type === "text");
@@ -84,11 +103,12 @@ export class AnthropicProvider extends BaseAiProvider {
   }
 
   override async *streamText(request: TextGenerationRequest): AsyncGenerator<StreamChunk> {
+    this.requireOutputLimit(request.maxTokens);
     const { system, mapped } = this.splitSystem(request.messages);
     const body: Record<string, unknown> = {
       model: request.model,
       messages: mapped,
-      max_tokens: request.maxTokens ?? 4096,
+      max_tokens: request.maxTokens,
       stream: true,
     };
     if (system !== undefined) body.system = system;
@@ -100,10 +120,15 @@ export class AnthropicProvider extends BaseAiProvider {
       ...this.config.headers,
     };
 
-    const response = await fetch(`${this.getBaseUrl()}/v1/messages`, {
+    const url = `${this.getBaseUrl()}/v1/messages`;
+    const response = await fetchProviderUrl(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      redirect: "error",
+      ...(request.signal ? { signal: request.signal } : {}),
+      allowPrivateNetwork: this.config.metadata?.allowPrivateNetwork === true,
+      lookup: this.config.metadata?.dnsLookup as DnsLookup | undefined,
     });
 
     if (!response.ok) await this.handleErrorResponse(response);
@@ -143,9 +168,61 @@ export class AnthropicProvider extends BaseAiProvider {
   }
 
   override async listModels(): Promise<AiModelDescriptor[]> {
-    return [
-      { providerId: "anthropic", modelId: "claude-sonnet-4-20250514", displayName: "Claude Sonnet 4" },
-      { providerId: "anthropic", modelId: "claude-opus-4-20250514", displayName: "Claude Opus 4" },
-    ];
+    const models: AiModelDescriptor[] = [];
+    let afterId: string | undefined;
+    for (let page = 0; page < 20; page += 1) {
+      const suffix = afterId ? `?after_id=${encodeURIComponent(afterId)}&limit=100` : "?limit=100";
+      const headers: Record<string, string> = {
+        "x-api-key": this.config.apiKey ?? "",
+        "anthropic-version": "2023-06-01",
+        ...this.config.headers,
+      };
+      const data = await this.fetchJson<AnthropicModelsResponse>(
+        `${this.getBaseUrl()}/v1/models${suffix}`,
+        { headers },
+      );
+      models.push(
+        ...data.data.map((model) => {
+          const descriptor: AiModelDescriptor = {
+            providerId: this.manifest.id,
+            modelId: model.id,
+            displayName: model.display_name ?? model.id,
+          };
+          if (model.max_input_tokens !== undefined) descriptor.contextLimit = model.max_input_tokens;
+          descriptor.capabilities = Object.entries(model.capabilities ?? {})
+            .filter(([, value]) => value.supported === true)
+            .map(([capability]) =>
+              capability === "structured_outputs" ? "structured_output" : capability,
+            )
+            .filter((capability): capability is NonNullable<AiModelDescriptor["capabilities"]>[number] =>
+              [
+                "text_generation",
+                "reasoning",
+                "structured_output",
+                "tool_calling",
+                "vision",
+                "embeddings",
+                "streaming",
+              ].includes(capability),
+            );
+          return descriptor;
+        }),
+      );
+      if (!data.has_more || !data.last_id) break;
+      afterId = data.last_id;
+    }
+    return models;
+  }
+
+  private requireOutputLimit(maxTokens: number | undefined): void {
+    if (!Number.isInteger(maxTokens) || (maxTokens ?? 0) <= 0) {
+      throw new AiProviderError(
+        "AI output token limit is required for provider execution",
+        this.manifest.id,
+        "OUTPUT_LIMIT_REQUIRED",
+        false,
+        400,
+      );
+    }
   }
 }

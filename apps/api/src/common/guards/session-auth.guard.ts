@@ -1,16 +1,10 @@
-import type {
-  CanActivate,
-  ExecutionContext} from "@nestjs/common";
-import {
-  ForbiddenException,
-  Injectable,
-  UnauthorizedException,
-} from "@nestjs/common";
-import type { Reflector } from "@nestjs/core";
+import type { CanActivate, ExecutionContext } from "@nestjs/common";
+import { ForbiddenException, Inject, Injectable, UnauthorizedException } from "@nestjs/common";
+import { Reflector } from "@nestjs/core";
 import { getRolesForUser, getDb } from "@xlrrank/database";
 import { users } from "@xlrrank/database/schema";
 import { eq } from "drizzle-orm";
-import type { SessionService } from "../../auth/session.service.js";
+import { SessionService } from "../../auth/session.service.js";
 import { SESSION_COOKIE, parseCookies } from "../cookies.js";
 import { IS_PUBLIC_KEY } from "../decorators/roles.decorator.js";
 import type { AuthContext } from "../types/auth-context.js";
@@ -18,7 +12,9 @@ import type { AuthContext } from "../types/auth-context.js";
 @Injectable()
 export class SessionAuthGuard implements CanActivate {
   constructor(
+    @Inject(SessionService)
     private readonly sessionService: SessionService,
+    @Inject(Reflector)
     private readonly reflector: Reflector,
   ) {}
 
@@ -34,9 +30,7 @@ export class SessionAuthGuard implements CanActivate {
       auth?: AuthContext;
     }>();
 
-    const cookies = parseCookies(
-      (request.headers.cookie as string | undefined) ?? undefined,
-    );
+    const cookies = parseCookies((request.headers.cookie as string | undefined) ?? undefined);
     const rawToken = cookies[SESSION_COOKIE];
     if (!rawToken) {
       throw new UnauthorizedException("Not authenticated.");
@@ -48,11 +42,7 @@ export class SessionAuthGuard implements CanActivate {
     }
 
     const db = getDb();
-    const rows = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, session.userId))
-      .limit(1);
+    const rows = await db.select().from(users).where(eq(users.id, session.userId)).limit(1);
     const user = rows[0];
     if (!user) {
       throw new UnauthorizedException("Account no longer exists.");
@@ -72,6 +62,7 @@ export class SessionAuthGuard implements CanActivate {
       userId: user.id,
       sessionId: session.sessionId,
       email: user.email,
+      displayName: user.displayName,
       roles,
       status,
     };

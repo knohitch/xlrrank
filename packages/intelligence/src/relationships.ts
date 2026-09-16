@@ -26,6 +26,15 @@ export const DEFAULT_PIPELINE: RelationshipStage[] = [
   "relationship",
 ];
 
+export interface RelationshipPolicy {
+  policyKey: string;
+  version: string;
+  interactionWeights: Record<string, number>;
+  recency?: { windowDays: number; minimumMultiplier: number } | undefined;
+  frequency?: { maxCount: number; weight: number } | undefined;
+  strengthBands?: Array<{ key: RelationshipStage; minimumScore: number }> | undefined;
+}
+
 export interface RelationshipStrength {
   strength: number;
   momentum: number;
@@ -36,7 +45,12 @@ export interface RelationshipStrength {
 
 export function calculateRelationshipStrength(
   events: RelationshipEvent[],
-  pipeline: RelationshipStage[] = DEFAULT_PIPELINE,
+  policy: RelationshipPolicy = {
+    policyKey: "structural",
+    version: "no-business-rules",
+    interactionWeights: {},
+  },
+  evaluationTimestamp = new Date(0).toISOString(),
 ): RelationshipStrength {
   if (events.length === 0) {
     return { strength: 0, momentum: 0, stage: "discovered", eventCount: 0 };
@@ -46,31 +60,24 @@ export function calculateRelationshipStrength(
     (a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime(),
   );
   const latest = sorted[0]!;
-  const now = Date.now();
+  const now = new Date(evaluationTimestamp).getTime();
   const latestTime = new Date(latest.occurredAt).getTime();
-  const daysSinceLatest = (now - latestTime) / (1000 * 60 * 60 * 24);
 
   let strength = 0;
-  const typeWeights: Record<string, number> = {
-    followed: 10,
-    followed_back: 15,
-    commented: 25,
-    replied: 30,
-    liked: 5,
-    mentioned: 20,
-    saved: 15,
-    dm_interaction: 40,
-    manual_note: 10,
-    meeting: 50,
-  };
-
   for (const event of events) {
-    strength += typeWeights[event.eventType] ?? 10;
+    const base = policy.interactionWeights[event.eventType] ?? 0;
+    if (!policy.recency) {
+      strength += base;
+      continue;
+    }
+    const days = Math.max(0, (now - new Date(event.occurredAt).getTime()) / (1000 * 60 * 60 * 24));
+    const multiplier = Math.max(policy.recency.minimumMultiplier, 1 - days / policy.recency.windowDays);
+    strength += base * multiplier;
   }
-  strength = Math.min(100, Math.round(strength / Math.max(events.length * 0.3, 1)));
-
-  const decayFactor = Math.max(0, 1 - daysSinceLatest / 90);
-  strength = Math.round(strength * decayFactor);
+  if (policy.frequency && events.length > 0) {
+    strength += (Math.min(events.length, policy.frequency.maxCount) / policy.frequency.maxCount) * policy.frequency.weight;
+  }
+  strength = Math.round(Math.min(100, strength));
 
   let momentum = 0;
   const recentEvents = events.filter(
@@ -83,11 +90,10 @@ export function calculateRelationshipStrength(
   else if (recentEvents.length < olderEvents.length) momentum = Math.max(-100, -(olderEvents.length - recentEvents.length) * 10);
   else momentum = 0;
 
-  const stageIndex = Math.min(
-    pipeline.length - 1,
-    Math.floor((strength / 100) * pipeline.length),
-  );
-  const stage = pipeline[stageIndex] ?? "discovered";
+  const stage =
+    [...(policy.strengthBands ?? [])]
+      .sort((a, b) => b.minimumScore - a.minimumScore)
+      .find((band) => strength >= band.minimumScore)?.key ?? "discovered";
 
   return {
     strength: Math.max(0, Math.min(100, strength)),

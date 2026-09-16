@@ -8,6 +8,10 @@ build/
 .turbo/
 coverage/
 storage/
+*.tsbuildinfo
+.tmp/
+test-results/
+apps/e2e/test-results/
 
 # Environment
 .env

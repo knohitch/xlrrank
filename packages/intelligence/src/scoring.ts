@@ -14,16 +14,9 @@ export interface ScoringConfig {
 
 export const DEFAULT_DISCOVERY_SCORING: ScoringConfig = {
   id: "discovery",
-  version: "1.0.0",
+  version: "structural",
   name: "Person Discovery",
-  components: [
-    { key: "niche_relevance", label: "Niche relevance", weight: 0.2 },
-    { key: "relationship_value", label: "Relationship value", weight: 0.15 },
-    { key: "content_overlap", label: "Content overlap", weight: 0.2 },
-    { key: "audience_overlap", label: "Audience overlap", weight: 0.1 },
-    { key: "conversation_accessibility", label: "Conversation accessibility", weight: 0.15 },
-    { key: "commercial_relevance", label: "Commercial relevance", weight: 0.2 },
-  ],
+  components: [],
   enabled: true,
 };
 

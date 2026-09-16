@@ -10,8 +10,15 @@ export async function runMigrations() {
     fileURLToPath(new URL("../migrations", import.meta.url));
 
   const pool = getPool();
-  await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
+  const lockClient = await pool.connect();
+  try {
+    await lockClient.query("SELECT pg_advisory_lock(hashtext($1))", ["xlrrank:database:migrations"]);
+    await pool.query("CREATE EXTENSION IF NOT EXISTS vector");
 
-  await migrate(db, { migrationsFolder });
-  console.log("Migrations completed successfully.");
+    await migrate(db, { migrationsFolder });
+    console.log("Migrations completed successfully.");
+  } finally {
+    await lockClient.query("SELECT pg_advisory_unlock(hashtext($1))", ["xlrrank:database:migrations"]).catch(() => undefined);
+    lockClient.release();
+  }
 }

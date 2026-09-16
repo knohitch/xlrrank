@@ -14,10 +14,13 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "node --test test/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@xlrrank/config": "workspace:*",
+    "@xlrrank/database": "workspace:*",
     "@xlrrank/shared": "workspace:*"
   },
   "devDependencies": {

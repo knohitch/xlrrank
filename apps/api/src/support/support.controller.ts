@@ -1,10 +1,12 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   ForbiddenException,
   Get,
   HttpCode,
   HttpStatus,
+  Inject,
   Param,
   Patch,
   Post,
@@ -13,8 +15,10 @@ import {
 } from "@nestjs/common";
 import {
   IsEnum,
+  IsBoolean,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
   MinLength,
 } from "class-validator";
@@ -24,7 +28,7 @@ import { RequirePermissions } from "../common/decorators/permissions.decorator.j
 import { CurrentUser } from "../common/decorators/current-user.decorator.js";
 import type { AuthContext } from "../common/types/auth-context.js";
 import { PERMISSIONS } from "@xlrrank/auth";
-import type { SupportService} from "./support.service.js";
+import { SupportService } from "./support.service.js";
 import { type TicketPriority, type TicketStatus } from "./support.service.js";
 
 function isSupportRole(auth: AuthContext): boolean {
@@ -32,7 +36,14 @@ function isSupportRole(auth: AuthContext): boolean {
 }
 
 const PRIORITIES = ["LOW", "MEDIUM", "HIGH", "URGENT"] as const;
-const STATUSES = ["OPEN", "IN_PROGRESS", "WAITING_FOR_USER", "ESCALATED", "RESOLVED", "CLOSED"] as const;
+const STATUSES = [
+  "OPEN",
+  "IN_PROGRESS",
+  "WAITING_FOR_USER",
+  "ESCALATED",
+  "RESOLVED",
+  "CLOSED",
+] as const;
 
 class CreateTicketDto {
   @IsString()
@@ -46,6 +57,7 @@ class CreateTicketDto {
 
   @IsOptional()
   @IsString()
+  @MaxLength(80)
   category?: string;
 
   @IsOptional()
@@ -60,6 +72,7 @@ class AddMessageDto {
   body!: string;
 
   @IsOptional()
+  @IsBoolean()
   isInternal?: boolean;
 }
 
@@ -73,14 +86,17 @@ class UpdateTicketDto {
   priority?: TicketPriority;
 
   @IsOptional()
-  @IsString()
+  @IsUUID()
   assignedToUserId?: string | null;
 }
 
 @Controller("support")
 @UseGuards(SessionAuthGuard, PermissionsGuard)
 export class SupportController {
-  constructor(private readonly supportService: SupportService) {}
+  constructor(
+    @Inject(SupportService)
+    private readonly supportService: SupportService,
+  ) {}
 
   @Post("tickets")
   async createTicket(@CurrentUser() auth: AuthContext, @Body() dto: CreateTicketDto) {
@@ -97,11 +113,23 @@ export class SupportController {
   async listTickets(
     @CurrentUser() auth: AuthContext,
     @Query("status") status?: string,
+    @Query("limit") limit?: string,
   ) {
-    if (isSupportRole(auth)) {
-      return { tickets: await this.supportService.listAllTickets(status) };
+    if (status !== undefined && !STATUSES.includes(status as never)) {
+      throw new BadRequestException("Invalid support ticket status filter.");
     }
-    return { tickets: await this.supportService.listOwnTickets(auth.userId) };
+    let boundedLimit = 50;
+    if (limit !== undefined) {
+      const parsed = Number(limit);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+        throw new BadRequestException("limit must be an integer between 1 and 100.");
+      }
+      boundedLimit = parsed;
+    }
+    if (isSupportRole(auth)) {
+      return { tickets: await this.supportService.listAllTickets(status, boundedLimit) };
+    }
+    return { tickets: await this.supportService.listOwnTickets(auth.userId, boundedLimit) };
   }
 
   @Get("tickets/:id")
@@ -120,10 +148,14 @@ export class SupportController {
     @Body() dto: AddMessageDto,
   ) {
     const isSupport = isSupportRole(auth);
-    await this.supportService.addMessage(id, { id: auth.userId, isSupport }, {
-      body: dto.body,
-      isInternal: dto.isInternal ?? false,
-    });
+    await this.supportService.addMessage(
+      id,
+      { id: auth.userId, isSupport },
+      {
+        body: dto.body,
+        isInternal: dto.isInternal ?? false,
+      },
+    );
     return this.supportService.getTicket(id, { id: auth.userId, isSupport });
   }
 

@@ -11,8 +11,9 @@ import type {
   AiMessage,
   UsageInfo,
 } from "./types.js";
+import { fetchProviderUrl, type DnsLookup } from "../registry/endpoint-policy.js";
 import { BaseAiProvider } from "./base.js";
-import { ModelNotFoundError, SchemaValidationError } from "./errors.js";
+import { AiProviderError, ModelNotFoundError, SchemaValidationError } from "./errors.js";
 
 interface OpenAIChatResponse {
   id: string;
@@ -25,7 +26,16 @@ interface OpenAIChatResponse {
 }
 
 interface OpenAIModelsResponse {
-  data: Array<{ id: string; object: string }>;
+  data: Array<{
+    id: string;
+    object: string;
+    name?: string;
+    version?: string;
+    fingerprint?: string;
+    context_length?: number;
+    max_output_tokens?: number;
+    capabilities?: AiCapability[];
+  }>;
 }
 
 interface OpenAIEmbeddingResponse {
@@ -66,6 +76,7 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
   }
 
   override async generateText(request: TextGenerationRequest): Promise<TextGenerationResponse> {
+    this.requireOutputLimit(request.maxTokens);
     const body: Record<string, unknown> = {
       model: request.model,
       messages: this.mapMessages(request.messages),
@@ -83,7 +94,11 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
 
     const data = await this.fetchJson<OpenAIChatResponse>(
       `${this.getBaseUrl()}/chat/completions`,
-      { method: "POST", body: JSON.stringify(body) },
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      },
     );
 
     const choice = data.choices[0];
@@ -110,6 +125,7 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
   }
 
   override async generateStructured(request: StructuredRequest): Promise<StructuredResponse> {
+    this.requireOutputLimit(request.maxTokens);
     const body: Record<string, unknown> = {
       model: request.model,
       messages: this.mapMessages(request.messages),
@@ -126,7 +142,11 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
 
     const data = await this.fetchJson<OpenAIChatResponse>(
       `${this.getBaseUrl()}/chat/completions`,
-      { method: "POST", body: JSON.stringify(body) },
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      },
     );
 
     const choice = data.choices[0];
@@ -161,7 +181,11 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
 
     const data = await this.fetchJson<OpenAIEmbeddingResponse>(
       `${this.getBaseUrl()}/embeddings`,
-      { method: "POST", body: JSON.stringify(body) },
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+        ...(request.signal ? { signal: request.signal } : {}),
+      },
     );
 
     return {
@@ -176,6 +200,7 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
   }
 
   override async *streamText(request: TextGenerationRequest): AsyncGenerator<StreamChunk> {
+    this.requireOutputLimit(request.maxTokens);
     const body: Record<string, unknown> = {
       model: request.model,
       messages: this.mapMessages(request.messages),
@@ -192,10 +217,15 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
       headers["Authorization"] = `Bearer ${this.config.apiKey}`;
     }
 
-    const response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
+    const url = `${this.getBaseUrl()}/chat/completions`;
+    const response = await fetchProviderUrl(url, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      redirect: "error",
+      ...(request.signal ? { signal: request.signal } : {}),
+      allowPrivateNetwork: this.config.metadata?.allowPrivateNetwork === true,
+      lookup: this.config.metadata?.dnsLookup as DnsLookup | undefined,
     });
 
     if (!response.ok) {
@@ -243,17 +273,31 @@ export class OpenAICompatibleProvider extends BaseAiProvider {
   }
 
   override async listModels(): Promise<AiModelDescriptor[]> {
-    try {
-      const data = await this.fetchJson<OpenAIModelsResponse>(
-        `${this.getBaseUrl()}/models`,
-      );
-      return data.data.map((m) => ({
+    const data = await this.fetchJson<OpenAIModelsResponse>(
+      `${this.getBaseUrl()}/models`,
+    );
+    return data.data.map((m) => {
+      const descriptor: AiModelDescriptor = {
         providerId: this.manifest.id,
         modelId: m.id,
-        displayName: m.id,
-      }));
-    } catch {
-      return [];
+        displayName: m.name ?? m.id,
+      };
+      if (m.version !== undefined) descriptor.version = m.version;
+      if (m.capabilities !== undefined) descriptor.capabilities = m.capabilities;
+      if (m.context_length !== undefined) descriptor.contextLimit = m.context_length;
+      return descriptor;
+    });
+  }
+
+  private requireOutputLimit(maxTokens: number | undefined): void {
+    if (!Number.isInteger(maxTokens) || (maxTokens ?? 0) <= 0) {
+      throw new AiProviderError(
+        "AI output token limit is required for provider execution",
+        this.manifest.id,
+        "OUTPUT_LIMIT_REQUIRED",
+        false,
+        400,
+      );
     }
   }
 }

@@ -12,9 +12,25 @@ import type {
   EmbeddingResponse,
   StreamChunk,
 } from "./providers/types.js";
+import {
+  governedEmbeddingRequest,
+  governedStructuredRequest,
+  governedTextRequest,
+  resolveAiExecutionLimits,
+  type AiExecutionLimits,
+} from "./execution-governance.js";
 
 export class AiGateway {
   private providers = new Map<string, BaseAiProvider>();
+  private executionLimits: AiExecutionLimits;
+
+  constructor(options: { executionLimits?: Partial<AiExecutionLimits> } = {}) {
+    this.executionLimits = resolveAiExecutionLimits(options.executionLimits);
+  }
+
+  configureExecutionLimits(limits: Partial<AiExecutionLimits>): void {
+    this.executionLimits = resolveAiExecutionLimits(limits, this.executionLimits);
+  }
 
   registerProvider(provider: BaseAiProvider): void {
     const manifest = provider.getManifest();
@@ -52,7 +68,7 @@ export class AiGateway {
     request: TextGenerationRequest,
   ): Promise<TextGenerationResponse> {
     const provider = this.requireProvider(providerId);
-    return provider.generateText(request);
+    return provider.generateText(governedTextRequest(request, this.executionLimits));
   }
 
   async generateStructured(
@@ -60,7 +76,7 @@ export class AiGateway {
     request: StructuredRequest,
   ): Promise<StructuredResponse> {
     const provider = this.requireProvider(providerId);
-    return provider.generateStructured(request);
+    return provider.generateStructured(governedStructuredRequest(request, this.executionLimits));
   }
 
   async generateEmbeddings(
@@ -68,7 +84,7 @@ export class AiGateway {
     request: EmbeddingRequest,
   ): Promise<EmbeddingResponse> {
     const provider = this.requireProvider(providerId);
-    return provider.generateEmbeddings(request);
+    return provider.generateEmbeddings(governedEmbeddingRequest(request, this.executionLimits));
   }
 
   async *streamText(
@@ -76,7 +92,7 @@ export class AiGateway {
     request: TextGenerationRequest,
   ): AsyncGenerator<StreamChunk> {
     const provider = this.requireProvider(providerId);
-    yield* provider.streamText(request);
+    yield* provider.streamText(governedTextRequest(request, this.executionLimits));
   }
 
   async listAllModels(): Promise<AiModelDescriptor[]> {

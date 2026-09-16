@@ -1,0 +1,641 @@
+name: Audit Baseline
+
+on:
+  push:
+    branches: [master, audit/**]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  NODE_ENV: test
+  DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_audit
+  REDIS_URL: redis://localhost:6379
+  QUEUE_URL: redis://localhost:6379
+  NEXT_PUBLIC_APP_URL: http://localhost:3000
+  API_PUBLIC_URL: http://localhost:4000
+  CORS_ORIGIN: http://localhost:3000
+  STORAGE_DRIVER: filesystem
+  STORAGE_LOCAL_PATH: ./storage-audit
+  ENCRYPTION_MASTER_KEY: audit-only-master-key-32-bytes-minimum-value-for-ci
+  SESSION_SIGNING_SECRET: audit-only-session-signing-secret-value-for-ci
+  SESSION_ENCRYPTION_SECRET: audit-only-session-encryption-secret-value-for-ci
+  PASSWORD_RESET_SECRET: audit-only-password-reset-secret-value-for-ci
+  EMAIL_TRANSPORT: console
+  MIGRATION_INTEGRATION_TEST: "1"
+
+jobs:
+  install:
+    name: Install
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm install --frozen-lockfile --offline
+
+  constitution:
+    name: Constitution Guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint:constitution
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint --concurrency=2
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck --concurrency=2
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run workspace tests
+        run: pnpm test --concurrency=2
+      - name: Run security tests
+        if: always()
+        run: node --test scripts/security.test.mjs
+
+  migration-integration:
+    name: PostgreSQL Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: install
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_audit
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_audit"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run migrations
+        run: pnpm db:migrate
+      - name: Re-apply migrations (idempotence)
+        run: pnpm db:migrate
+      - name: Verify pgvector
+        run: PGPASSWORD=xlrrank psql -h localhost -U xlrrank -d xlrrank_audit -v ON_ERROR_STOP=1 -c "SELECT extname FROM pg_extension WHERE extname='vector';"
+      - name: Verify key tables
+        run: PGPASSWORD=xlrrank psql -h localhost -U xlrrank -d xlrrank_audit -v ON_ERROR_STOP=1 -c "SELECT count(*) AS table_count FROM information_schema.tables WHERE table_schema='public';"
+      - name: Run migration integration test
+        run: node --test packages/database/test/migration-integration.test.mjs
+
+  docker:
+    name: Docker Compose Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config --quiet
+
+  docker-build:
+    name: Docker Image Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build API image
+        run: docker build -f infra/Dockerfile --target api -t xlrrank-api:test .
+      - name: Build web image
+        run: docker build -f infra/Dockerfile --target web -t xlrrank-web:test .
+      - name: Build worker image
+        run: docker build -f infra/Dockerfile --target worker -t xlrrank-worker:test .
+
+  application-e2e:
+    name: Application E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mailpit:
+        image: axllent/mailpit:v1.21
+        ports:
+          - 1025:1025
+          - 8025:8025
+    env:
+      NODE_ENV: production
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_e2e
+      REDIS_URL: redis://localhost:6379
+      QUEUE_URL: redis://localhost:6379
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+      API_PUBLIC_URL: http://localhost:4000
+      E2E_WEB_URL: http://localhost:3000
+      E2E_MAILPIT_URL: http://localhost:8025
+      CORS_ORIGIN: http://localhost:3000
+      STORAGE_DRIVER: filesystem
+      STORAGE_LOCAL_PATH: ./storage-e2e
+      ENCRYPTION_MASTER_KEY: e2e-only-master-key-32-bytes-minimum-value-for-ci
+      SESSION_SIGNING_SECRET: e2e-only-session-signing-secret-value-for-ci
+      SESSION_ENCRYPTION_SECRET: e2e-only-session-encryption-secret-value-for-ci
+      PASSWORD_RESET_SECRET: e2e-only-password-reset-secret-value-for-ci
+      EMAIL_TRANSPORT: smtp
+      SMTP_HOST: localhost
+      SMTP_PORT: "1025"
+      SMTP_FROM: noreply@xlrrank.test
+      RATE_LIMIT_STORE: redis
+      RATE_LIMIT_SIGNIN_LIMIT: "10"
+      RATE_LIMIT_SIGNUP_LIMIT: "20"
+      RATE_LIMIT_RECOVERY_LIMIT: "5"
+      RATE_LIMIT_TOKEN_LIMIT: "20"
+      RATE_LIMIT_WINDOW_SECONDS: "60"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm build
+      - name: Prepare E2E database
+        run: |
+          pnpm db:migrate
+          pnpm --filter @xlrrank/e2e seed
+      - name: Start API
+        run: |
+          pnpm --filter @xlrrank/api start > api-e2e.log 2>&1 &
+          echo $! > api-e2e.pid
+      - name: Wait for API
+        run: |
+          for i in {1..60}; do
+            curl -fsS http://localhost:4000/api/health/ready && exit 0
+            sleep 2
+          done
+          cat api-e2e.log
+          exit 1
+      - name: Start web
+        run: |
+          pnpm --filter @xlrrank/web start > web-e2e.log 2>&1 &
+          echo $! > web-e2e.pid
+      - name: Wait for web
+        run: |
+          for i in {1..60}; do
+            curl -fsS http://localhost:3000/signin && exit 0
+            sleep 2
+          done
+          cat web-e2e.log
+          exit 1
+      - name: Run browser application E2E
+        run: pnpm --filter @xlrrank/e2e test:e2e
+      - name: Upload E2E diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-e2e-diagnostics
+          path: |
+            api-e2e.log
+            web-e2e.log
+            apps/e2e/playwright-report
+            apps/e2e/test-results
+          if-no-files-found: ignore
+
+  social-data-isolation:
+    name: Social Data Isolation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_social_isolation
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_social_isolation"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_social_isolation
+      ENCRYPTION_MASTER_KEY: social-isolation-master-key-32-bytes-minimum-value-for-ci
+      SESSION_SIGNING_SECRET: social-isolation-session-signing-secret-for-ci
+      RATE_LIMIT_STORE: memory
+      MIGRATION_INTEGRATION_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm db:migrate
+      - name: Run social isolation PostgreSQL tests
+        run: node --test packages/database/test/social-isolation.integration.test.mjs
+
+  connector-contract:
+    name: Connector Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run connector contract tests
+        run: pnpm --filter @xlrrank/social-core test
+
+  x-connector-contract:
+    name: X Connector Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    env:
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run X connector fixture contract
+        run: node --test packages/social-core/test/x-connector.test.mjs
+
+  x-oauth-e2e:
+    name: X OAuth E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_x_oauth_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_x_oauth_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_x_oauth_e2e
+      ENCRYPTION_MASTER_KEY: x-oauth-e2e-master-key-32-bytes-minimum
+      SESSION_SIGNING_SECRET: x-oauth-e2e-session-signing-secret
+      RATE_LIMIT_STORE: memory
+      MIGRATION_INTEGRATION_TEST: "1"
+      X_OAUTH_E2E: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Run X OAuth fixture flow
+        run: |
+          node --test --test-name-pattern "OAuth" packages/social-core/test/x-connector.test.mjs
+          node --test apps/api/test/platforms-oauth.e2e.mjs
+
+  x-worker-ingestion-e2e:
+    name: X Worker Ingestion E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_worker_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_worker_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_worker_e2e
+      REDIS_URL: redis://localhost:6379
+      QUEUE_URL: redis://localhost:6379
+      WORKER_INGESTION_E2E: "1"
+      ENCRYPTION_MASTER_KEY: worker-e2e-master-key-32-bytes-minimum
+      SESSION_SIGNING_SECRET: worker-e2e-session-signing-secret-value
+      RATE_LIMIT_STORE: memory
+      MIGRATION_INTEGRATION_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm db:migrate
+      - name: Run X real worker ingestion E2E
+        run: node --test --test-force-exit --test-name-pattern "X worker ingestion" apps/worker/test/worker-ingestion.e2e.mjs
+
+  worker-ingestion-e2e:
+    name: Worker Ingestion E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_worker_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_worker_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_worker_e2e
+      REDIS_URL: redis://localhost:6379
+      QUEUE_URL: redis://localhost:6379
+      WORKER_INGESTION_E2E: "1"
+      ENCRYPTION_MASTER_KEY: worker-e2e-master-key-32-bytes-minimum
+      SESSION_SIGNING_SECRET: worker-e2e-session-signing-secret-value
+      RATE_LIMIT_STORE: memory
+      MIGRATION_INTEGRATION_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm db:migrate
+      - name: Run real worker ingestion E2E
+        run: node --test --test-force-exit apps/worker/test/worker-ingestion.e2e.mjs
+
+  worker-docker-runtime:
+    name: Worker Docker Runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: docker-build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: xlrrank
+          POSTGRES_PASSWORD: xlrrank
+          POSTGRES_DB: xlrrank_worker_docker
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U xlrrank -d xlrrank_worker_docker"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: production
+      DATABASE_URL: postgres://xlrrank:xlrrank@localhost:5432/xlrrank_worker_docker
+      REDIS_URL: redis://localhost:6379
+      QUEUE_URL: redis://localhost:6379
+      ENCRYPTION_MASTER_KEY: worker-docker-master-key-32-bytes-minimum
+      SESSION_SIGNING_SECRET: worker-docker-session-signing-secret-value
+      RATE_LIMIT_STORE: redis
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm db:migrate
+      - name: Build worker image for runtime check
+        run: docker build -f infra/Dockerfile --target worker -t xlrrank-worker:runtime .
+      - name: Verify worker image readiness
+        run: |
+          docker run --rm --network host \
+            -e NODE_ENV=production \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e REDIS_URL="$REDIS_URL" \
+            -e QUEUE_URL="$QUEUE_URL" \
+            -e ENCRYPTION_MASTER_KEY="$ENCRYPTION_MASTER_KEY" \
+            -e SESSION_SIGNING_SECRET="$SESSION_SIGNING_SECRET" \
+            -e RATE_LIMIT_STORE=redis \
+            xlrrank-worker:runtime \
+            node apps/worker/dist/main.js --readiness-check
+
+  security-audit-blocking:
+    name: Security Gate (High/Critical)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Block high/critical vulnerabilities
+        run: pnpm audit --prod --audit-level=high
+
+  security-audit-full:
+    name: Full Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: install
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.23.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Full dependency audit
+        run: pnpm audit --prod
+        continue-on-error: true

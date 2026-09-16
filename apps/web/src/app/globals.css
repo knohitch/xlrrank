@@ -343,7 +343,9 @@ main {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ── Sidebar ── */
@@ -355,7 +357,9 @@ main {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
-  transition: width 0.2s ease, min-width 0.2s ease;
+  transition:
+    width 0.2s ease,
+    min-width 0.2s ease;
 }
 
 .sidebar--collapsed {
@@ -408,7 +412,9 @@ main {
   font-size: 0.88rem;
   font-weight: 500;
   text-decoration: none;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
   white-space: nowrap;
   overflow: hidden;
 }
@@ -563,7 +569,9 @@ main {
   padding: 1.25rem 1.5rem;
   text-decoration: none;
   color: var(--text);
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
 }
 
 .action-card:hover {
@@ -691,6 +699,104 @@ main {
   margin-bottom: 1rem;
 }
 
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+}
+
+.settings-section-wide {
+  max-width: none;
+  grid-column: 1 / -1;
+}
+
+.stacked-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.form-label select,
+.form-label textarea,
+.form-input {
+  font-family: var(--font-sans);
+}
+
+.session-list,
+.message-list,
+.ticket-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.session-row,
+.message-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.message-row {
+  display: block;
+}
+
+.message-row p {
+  margin-top: 0.5rem;
+  line-height: 1.5;
+}
+
+.message-row-meta,
+.ticket-meta,
+.panel-heading-row,
+.pagination-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.pagination-row {
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.compact-checkbox {
+  font-size: 0.78rem;
+}
+
+.compact-input {
+  width: auto;
+  min-width: 140px;
+}
+
+.admin-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, 220px) minmax(120px, 160px) auto;
+  gap: 1rem;
+  align-items: end;
+  margin-bottom: 1rem;
+}
+
+.toolbar-button {
+  height: 40px;
+}
+
+.role-checks {
+  display: grid;
+  gap: 0.35rem;
+}
+
 /* ── Search Bar ── */
 .search-bar {
   display: flex;
@@ -735,6 +841,68 @@ main {
 
 .support-card .muted {
   margin-bottom: 0.75rem;
+}
+
+.support-workspace {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(280px, 1fr);
+  gap: 1rem;
+}
+
+.support-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+}
+
+.support-panel h2 {
+  font-size: 1.05rem;
+  margin-bottom: 1rem;
+}
+
+.support-panel-wide {
+  grid-column: 1 / -1;
+}
+
+.ticket-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 0.5rem;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  color: var(--text);
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  cursor: pointer;
+}
+
+.ticket-row-active,
+.ticket-row:hover {
+  border-color: var(--accent);
+}
+
+.ticket-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  align-items: end;
+  margin: 1rem 0;
+}
+
+@media (max-width: 800px) {
+  .admin-toolbar,
+  .support-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .app-shell {
+    height: auto;
+    min-height: 100vh;
+  }
 }
 
 /* ── Button sizes ── */

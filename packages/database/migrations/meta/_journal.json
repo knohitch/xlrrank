@@ -15,6 +15,132 @@
       "when": 1788375765265,
       "tag": "0001_superb_jazinda",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788648120000,
+      "tag": "0002_social_ownership_isolation",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788739200000,
+      "tag": "0003_worker_ingestion_reliability",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788825600000,
+      "tag": "0004_provider_oauth_foundation",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1788912000000,
+      "tag": "0005_meta_authorizations_webhooks",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788998400000,
+      "tag": "0006_meta_asset_connections",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1789084800000,
+      "tag": "0007_linkedin_retention_policies",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789171200000,
+      "tag": "0008_linkedin_retention_subscriptions_truthfulness",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1789257600000,
+      "tag": "0009_authorization_asset_retention_minimization",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789344000000,
+      "tag": "0010_provider_retention_runtime_side_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1789430400000,
+      "tag": "0011_provider_family_subscription_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789516800000,
+      "tag": "0012_reddit_retention_policies",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1789603200000,
+      "tag": "0013_approved_use_retention_and_reconciliation",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1789689600000,
+      "tag": "0014_provider_data_deletion_targets",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1789776000000,
+      "tag": "0015_ai_dynamic_model_registry",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1789862400000,
+      "tag": "0016_social_dna_identity_resolution",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1789948800000,
+      "tag": "0017_social_identity_integrity_closure",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1790035200000,
+      "tag": "0018_discovery_relationship_intelligence",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1790121600000,
+      "tag": "0019_discovery_relationship_current_invariants",
+      "breakpoints": true
     }
   ]
 }

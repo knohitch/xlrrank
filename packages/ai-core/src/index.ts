@@ -39,7 +39,30 @@ export type {
   ProviderHealthCheck,
 } from "./providers/types.js";
 
-export { ModelRegistryService, modelRegistry } from "./registry/model-registry.js";
+export {
+  ModelRegistryService,
+  credentialMayBeUsedForScope,
+  modelRegistry,
+  validateCredentialScope,
+} from "./registry/model-registry.js";
+export type {
+  AiProviderCredentialDto,
+  AvailableModelQuery,
+  CreateAiProviderCredentialInput,
+  ModelRegistryRefreshResult,
+  RefreshModelRegistryInput,
+  RoutingCandidateQuery,
+  RoutingCapabilityValidation,
+  RoutingModelCandidate,
+  RuntimeProviderRequest,
+  RuntimeRefreshResult,
+} from "./registry/model-registry.js";
+export {
+  assertSafeProviderRequestUrl,
+  fetchProviderUrl,
+  validateProviderBaseUrl,
+} from "./registry/endpoint-policy.js";
+export type { DnsLookup } from "./registry/endpoint-policy.js";
 export { ModelProber } from "./registry/model-probe.js";
 export type {
   ModelRegistryEntry,
@@ -53,7 +76,39 @@ export type { TierDefinition } from "./router/reasoning-tiers.js";
 export { estimateComplexity } from "./router/complexity-estimator.js";
 export type { ComplexitySignal, ComplexityEstimate } from "./router/complexity-estimator.js";
 export { AiRouter } from "./router/ai-router.js";
-export type { RoutingRequest, RoutingDecision, RoutingMode } from "./router/ai-router.js";
+export type {
+  RoutingAttemptEvidence,
+  RoutingDecision,
+  RoutingExecutionEvidence,
+  RoutingExecutionKind,
+  RoutingExecutionResult,
+  RoutingModeWeights,
+  RoutingMode,
+  RoutingOutcomeStatus,
+  RoutingPolicy,
+  RoutingPolicyProvider,
+  RoutingPolicyTierRule,
+  RoutingRequest,
+  RuntimeProviderResolver,
+  StructuredOutputRequirement,
+} from "./router/ai-router.js";
+export {
+  STRUCTURAL_ROUTING_POLICY,
+  loadRoutingPolicyFromEnv,
+  resolveRoutingPolicy,
+  validateRoutingPolicy,
+} from "./router/ai-router.js";
+export {
+  AiExecutionGovernanceError,
+  STRUCTURAL_AI_EXECUTION_LIMITS,
+  buildUsageAccounting,
+  governedEmbeddingRequest,
+  governedStructuredRequest,
+  governedTextRequest,
+  resolveAiExecutionLimits,
+  validateAiExecutionLimits,
+} from "./execution-governance.js";
+export type { AiExecutionLimits, AiUsageAccounting } from "./execution-governance.js";
 
 export {
   languageGuard,

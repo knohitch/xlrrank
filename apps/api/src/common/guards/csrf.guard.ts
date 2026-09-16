@@ -3,8 +3,11 @@ import type {
   ExecutionContext} from "@nestjs/common";
 import {
   ForbiddenException,
+  Inject,
   Injectable,
 } from "@nestjs/common";
+import { Reflector } from "@nestjs/core";
+import { CSRF_EXEMPT_KEY } from "../decorators/roles.decorator.js";
 import {
   CSRF_COOKIE,
   parseCookies,
@@ -19,7 +22,18 @@ const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
  */
 @Injectable()
 export class CsrfGuard implements CanActivate {
+  constructor(
+    @Inject(Reflector)
+    private readonly reflector: Reflector,
+  ) {}
+
   canActivate(context: ExecutionContext): boolean {
+    const isCsrfExempt = this.reflector.getAllAndOverride<boolean>(CSRF_EXEMPT_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (isCsrfExempt) return true;
+
     const request = context.switchToHttp().getRequest<{
       method: string;
       headers: Record<string, string | string[] | undefined>;

@@ -1,0 +1,407 @@
+import { randomUUID } from "node:crypto";
+import type { Worker } from "bullmq";
+import { getEnv } from "@xlrrank/config";
+import {
+  checkDatabaseHealth,
+  claimDueSocialSyncSchedules,
+  claimPendingOutboxEntries,
+  closeDatabase,
+  createAiModelRegistryRefreshRequest,
+  createSocialConnectionSyncRequest,
+  getPool,
+  markOutboxDispatched,
+  markOutboxFailed,
+  markScheduleDispatched,
+  reconcileWorkerState,
+  touchWorkerHeartbeat,
+} from "@xlrrank/database";
+import { createChildLogger, getMetrics } from "@xlrrank/observability";
+import {
+  checkRedisHealth,
+  closeConnections,
+  createWorker,
+  getQueue,
+  JOB_TYPES,
+  QUEUE_NAMES,
+  type QueueName,
+  aiModelRegistryRefreshBullMqJobId,
+  parseAiModelRegistryRefreshPayload,
+  parseProviderAuthorizationCleanupPayload,
+  parseProviderDataDeletionPayload,
+  parseProviderSubscriptionCleanupPayload,
+  parseSocialConnectionSyncPayload,
+  parseSocialWebhookProcessPayload,
+  providerAuthorizationCleanupBullMqJobId,
+  providerDataDeletionBullMqJobId,
+  providerSubscriptionCleanupBullMqJobId,
+  socialSyncBullMqJobId,
+  socialWebhookBullMqJobId,
+} from "@xlrrank/queue";
+import { processAiModelRegistryRefresh } from "./ai-model-registry-refresh-processor.js";
+import { processProviderAuthorizationCleanup } from "./provider-authorization-cleanup-processor.js";
+import { processProviderDataDeletion } from "./provider-data-deletion-processor.js";
+import { processProviderSubscriptionCleanup } from "./provider-subscription-cleanup-processor.js";
+import {
+  loadProviderRetentionSweepCadenceMs,
+  runProviderRetentionSweepOnce,
+} from "./provider-retention-sweep.js";
+import { runProviderReconciliationSweepOnce } from "./provider-reconciliation-sweep.js";
+import { processSocialConnectionSync, socialSyncJobOptions } from "./social-sync-processor.js";
+import { processSocialWebhook } from "./social-webhook-processor.js";
+
+const logger = createChildLogger("worker.runtime");
+const metrics = getMetrics();
+
+class UnimplementedJobProcessorError extends Error {
+  constructor(queue: string, jobName: string) {
+    super(`No production processor is registered for ${queue}:${jobName}`);
+    this.name = "UnimplementedJobProcessorError";
+  }
+}
+
+export interface WorkerRuntime {
+  workerId: string;
+  workers: Worker[];
+  stop(): Promise<void>;
+  dispatchOutboxOnce(): Promise<number>;
+  scheduleDueSyncsOnce(): Promise<number>;
+  runRetentionSweepOnce(): Promise<unknown>;
+  runReconciliationSweepOnce(): Promise<unknown>;
+  runAiModelRegistrySweepOnce(): Promise<number>;
+}
+
+export async function checkWorkerReadiness(): Promise<boolean> {
+  const [database, redis] = await Promise.all([checkDatabaseHealth(), checkRedisHealth()]);
+  return database && redis && Boolean(JOB_TYPES.socialConnectionSync);
+}
+
+export async function dispatchOutboxOnce(dispatcherId: string): Promise<number> {
+  const env = getEnv();
+  const entries = await claimPendingOutboxEntries({
+    dispatcherId,
+    limit: 25,
+    leaseMs: env.SOCIAL_SYNC_DISPATCH_INTERVAL_MS * 5,
+  });
+  let dispatched = 0;
+  for (const entry of entries) {
+    try {
+      const payload =
+        entry.jobType === JOB_TYPES.aiModelRegistryRefresh
+          ? parseAiModelRegistryRefreshPayload(entry.payload)
+          : entry.jobType === JOB_TYPES.socialWebhookProcess
+          ? parseSocialWebhookProcessPayload(entry.payload)
+          : entry.jobType === JOB_TYPES.providerSubscriptionCleanup
+            ? parseProviderSubscriptionCleanupPayload(entry.payload)
+            : entry.jobType === JOB_TYPES.providerAuthorizationCleanup
+              ? parseProviderAuthorizationCleanupPayload(entry.payload)
+              : entry.jobType === JOB_TYPES.providerDataDeletion
+                ? parseProviderDataDeletionPayload(entry.payload)
+                : parseSocialConnectionSyncPayload(entry.payload);
+      const queue = getQueue(entry.queueName as QueueName);
+      const bullmqJobId =
+        entry.jobType === JOB_TYPES.aiModelRegistryRefresh
+          ? aiModelRegistryRefreshBullMqJobId(entry.jobId)
+          : entry.jobType === JOB_TYPES.socialWebhookProcess
+          ? socialWebhookBullMqJobId(entry.jobId)
+          : entry.jobType === JOB_TYPES.providerSubscriptionCleanup
+            ? providerSubscriptionCleanupBullMqJobId(entry.jobId)
+            : entry.jobType === JOB_TYPES.providerAuthorizationCleanup
+              ? providerAuthorizationCleanupBullMqJobId(entry.jobId)
+              : entry.jobType === JOB_TYPES.providerDataDeletion
+                ? providerDataDeletionBullMqJobId(entry.jobId)
+                : socialSyncBullMqJobId(entry.jobId);
+      await queue.add(entry.jobType, payload, {
+        ...socialSyncJobOptions(),
+        jobId: bullmqJobId,
+      });
+      await markOutboxDispatched({
+        outboxId: entry.id,
+        jobId: entry.jobId,
+        bullmqJobId,
+      });
+      metrics.increment("worker.outbox.dispatched");
+      dispatched += 1;
+    } catch (err) {
+      await markOutboxFailed({ outboxId: entry.id, error: err });
+      metrics.increment("worker.outbox.failed");
+      logger.warn({ err, outboxId: entry.id, jobId: entry.jobId }, "Outbox dispatch failed");
+    }
+  }
+  return dispatched;
+}
+
+export async function scheduleDueSyncsOnce(schedulerId: string): Promise<number> {
+  const env = getEnv();
+  const schedules = await claimDueSocialSyncSchedules({
+    schedulerId,
+    limit: 25,
+    leaseMs: env.SOCIAL_SYNC_SCHEDULER_INTERVAL_MS * 5,
+  });
+  let scheduled = 0;
+  for (const schedule of schedules) {
+    await createSocialConnectionSyncRequest({
+      connectionId: schedule.connectionId,
+      reason: "SCHEDULED",
+      idempotencyKey: `schedule:${schedule.scheduleId}:${new Date().toISOString().slice(0, 16)}`,
+    });
+    await markScheduleDispatched({
+      scheduleId: schedule.scheduleId,
+      schedulerId,
+      cadenceSeconds: schedule.cadenceSeconds,
+    });
+    metrics.increment("worker.scheduler.dispatched");
+    scheduled += 1;
+  }
+  return scheduled;
+}
+
+export async function scheduleDueAiModelRegistryRefreshesOnce(schedulerId: string): Promise<number> {
+  const env = getEnv();
+  const pool = getPool();
+  const client = await pool.connect();
+  const providerIds: string[] = [];
+  await client.query("BEGIN");
+  try {
+    const due = await client.query<{ id: string }>(
+      `
+      WITH due AS (
+        SELECT id
+        FROM ai_providers
+        WHERE enabled = true
+          AND (
+            last_discovery_attempt_at IS NULL
+            OR last_discovery_attempt_at <= now() - ($2::text || ' milliseconds')::interval
+          )
+        ORDER BY last_discovery_attempt_at NULLS FIRST, slug, id
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE ai_providers p
+      SET last_discovery_attempt_at = now(),
+          updated_at = now()
+      FROM due
+      WHERE p.id = due.id
+      RETURNING p.id
+      `,
+      [env.AI_MODEL_DISCOVERY_MAX_PROVIDERS_PER_RUN, env.AI_MODEL_DISCOVERY_SWEEP_INTERVAL_MS],
+    );
+    providerIds.push(...due.rows.map((row) => row.id));
+    await client.query("COMMIT");
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  let scheduled = 0;
+  for (const providerId of providerIds) {
+    const request = await createAiModelRegistryRefreshRequest({
+      providerId,
+      reason: "SCHEDULED",
+      idempotencyKey: `ai-model-registry:${providerId}:all:SCHEDULED`,
+    });
+    if (!request.duplicate) {
+      metrics.increment("worker.ai_model_registry.scheduled");
+      scheduled += 1;
+    }
+  }
+  if (providerIds.length > 0) {
+    logger.info({ schedulerId, providersClaimed: providerIds.length, scheduled }, "AI model registry refresh sweep scheduled");
+  }
+  return scheduled;
+}
+
+export async function startWorkerRuntime(): Promise<WorkerRuntime> {
+  const env = getEnv();
+  const workerId = `worker-${process.pid}-${randomUUID()}`;
+  const retentionSweepIntervalMs = await loadProviderRetentionSweepCadenceMs(
+    env.PROVIDER_RETENTION_SWEEP_INTERVAL_MS,
+  ).catch((err) => {
+    logger.warn({ err }, "Provider retention cadence discovery failed; using configured interval");
+    return env.PROVIDER_RETENTION_SWEEP_INTERVAL_MS;
+  });
+  await reconcileWorkerState(workerId);
+  await touchWorkerHeartbeat({
+    workerId,
+    kind: "worker",
+    status: "STARTING",
+    metadata: { queuePrefix: env.QUEUE_PREFIX },
+  });
+
+  const workers: Worker[] = [];
+  workers.push(
+    createWorker(
+      QUEUE_NAMES.jobs,
+      async (job) => {
+        logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented job");
+        throw new UnimplementedJobProcessorError(QUEUE_NAMES.jobs, job.name);
+      },
+      env.WORKER_CONCURRENCY,
+    ),
+  );
+  workers.push(
+    createWorker(
+      QUEUE_NAMES.ingestion,
+      async (job) => {
+        if (job.name === JOB_TYPES.socialConnectionSync) {
+          return processSocialConnectionSync(job);
+        }
+        if (job.name === JOB_TYPES.socialWebhookProcess) {
+          return processSocialWebhook(job);
+        }
+        if (job.name === JOB_TYPES.providerSubscriptionCleanup) {
+          return processProviderSubscriptionCleanup(job);
+        }
+        if (job.name === JOB_TYPES.providerAuthorizationCleanup) {
+          return processProviderAuthorizationCleanup(job);
+        }
+        if (job.name === JOB_TYPES.providerDataDeletion) {
+          return processProviderDataDeletion(job);
+        }
+        logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented ingestion job");
+        throw new UnimplementedJobProcessorError(QUEUE_NAMES.ingestion, job.name);
+      },
+      env.INGESTION_WORKER_CONCURRENCY,
+    ),
+  );
+  workers.push(
+    createWorker(
+      QUEUE_NAMES.intelligence,
+      async (job) => {
+        logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented intelligence job");
+        throw new UnimplementedJobProcessorError(QUEUE_NAMES.intelligence, job.name);
+      },
+      env.WORKER_CONCURRENCY,
+    ),
+  );
+  workers.push(
+    createWorker(
+      QUEUE_NAMES.modelManagement,
+      async (job) => {
+        if (job.name === JOB_TYPES.aiModelRegistryRefresh) {
+          return processAiModelRegistryRefresh(job);
+        }
+        logger.error({ jobId: job.id, type: job.name }, "Rejecting unimplemented model-management job");
+        throw new UnimplementedJobProcessorError(QUEUE_NAMES.modelManagement, job.name);
+      },
+      Math.min(2, env.WORKER_CONCURRENCY),
+    ),
+  );
+
+  let stopping = false;
+  const dispatcherTimer = setInterval(() => {
+    if (!stopping)
+      dispatchOutboxOnce(workerId).catch((err) => logger.error({ err }, "Dispatcher failed"));
+  }, env.SOCIAL_SYNC_DISPATCH_INTERVAL_MS);
+  const schedulerTimer = setInterval(() => {
+    if (!stopping)
+      scheduleDueSyncsOnce(workerId).catch((err) => logger.error({ err }, "Scheduler failed"));
+  }, env.SOCIAL_SYNC_SCHEDULER_INTERVAL_MS);
+  const runRetentionMaintenance = () => {
+    if (!stopping) {
+      runProviderRetentionSweepOnce(workerId).catch((err) =>
+        logger.error({ err }, "Provider retention sweep failed"),
+      );
+    }
+  };
+  const retentionTimer = setInterval(runRetentionMaintenance, retentionSweepIntervalMs);
+  const runReconciliationMaintenance = () => {
+    if (!stopping) {
+      runProviderReconciliationSweepOnce(workerId).catch((err) =>
+        logger.error({ err }, "Provider reconciliation sweep failed"),
+      );
+    }
+  };
+  const reconciliationTimer = setInterval(
+    runReconciliationMaintenance,
+    env.PROVIDER_RECONCILIATION_SWEEP_INTERVAL_MS,
+  );
+  const runAiModelRegistryMaintenance = () => {
+    if (!stopping) {
+      scheduleDueAiModelRegistryRefreshesOnce(workerId).catch((err) =>
+        logger.error({ err }, "AI model registry refresh sweep failed"),
+      );
+    }
+  };
+  const aiModelRegistryTimer = setInterval(
+    runAiModelRegistryMaintenance,
+    env.AI_MODEL_DISCOVERY_SWEEP_INTERVAL_MS,
+  );
+  const heartbeatTimer = setInterval(
+    () => {
+      if (!stopping) {
+        touchWorkerHeartbeat({
+          workerId,
+          kind: "worker",
+          status: "READY",
+          metadata: { queuePrefix: env.QUEUE_PREFIX },
+        }).catch((err) => logger.error({ err }, "Heartbeat failed"));
+      }
+    },
+    Math.min(10_000, env.SOCIAL_SYNC_LEASE_HEARTBEAT_MS),
+  );
+
+  await dispatchOutboxOnce(workerId);
+  await scheduleDueSyncsOnce(workerId);
+  await touchWorkerHeartbeat({
+    workerId,
+    kind: "worker",
+    status: "READY",
+    metadata: {
+      queuePrefix: env.QUEUE_PREFIX,
+      retentionSweepIntervalMs,
+      reconciliationSweepIntervalMs: env.PROVIDER_RECONCILIATION_SWEEP_INTERVAL_MS,
+    },
+  });
+  runRetentionMaintenance();
+  runReconciliationMaintenance();
+  runAiModelRegistryMaintenance();
+  logger.info(
+    {
+      workerId,
+      ingestionConcurrency: env.INGESTION_WORKER_CONCURRENCY,
+      queuePrefix: env.QUEUE_PREFIX,
+      retentionSweepIntervalMs,
+      reconciliationSweepIntervalMs: env.PROVIDER_RECONCILIATION_SWEEP_INTERVAL_MS,
+      aiModelDiscoverySweepIntervalMs: env.AI_MODEL_DISCOVERY_SWEEP_INTERVAL_MS,
+    },
+    "Worker runtime ready",
+  );
+
+  return {
+    workerId,
+    workers,
+    dispatchOutboxOnce: () => dispatchOutboxOnce(workerId),
+    scheduleDueSyncsOnce: () => scheduleDueSyncsOnce(workerId),
+    runRetentionSweepOnce: () => runProviderRetentionSweepOnce(workerId),
+    runReconciliationSweepOnce: () => runProviderReconciliationSweepOnce(workerId),
+    runAiModelRegistrySweepOnce: () => scheduleDueAiModelRegistryRefreshesOnce(workerId),
+    async stop() {
+      stopping = true;
+      clearInterval(dispatcherTimer);
+      clearInterval(schedulerTimer);
+      clearInterval(retentionTimer);
+      clearInterval(reconciliationTimer);
+      clearInterval(aiModelRegistryTimer);
+      clearInterval(heartbeatTimer);
+      await touchWorkerHeartbeat({
+        workerId,
+        kind: "worker",
+        status: "DRAINING",
+        metadata: { queuePrefix: env.QUEUE_PREFIX },
+      });
+      await Promise.race([
+        closeConnections(),
+        new Promise((resolve) => setTimeout(resolve, env.SOCIAL_SYNC_SHUTDOWN_GRACE_MS)),
+      ]);
+      await touchWorkerHeartbeat({
+        workerId,
+        kind: "worker",
+        status: "STOPPED",
+        metadata: { queuePrefix: env.QUEUE_PREFIX },
+      }).catch(() => {});
+      await closeDatabase();
+    },
+  };
+}

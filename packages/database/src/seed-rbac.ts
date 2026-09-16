@@ -1,17 +1,7 @@
-import { and, eq } from "drizzle-orm";
-import {
-  ALL_PERMISSIONS,
-  ROLE_PERMISSIONS,
-  type Permission,
-  type Role,
-} from "@xlrrank/auth";
+import { and, eq, inArray } from "drizzle-orm";
+import { ALL_PERMISSIONS, ROLE_PERMISSIONS, type Permission, type Role } from "@xlrrank/auth";
 import { getDb } from "./client.js";
-import {
-  permissions,
-  rolePermissions,
-  roles,
-  userRoles,
-} from "./schema/index.js";
+import { permissions, rolePermissions, roles, userRoles } from "./schema/index.js";
 
 export async function seedRbac(): Promise<void> {
   const db = getDb();
@@ -24,19 +14,14 @@ export async function seedRbac(): Promise<void> {
   }
 
   for (const key of ALL_PERMISSIONS) {
-    await db
-      .insert(permissions)
-      .values({ key, description: key })
-      .onConflictDoNothing();
+    await db.insert(permissions).values({ key, description: key }).onConflictDoNothing();
   }
 
   const permissionRows = await db
     .select({ id: permissions.id, key: permissions.key })
     .from(permissions);
 
-  const permissionIdByKey = new Map<string, string>(
-    permissionRows.map((r) => [r.key, r.id]),
-  );
+  const permissionIdByKey = new Map<string, string>(permissionRows.map((r) => [r.key, r.id]));
 
   for (const role of Object.keys(ROLE_PERMISSIONS) as Role[]) {
     const granted = ROLE_PERMISSIONS[role] as Permission[];
@@ -51,15 +36,9 @@ export async function seedRbac(): Promise<void> {
   }
 }
 
-export async function assignRole(
-  userId: string,
-  role: Role,
-): Promise<void> {
+export async function assignRole(userId: string, role: Role): Promise<void> {
   const db = getDb();
-  await db
-    .insert(userRoles)
-    .values({ userId, roleName: role })
-    .onConflictDoNothing();
+  await db.insert(userRoles).values({ userId, roleName: role }).onConflictDoNothing();
 }
 
 export async function getRolesForUser(userId: string): Promise<Role[]> {
@@ -69,6 +48,22 @@ export async function getRolesForUser(userId: string): Promise<Role[]> {
     .from(userRoles)
     .where(eq(userRoles.userId, userId));
   return rows.map((r) => r.roleName);
+}
+
+export async function getRolesForUsers(userIds: string[]): Promise<Map<string, Role[]>> {
+  const rolesByUser = new Map<string, Role[]>();
+  if (userIds.length === 0) return rolesByUser;
+  const db = getDb();
+  const rows = await db
+    .select({ userId: userRoles.userId, roleName: userRoles.roleName })
+    .from(userRoles)
+    .where(inArray(userRoles.userId, userIds));
+  for (const r of rows) {
+    const list = rolesByUser.get(r.userId) ?? [];
+    list.push(r.roleName);
+    rolesByUser.set(r.userId, list);
+  }
+  return rolesByUser;
 }
 
 export async function getPermissionsForUser(userId: string): Promise<string[]> {
@@ -82,20 +77,12 @@ export async function getPermissionsForUser(userId: string): Promise<string[]> {
   return rows.map((r) => r.key);
 }
 
-export async function userHasPermission(
-  userId: string,
-  permission: Permission,
-): Promise<boolean> {
+export async function userHasPermission(userId: string, permission: Permission): Promise<boolean> {
   const perms = await getPermissionsForUser(userId);
   return perms.includes(permission) || perms.includes("*");
 }
 
-export async function assertUniqueRole(
-  userId: string,
-  role: Role,
-): Promise<void> {
+export async function assertUniqueRole(userId: string, role: Role): Promise<void> {
   const db = getDb();
-  await db
-    .delete(userRoles)
-    .where(and(eq(userRoles.userId, userId), eq(userRoles.roleName, role)));
+  await db.delete(userRoles).where(and(eq(userRoles.userId, userId), eq(userRoles.roleName, role)));
 }

@@ -6,10 +6,12 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 
 interface MeResponse {
-  id: string;
-  email: string;
-  displayName: string;
-  role: string;
+  user: {
+    userId: string;
+    email: string;
+    roles: string[];
+    status: string;
+  };
 }
 
 const ADMIN_NAV = [
@@ -20,7 +22,7 @@ const ADMIN_NAV = [
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const [user, setUser] = useState<MeResponse | null>(null);
+  const [user, setUser] = useState<MeResponse['user'] | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -29,12 +31,13 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       try {
         const res = await api.get<MeResponse>('/auth/me');
         if (cancelled) return;
-        if (res.ok && res.data) {
-          if (res.data.role !== 'admin') {
+        if (res.ok && res.data?.user) {
+          const roles = res.data.user.roles ?? [];
+          if (!roles.some((role) => role === 'ADMIN' || role === 'SUPER_ADMIN')) {
             router.replace('/dashboard');
             return;
           }
-          setUser(res.data);
+          setUser(res.data.user);
         } else {
           router.replace('/signin');
         }
@@ -90,7 +93,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
             <span className="topbar-title">Admin Panel</span>
           </div>
           <div className="topbar-right">
-            <span className="topbar-user">{user.displayName || user.email}</span>
+            <span className="topbar-user">{user.email}</span>
           </div>
         </header>
         <main className="app-content">{children}</main>

@@ -13,45 +13,56 @@ import type {
   NormalizedProfile,
   NormalizedContent,
   NormalizedInteraction,
+  ConnectorOperationContext,
+  PageResult,
+  CapabilityEvaluationInput,
 } from "./types.js";
 import { CapabilityUnavailableError, AuthenticationError } from "./errors.js";
 
 export abstract class BaseSocialConnector implements SocialConnector {
   protected abstract manifest: ConnectorManifest;
-  protected status: ConnectorStatus = "DISCONNECTED";
-  protected credentials: ConnectorCredentials | null = null;
 
   getManifest(): ConnectorManifest {
     return this.manifest;
   }
 
   getStatus(): ConnectorStatus {
-    return this.status;
+    return "DISCONNECTED";
   }
 
   getCapabilities(): Partial<Record<ConnectorCapability, AvailabilityState>> {
     return this.manifest.capabilities;
   }
 
-  async checkHealth(): Promise<boolean> {
-    return this.status === "CONNECTED" || this.status === "HEALTHY";
+  evaluateCapabilities(
+    _input: CapabilityEvaluationInput,
+  ): Partial<Record<ConnectorCapability, AvailabilityState>> {
+    return this.manifest.capabilities;
   }
 
-  async authenticate(credentials: ConnectorCredentials): Promise<AuthResult> {
-    this.credentials = credentials;
-    this.status = "CONNECTED";
-    return { success: true, status: this.status };
+  async checkHealth(): Promise<boolean> {
+    return false;
+  }
+
+  async authenticate(
+    _credentials: ConnectorCredentials,
+    _context?: ConnectorOperationContext,
+  ): Promise<AuthResult> {
+    throw new AuthenticationError(
+      this.manifest.id,
+      "Authentication is not implemented for this connector",
+    );
   }
 
   async disconnect(): Promise<void> {
-    this.credentials = null;
-    this.status = "DISCONNECTED";
+    return;
   }
 
-  protected requireAuth(): void {
-    if (!this.credentials) {
+  protected requireAuth(context?: ConnectorOperationContext): ConnectorCredentials {
+    if (!context?.credentials) {
       throw new AuthenticationError(this.manifest.id, "Connector is not authenticated");
     }
+    return context.credentials;
   }
 
   protected checkCapability(cap: ConnectorCapability): void {
@@ -64,57 +75,108 @@ export abstract class BaseSocialConnector implements SocialConnector {
     }
   }
 
-  async getAuthenticatedProfile(): Promise<NormalizedProfile | null> {
-    this.checkCapability("profiles");
-    this.requireAuth();
-    return null;
+  protected notImplemented(cap: ConnectorCapability): never {
+    throw new CapabilityUnavailableError(this.manifest.id, cap, "implementation not provided");
   }
 
-  async getProfile(_identifier: string): Promise<NormalizedProfile | null> {
+  async getAuthenticatedProfile(
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedProfile | null> {
     this.checkCapability("profiles");
-    this.requireAuth();
-    return null;
+    this.requireAuth(context);
+    return this.notImplemented("profiles");
   }
 
-  async getContent(_options: ContentQuery): Promise<NormalizedContent[]> {
+  async getProfile(
+    _identifier: string,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedProfile | null> {
+    this.checkCapability("profiles");
+    this.requireAuth(context);
+    return this.notImplemented("profiles");
+  }
+
+  async getContent(
+    _options: ContentQuery,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedContent[]> {
     this.checkCapability("content");
-    this.requireAuth();
-    return [];
+    this.requireAuth(context);
+    return this.notImplemented("content");
   }
 
-  async getComments(_contentId: string, _options?: ContentQuery): Promise<NormalizedInteraction[]> {
+  async getContentPage(
+    options: ContentQuery,
+    context?: ConnectorOperationContext,
+  ): Promise<PageResult<NormalizedContent>> {
+    const items = await this.getContent(options, context);
+    return { items, cursor: { value: null, hasMore: false } };
+  }
+
+  async getComments(
+    _contentId: string,
+    _options?: ContentQuery,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedInteraction[]> {
     this.checkCapability("comments");
-    this.requireAuth();
-    return [];
+    this.requireAuth(context);
+    return this.notImplemented("comments");
   }
 
-  async searchProfiles(_query: string, _limit?: number): Promise<NormalizedProfile[]> {
+  async getInteractionsPage(
+    options: ContentQuery,
+    context?: ConnectorOperationContext,
+  ): Promise<PageResult<NormalizedInteraction>> {
+    const items = await this.getComments(options.accountId ?? "", options, context);
+    return { items, cursor: { value: null, hasMore: false } };
+  }
+
+  async searchProfiles(
+    _query: string,
+    _limit?: number,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedProfile[]> {
     this.checkCapability("search");
-    this.requireAuth();
-    return [];
+    this.requireAuth(context);
+    return this.notImplemented("search");
   }
 
-  async searchContent(_query: string, _limit?: number): Promise<NormalizedContent[]> {
+  async searchContent(
+    _query: string,
+    _limit?: number,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedContent[]> {
     this.checkCapability("search");
-    this.requireAuth();
-    return [];
+    this.requireAuth(context);
+    return this.notImplemented("search");
   }
 
-  async getMetrics(_accountId: string): Promise<AccountMetrics> {
+  async getMetrics(
+    _accountId: string,
+    context?: ConnectorOperationContext,
+  ): Promise<AccountMetrics> {
     this.checkCapability("metrics");
-    this.requireAuth();
-    return { followerCount: 0, followingCount: 0, contentCount: 0, collectedAt: new Date().toISOString() };
+    this.requireAuth(context);
+    return this.notImplemented("metrics");
   }
 
-  async getFollowers(_accountId: string, _limit?: number): Promise<NormalizedProfile[]> {
+  async getFollowers(
+    _accountId: string,
+    _limit?: number,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedProfile[]> {
     this.checkCapability("followers");
-    this.requireAuth();
-    return [];
+    this.requireAuth(context);
+    return this.notImplemented("followers");
   }
 
-  async getFollowing(_accountId: string, _limit?: number): Promise<NormalizedProfile[]> {
+  async getFollowing(
+    _accountId: string,
+    _limit?: number,
+    context?: ConnectorOperationContext,
+  ): Promise<NormalizedProfile[]> {
     this.checkCapability("following");
-    this.requireAuth();
-    return [];
+    this.requireAuth(context);
+    return this.notImplemented("following");
   }
 }
