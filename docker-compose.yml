@@ -1,10 +1,26 @@
+x-app-env: &app-env
+  NODE_ENV: production
+  NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?NEXT_PUBLIC_APP_URL must be set}
+  API_PUBLIC_URL: ${API_PUBLIC_URL:?API_PUBLIC_URL must be set}
+  CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN must be set}
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must point to the internal PostgreSQL service}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+  QUEUE_URL: ${QUEUE_URL:-redis://redis:6379}
+  SESSION_SIGNING_SECRET: ${SESSION_SIGNING_SECRET:?SESSION_SIGNING_SECRET must be set to at least 32 characters}
+  ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:?ENCRYPTION_MASTER_KEY must be set to at least 32 characters}
+  AI_ROUTING_POLICY_JSON: ${AI_ROUTING_POLICY_JSON:?AI_ROUTING_POLICY_JSON must be set}
+  RATE_LIMIT_STORE: redis
+  STORAGE_DRIVER: ${STORAGE_DRIVER:-filesystem}
+  STORAGE_LOCAL_PATH: ${STORAGE_LOCAL_PATH:-/app/storage}
+  EMAIL_TRANSPORT: ${EMAIL_TRANSPORT:-console}
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-xlrrank}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-xlrrank}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: ${POSTGRES_DB:-xlrrank}
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -25,6 +41,21 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    build:
+      context: .
+      dockerfile: infra/Dockerfile
+      target: api
+    restart: "no"
+    command: ["node", "packages/database/dist/run-migrate.js"]
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
   api:
     build:
       context: .
@@ -32,18 +63,7 @@ services:
       target: api
     restart: unless-stopped
     environment:
-      NODE_ENV: production
-      DATABASE_URL: postgres://${POSTGRES_USER:-xlrrank}:${POSTGRES_PASSWORD:-xlrrank}@postgres:5432/${POSTGRES_DB:-xlrrank}
-      REDIS_URL: redis://redis:6379
-      QUEUE_URL: redis://redis:6379
-      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
-      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:4000}
-      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
-      STORAGE_DRIVER: ${STORAGE_DRIVER:-filesystem}
-      STORAGE_LOCAL_PATH: /app/storage
-      SESSION_SIGNING_SECRET: ${SESSION_SIGNING_SECRET:?SESSION_SIGNING_SECRET must be set to at least 32 characters}
-      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:?ENCRYPTION_MASTER_KEY must be set to at least 32 characters}
-      EMAIL_TRANSPORT: ${EMAIL_TRANSPORT:-console}
+      <<: *app-env
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-}
       SMTP_USER: ${SMTP_USER:-}
@@ -54,10 +74,22 @@ services:
     volumes:
       - storage_data:/app/storage
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4000/api/health/ready').then(async r=>{const j=await r.json().catch(()=>({}));process.exit(r.ok&&j.status==='ready'?0:1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
 
   worker:
     build:
@@ -66,18 +98,21 @@ services:
       target: worker
     restart: unless-stopped
     environment:
-      NODE_ENV: production
-      DATABASE_URL: postgres://${POSTGRES_USER:-xlrrank}:${POSTGRES_PASSWORD:-xlrrank}@postgres:5432/${POSTGRES_DB:-xlrrank}
-      REDIS_URL: redis://redis:6379
-      QUEUE_URL: redis://redis:6379
+      <<: *app-env
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
-      SESSION_SIGNING_SECRET: ${SESSION_SIGNING_SECRET:?SESSION_SIGNING_SECRET must be set to at least 32 characters}
-      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:?ENCRYPTION_MASTER_KEY must be set to at least 32 characters}
+    volumes:
+      - storage_data:/app/storage
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "apps/worker/dist/main.js", "--readiness-check"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
 
   web:
     build:
@@ -87,11 +122,25 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:?NEXT_PUBLIC_APP_URL must be set}
       API_PUBLIC_URL: ${API_INTERNAL_URL:-http://api:4000}
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
 
 volumes:
   postgres_data:

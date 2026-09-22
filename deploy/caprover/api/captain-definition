@@ -1,0 +1,5 @@
+{
+  "schemaVersion": 2,
+  "dockerfilePath": "./deploy/caprover/api/Dockerfile",
+  "containerHttpPort": 4000
+}
