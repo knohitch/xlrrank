@@ -87,19 +87,25 @@ PostgreSQL, Redis, and filesystem storage use persistent named volumes. Do not p
 
 Create three CapRover apps:
 
-- `xlrrank-web`, public, port `3000`
-- `xlrrank-api`, public, port `4000`
-- `xlrrank-worker`, private, no public HTTP port
+- `xlrrank-web`, public, container HTTP port `3000`
+- `xlrrank-api`, public, container HTTP port `4000`
+- `xlrrank-worker`, private / no public domain
 
 Use internal PostgreSQL with pgvector and Redis services in CapRover, or connect equivalent private managed services. Do not expose PostgreSQL or Redis publicly.
 
-Deployment definitions:
+Captain Definition Path to enter in CapRover for each app:
 
-- Web: `deploy/caprover/web/captain-definition`
-- API: `deploy/caprover/api/captain-definition`
-- Worker: `deploy/caprover/worker/captain-definition`
+- API:
+  - Captain Definition Path: `./captain-definition-api`
+  - Container HTTP port: `4000`
+- WEB:
+  - Captain Definition Path: `./captain-definition-web`
+  - Container HTTP port: `3000`
+- WORKER:
+  - Captain Definition Path: `./captain-definition-worker`
+  - Container HTTP port: private / no public domain
 
-Each definition points at the matching Dockerfile in the same directory. Deploy each app from the repository root so the Docker build context includes the monorepo.
+Each definition points at the matching Dockerfile under `./deploy/caprover/<service>/Dockerfile`. Deploy each app from the repository root so the Docker build context includes the monorepo.
 
 Configure the required boot environment variables on each app that runs server code. The web app needs `NODE_ENV`, `NEXT_PUBLIC_APP_URL`, and `API_PUBLIC_URL`; use the internal API URL for server-side proxying when available. The API and worker need the full required boot environment list above.
 
